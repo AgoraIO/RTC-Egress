@@ -1,0 +1,88 @@
+# Agora RTC Egress Configuration
+
+# Agora App ID and Token
+app_id: "YOUR_AGORA_APP_ID"
+channel_name: "egress_test"
+access_token: "YOUR_AGORA_CHANNEL_TOKEN"
+egress_uid: "42"
+
+egress_home: "/tmp/egress"
+
+# Server configuration
+health_port: 8182  # Health check endpoint
+api_port: 8080     # API server port
+canvas_template_port: 3000 # Web interface port
+
+# S3 Configuration (optional)
+s3:
+  bucket: "your-s3-bucket"
+  region: "us-west-2"
+  access_key: "YOUR_AWS_ACCESS_KEY"
+  secret_key: "YOUR_AWS_SECRET_KEY"
+  # endpoint: "https://s3.us-west-2.amazonaws.com"  # Optional custom endpoint
+
+# Snapshots settings
+snapshots:
+  output_dir: "./snapshots"  # Where to store snapshots (relative to the working directory for default)
+  width: 1280                # Video width
+  height: 720                # Video height
+  users: "9032"              # Recording mode: "individual" or "composite"
+  layout: "flat"             # Recording layout: "grid" or "flat" or "spotlight" or "freestyle" or "customized-layout"
+  interval_in_ms: 20000      # Save frame every 20 seconds
+  quality: 0                 # Picture quality(0 for AUTO, 1-100)
+
+# Recording settings
+recording:
+  enabled: false               # Enable recording functionality
+  output_dir: "./recordings"   # Where to store recordings
+  users: "9032"                # Recording mode: "individual" or "composite"
+  layout: "flat"               # Recording layout: "grid" or "flat" or "spotlight" or "freestyle" or "customized-layout"
+  format: "mp4"                # Output format: "mp4", "avi", "mkv"
+  max_duration_seconds: 86400  # Maximum recording duration (1 day)
+
+  # Video recording settings
+  video:
+    enabled: true         # Enable video recording
+    width: 1280          # Video width
+    height: 720          # Video height
+    fps: 30              # Video frame rate
+    bitrate: 2000000     # Video bitrate in bps (2 Mbps)
+    codec: "libx264"     # Video codec
+    buffer_size: 30      # Video frame buffer size
+
+  # Audio recording settings
+  audio:
+    enabled: true        # Enable audio recording
+    sample_rate: 48000   # Audio sample rate in Hz (also used for RTC playback)
+    channels: 2          # Number of audio channels (also used for RTC playback)
+    bitrate: 128000      # Audio bitrate in bps (128 kbps)
+    codec: "aac"         # Audio codec
+    buffer_size: 100     # Audio frame buffer size
+    # Note: RTC client will receive playback audio using the same sample_rate and channels
+    # For lower bandwidth, you can use: sample_rate: 16000, channels: 1
+
+# Logging configuration
+log:
+  level: "info"            # debug, info, warn, error, fatal, panic
+  file: "/var/log/egress/egress.log"
+  max_size: 100           # Max log file size in MB
+  max_backups: 3           # Maximum number of old log files to retain
+  max_age: 28              # Maximum number of days to retain old log files
+
+# Advanced settings
+advanced:
+  # Buffer settings for video processing
+  video_buffer_size: 10     # Number of frames to buffer
+  audio_buffer_size: 50     # Number of audio frames to buffer
+  
+  # Performance settings
+  gpu_acceleration: false   # Enable GPU acceleration if available
+  thread_pool_size: 4       # Number of worker threads for processing
+  
+  # Network settings
+  rtc_timeout: 10           # RTC connection timeout in seconds
+  api_timeout: 30           # API request timeout in seconds
+  
+  # Cleanup settings
+  cleanup_interval: 3600    # Cleanup interval in seconds
+  max_recording_age: 86400  # Maximum age of recordings in seconds (0 to disable)
