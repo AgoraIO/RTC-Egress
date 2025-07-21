@@ -1,0 +1,29 @@
+# Test configuration for multi-user composite recording
+app_id: "YOUR_AGORA_APP_ID"
+channel_name: "egress_test"
+access_token: "007eJxSYCi9z+16/f73KKtY9xMfGdv3/NU+drjYXocrd5nruq3x6Z8UGIzMTE1TjAwSLYzSkk3Mk1OTktPSLIxSTJNSTFNMjVPT1s0oy1jQw8DgahLOxMjAyMDCwMgA4jOBSWYwyQImuRlS04tSi4vjS1KLS5gYTIwAAQAA//+dbyhV"
+egress_uid: "42"
+
+# Test multi-user composite recording mode
+recording:
+  output_dir: "./recordings"
+  users: "664233, 516794156, 123456, 789012"  # Multiple users - should use composite mode with 2x2 grid
+  format: "mp4"
+  max_duration_seconds: 30  # Short test duration
+
+  video:
+    enabled: true
+    width: 1280
+    height: 720
+    fps: 30
+    bitrate: 2000000
+    codec: "libx264"
+    buffer_size: 30
+
+  audio:
+    enabled: true
+    sample_rate: 48000
+    channels: 2
+    bitrate: 128000
+    codec: "aac"
+    buffer_size: 100

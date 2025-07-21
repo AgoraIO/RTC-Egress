@@ -1,0 +1,17 @@
+FROM ubuntu:18.04
+
+WORKDIR /app
+
+ENV LD_LIBRARY_PATH /app/agora_sdk
+ENV TOKEN ''
+ENV CHANNEL_ID ''
+ENV REMOTE_USER_ID ''
+ENV RTMP_URL ''
+ENV LOCAL_AP ''
+ENV LOCAL_VOS ''
+
+COPY out/rtmp_cdn_demo .
+COPY agora_sdk agora_sdk
+COPY agora_sdk/*.so /usr/lib
+
+ENTRYPOINT /app/rtmp_cdn_demo --token ${TOKEN} --channelId ${CHANNEL_ID} --remoteUserId ${REMOTE_USER_ID} --rtmpUrl ${RTMP_URL} --localap ${LOCAL_AP} --localvos ${LOCAL_VOS}

@@ -1,0 +1,20 @@
+# Build directories
+bin/
+build/
+out/
+bin-*/
+
+.cache/
+
+agora_sdk/*
+
+debug/
+snapshots/*
+recordings/*
+
+crash_context_v1
+agora_cache.db
+agoradns.dat
+agorareport.dat
+
+io.agora.pipelines
