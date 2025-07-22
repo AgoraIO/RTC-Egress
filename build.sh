@@ -18,8 +18,8 @@ download_agora_sdk() {
     local url=$1
     if [ -z "$url" ]; then
         echo -e "${RED}Error: No Agora SDK URL provided.${NC}"
-        echo -e "Usage: $0 [all|cpp|go|deps|clean] [AGORA_SDK_URL]"
-        echo -e "Example: $0 all https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz"
+        echo -e "Usage: $0 [full|build|cpp|go|deps|clean] [AGORA_SDK_URL]"
+        echo -e "Example: $0 full https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz"
         exit 1
     fi
 

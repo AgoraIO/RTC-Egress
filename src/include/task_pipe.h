@@ -43,10 +43,6 @@ class TaskPipe {
         bool is_snapshot_active = false;
         bool is_recording_active = false;
         int64_t snapshot_interval = 0;
-        std::string recording_file_path;
-        int recording_width = 0;
-        int recording_height = 0;
-        int recording_fps = 30;
     };
 
     // Command handlers

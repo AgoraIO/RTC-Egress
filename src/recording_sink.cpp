@@ -601,25 +601,18 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
     if (!context->hasFirstVideoFrame) {
         context->firstVideoTimestamp = frame.timestamp;
         context->hasFirstVideoFrame = true;
-
-        // If this is the first frame of any type, use it as global sync reference
-        if (!context->hasFirstAudioFrame) {
-            context->firstAudioTimestamp = frame.timestamp;
-        }
-
-        std::cout << "[RecordingSink] First video frame timestamp: " << frame.timestamp
-                  << ", using as sync reference" << std::endl;
     }
 
-    // Calculate proper video timestamps using frame count for stable timestamps
-    context->videoFrame->pts = context->videoFrameCount;
-    context->videoFrame->duration = 1;  // 1 time base unit per frame (1/fps seconds)
+    // Calculate PTS based on the timestamp from the frame
+    context->videoFrame->pts = (frame.timestamp - context->firstVideoTimestamp) *
+                               context->videoCodecContext->time_base.den /
+                               (context->videoCodecContext->time_base.num * 1000);
 
     static int pts_log_count = 0;
     if (pts_log_count % 30 == 0) {
         std::cout << "[RecordingSink] Video PTS: " << context->videoFrame->pts
                   << ", timestamp: " << frame.timestamp
-                  << ", frame_count: " << context->videoFrameCount << std::endl;
+                  << ", first_timestamp: " << context->firstVideoTimestamp << std::endl;
     }
     pts_log_count++;
 
@@ -787,29 +780,24 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
     std::cout << "[RecordingSink] Ready to encode: " << context->audioSampleBuffer.size()
               << " samples (need " << required_samples << ")" << std::endl;
 
-    // Initialize first frame timestamp for synchronization BEFORE encoding
+    // Initialize first frame timestamp for synchronization
     if (!context->hasFirstAudioFrame) {
-        context->firstAudioTimestamp = context->lastBufferedTimestamp;
+        context->firstAudioTimestamp = frame.timestamp;
         context->hasFirstAudioFrame = true;
-
-        // If this is the first frame of any type, use it as global sync reference
-        if (!context->hasFirstVideoFrame) {
-            context->firstVideoTimestamp = context->lastBufferedTimestamp;
-        }
-
-        std::cout << "[RecordingSink] First audio frame timestamp: "
-                  << context->lastBufferedTimestamp << ", using as sync reference" << std::endl;
     }
 
-    // Calculate proper audio timestamps using frame count for stable timestamps
-    int64_t audioPTS = context->audioFrameCount * 1024;  // 1024 samples per frame at 48kHz
+    // Calculate PTS based on the timestamp from the frame
+    context->audioFrame->pts = (frame.timestamp - context->firstAudioTimestamp) *
+                               context->audioCodecContext->time_base.den /
+                               (context->audioCodecContext->time_base.num * 1000);
 
-    // Always log for debugging (we'll reduce this once it's working)
-    std::cout << "[RecordingSink] Audio PTS calculation: " << audioPTS
-              << ", buffered_ts: " << context->lastBufferedTimestamp
-              << ", frame_count: " << context->audioFrameCount
-              << ", video_first: " << context->firstVideoTimestamp
-              << ", audio_first: " << context->firstAudioTimestamp << std::endl;
+    static int audio_pts_log_count = 0;
+    if (audio_pts_log_count % 50 == 0) {
+        std::cout << "[RecordingSink] Audio PTS: " << context->audioFrame->pts
+                  << ", timestamp: " << frame.timestamp
+                  << ", first_timestamp: " << context->firstAudioTimestamp << std::endl;
+    }
+    audio_pts_log_count++;
 
     // Set up audio frame properties for output
     context->audioFrame->nb_samples = samples_per_frame;
@@ -818,16 +806,13 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
     av_channel_layout_copy(&context->audioFrame->ch_layout, &context->audioCodecContext->ch_layout);
 
     // Set PTS BEFORE encoding
+    int64_t audioPTS = (frame.timestamp - context->firstAudioTimestamp) *
+                       context->audioCodecContext->time_base.den /
+                       (context->audioCodecContext->time_base.num * 1000);
     context->audioFrame->pts = audioPTS;
 
     // Allocate buffer for audio frame
     if (av_frame_get_buffer(context->audioFrame, 0) < 0) {
-        std::cerr << "[RecordingSink] Failed to allocate audio frame buffer" << std::endl;
-        return false;
-    }
-
-    // Make frame writable
-    if (av_frame_make_writable(context->audioFrame) < 0) {
         std::cerr << "[RecordingSink] Failed to make audio frame writable" << std::endl;
         return false;
     }
@@ -998,18 +983,8 @@ bool RecordingSink::mixAudioFromMultipleUsers(const AudioFrame& frame, const std
                   << " users" << std::endl;
     }
 
-    // Check if it's time to create a mixed audio frame (reduce interval for better mixing)
-    uint64_t currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now().time_since_epoch())
-                               .count();
-
-    // Mix audio more frequently for better quality and ensure we don't miss users
-    if (currentTime - lastAudioMixTime_ >= 5) {  // Mix every 5ms for smoother audio
-        lastAudioMixTime_ = currentTime;
-        return createMixedAudioFrame();
-    }
-
-    return true;
+    // Trigger mixing immediately when new audio data is available
+    return createMixedAudioFrame();
 }
 
 bool RecordingSink::createMixedAudioFrame() {
@@ -1051,14 +1026,17 @@ bool RecordingSink::createMixedAudioFrame() {
         }
     }
 
-    // Normalize mixed audio to prevent clipping
-    float maxValue = 0.0f;
+    // Normalize mixed audio to prevent clipping using a running average
+    float current_max = 0.0f;
     for (float sample : mixedAudio) {
-        maxValue = std::max(maxValue, std::abs(sample));
+        current_max = std::max(current_max, std::abs(sample));
     }
 
-    if (maxValue > 1.0f) {
-        float scale = 0.95f / maxValue;  // Scale to 95% to prevent clipping
+    // Update running average of max audio level
+    maxAudioLevel_ = (maxAudioLevel_ * 0.95f) + (current_max * 0.05f);
+
+    if (maxAudioLevel_ > 1.0f) {
+        float scale = 1.0f / maxAudioLevel_;
         for (float& sample : mixedAudio) {
             sample *= scale;
         }
@@ -1070,23 +1048,10 @@ bool RecordingSink::createMixedAudioFrame() {
         mixedAudioInt16[i] = static_cast<int16_t>(mixedAudio[i] * 32767.0f);
     }
 
-    // Create AudioFrame from mixed data with proper sample count for AAC
+    // Create AudioFrame from mixed data
     AudioFrame mixedFrame;
-    // Ensure we have exactly 1024 samples for AAC encoding
-    int samplesPerChannel = 1024;  // AAC standard frame size
-    int totalSamples = samplesPerChannel * config_.audioChannels;
-
-    mixedFrame.data.resize(totalSamples * sizeof(int16_t));
-    if (mixedAudioInt16.size() >= totalSamples) {
-        std::memcpy(mixedFrame.data.data(), mixedAudioInt16.data(), totalSamples * sizeof(int16_t));
-    } else {
-        // Pad with zeros if not enough samples
-        std::memcpy(mixedFrame.data.data(), mixedAudioInt16.data(),
-                    mixedAudioInt16.size() * sizeof(int16_t));
-        std::memset(mixedFrame.data.data() + mixedAudioInt16.size() * sizeof(int16_t), 0,
-                    (totalSamples - mixedAudioInt16.size()) * sizeof(int16_t));
-    }
-
+    mixedFrame.data.resize(maxSamples * sizeof(int16_t));
+    std::memcpy(mixedFrame.data.data(), mixedAudioInt16.data(), maxSamples * sizeof(int16_t));
     mixedFrame.sampleRate = config_.audioSampleRate;
     mixedFrame.channels = config_.audioChannels;
     mixedFrame.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1094,20 +1059,8 @@ bool RecordingSink::createMixedAudioFrame() {
                                .count();
     mixedFrame.valid = true;
 
-    // Don't clear the entire buffer - instead, keep some samples for continuity
-    // Only clear if we have enough samples to ensure smooth mixing
-    if (audioMixingBuffer_.size() >= 2) {
-        // Keep the most recent samples and clear older ones
-        std::map<std::string, std::vector<float>> newBuffer;
-        for (const auto& pair : audioMixingBuffer_) {
-            if (pair.second.size() > totalSamples) {
-                // Keep the remaining samples
-                std::vector<float> remaining(pair.second.begin() + totalSamples, pair.second.end());
-                newBuffer[pair.first] = remaining;
-            }
-        }
-        audioMixingBuffer_ = newBuffer;
-    }
+    // Clear the buffer after mixing
+    audioMixingBuffer_.clear();
 
     // Encode the mixed audio frame
     return encodeIndividualAudioFrame(mixedFrame, compositeContext_.get(), "composite");
@@ -1364,9 +1317,6 @@ bool RecordingSink::createCompositeFrame() {
     std::lock_guard<std::mutex> bufferLock(compositeBufferMutex_);
     std::lock_guard<std::mutex> contextLock(userContextsMutex_);
 
-    // Track processing time for performance monitoring
-    auto processingStart = std::chrono::steady_clock::now();
-
     // Initialize composite context if needed
     if (!compositeContext_) {
         if (!initializeEncoder("")) {
@@ -1379,62 +1329,34 @@ bool RecordingSink::createCompositeFrame() {
         return false;
     }
 
-    // Determine how many users we should composite based on configuration
+    // Determine the users to composite
     std::vector<std::string> usersToComposite;
-    if (config_.targetUsers.empty()) {
-        // Dynamic mode - use all available users
-        for (const auto& pair : compositeFrameBuffer_) {
-            usersToComposite.push_back(pair.first);
-        }
-    } else {
-        // Use only target users that have frames available
-        for (const std::string& targetUser : config_.targetUsers) {
-            if (compositeFrameBuffer_.find(targetUser) != compositeFrameBuffer_.end()) {
-                usersToComposite.push_back(targetUser);
-            }
-        }
+    for (const auto& pair : compositeFrameBuffer_) {
+        usersToComposite.push_back(pair.first);
     }
-
-    // Debug logging to understand frame buffer status
-    static int composite_log_count = 0;
-    if (composite_log_count % 30 == 0) {
-        std::cout << "[RecordingSink] Composite buffer status: " << compositeFrameBuffer_.size()
-                  << " users total, " << usersToComposite.size() << " users to composite: ";
-        for (const auto& user : usersToComposite) {
-            std::cout << user << " ";
-        }
-        std::cout << std::endl;
-    }
-    composite_log_count++;
 
     if (usersToComposite.empty()) {
-        return true;  // No frames to composite yet
+        return true;  // No frames to composite
     }
 
-    // Calculate layout based on number of users using optimal layout system
-    int numUsers = usersToComposite.size();
+    // Check if the layout needs to be updated
+    if (usersToComposite.size() != lastLayoutUserCount_) {
+        lastLayoutUserCount_ = usersToComposite.size();
+        auto layout = calculateOptimalLayout(lastLayoutUserCount_);
+        lastCols_ = layout.first;
+        lastRows_ = layout.second;
+    }
+
     int canvasWidth = context->videoCodecContext->width;
     int canvasHeight = context->videoCodecContext->height;
-
-    // Get optimal layout configuration
-    auto layout = calculateOptimalLayout(numUsers);
-    int cols = layout.first;
-    int rows = layout.second;
-
-    // Log the layout being used
-    std::cout << "[RecordingSink] Using " << cols << "x" << rows << " grid layout for " << numUsers
-              << " users" << std::endl;
-
-    int cellWidth = canvasWidth / cols;
-    int cellHeight = canvasHeight / rows;
+    int cellWidth = canvasWidth / lastCols_;
+    int cellHeight = canvasHeight / lastRows_;
 
     // Clear the composite frame to black
     if (av_frame_make_writable(context->videoFrame) < 0) {
         std::cerr << "[RecordingSink] Failed to make composite frame writable" << std::endl;
         return false;
     }
-
-    // Fill with black
     memset(context->videoFrame->data[0], 0, context->videoFrame->linesize[0] * canvasHeight);
     memset(context->videoFrame->data[1], 128, context->videoFrame->linesize[1] * canvasHeight / 2);
     memset(context->videoFrame->data[2], 128, context->videoFrame->linesize[2] * canvasHeight / 2);
@@ -1444,44 +1366,18 @@ bool RecordingSink::createCompositeFrame() {
         const std::string& userId = usersToComposite[i];
         const VideoFrame& userFrame = compositeFrameBuffer_[userId];
 
-        int col = i % cols;
-        int row = i / cols;
+        int col = i % lastCols_;
+        int row = i / lastCols_;
         int x = col * cellWidth;
         int y = row * cellHeight;
 
         // Get or create cached scaling context for this user
-        std::string contextKey =
-            userId + "_" + std::to_string(cellWidth) + "x" + std::to_string(cellHeight);
-        SwsContext* userSwsContext = userScalingContexts_[contextKey];
-
+        SwsContext* userSwsContext = userScalingContexts_[userId];
         if (!userSwsContext) {
             userSwsContext = sws_getContext(userFrame.width, userFrame.height, AV_PIX_FMT_YUV420P,
                                             cellWidth, cellHeight, AV_PIX_FMT_YUV420P, SWS_BILINEAR,
                                             nullptr, nullptr, nullptr);
-            if (!userSwsContext) {
-                std::cerr << "[RecordingSink] Failed to create scaling context for user " << userId
-                          << std::endl;
-                continue;
-            }
-            userScalingContexts_[contextKey] = userSwsContext;
-            std::cout << "[RecordingSink] Cached new scaling context for user " << userId << " ("
-                      << cellWidth << "x" << cellHeight << ")" << std::endl;
-        }
-
-        // Get or create pre-allocated frame for this user
-        AVFrame* scaledFrame = scaledFramePool_[contextKey];
-        if (!scaledFrame) {
-            scaledFrame = av_frame_alloc();
-            scaledFrame->format = AV_PIX_FMT_YUV420P;
-            scaledFrame->width = cellWidth;
-            scaledFrame->height = cellHeight;
-            if (av_frame_get_buffer(scaledFrame, 32) < 0) {
-                av_frame_free(&scaledFrame);
-                continue;
-            }
-            scaledFramePool_[contextKey] = scaledFrame;
-            std::cout << "[RecordingSink] Pre-allocated frame for user " << userId << " ("
-                      << cellWidth << "x" << cellHeight << ")" << std::endl;
+            userScalingContexts_[userId] = userSwsContext;
         }
 
         // Scale user frame to cell size
@@ -1489,10 +1385,17 @@ bool RecordingSink::createCompositeFrame() {
                                      userFrame.vData.data()};
         int srcLinesize[3] = {userFrame.yStride, userFrame.uStride, userFrame.vStride};
 
+        // Create a temporary AVFrame for the scaled output
+        AVFrame* scaledFrame = av_frame_alloc();
+        scaledFrame->format = AV_PIX_FMT_YUV420P;
+        scaledFrame->width = cellWidth;
+        scaledFrame->height = cellHeight;
+        av_frame_get_buffer(scaledFrame, 32);
+
         sws_scale(userSwsContext, srcData, srcLinesize, 0, userFrame.height, scaledFrame->data,
                   scaledFrame->linesize);
 
-        // Copy scaled frame to composite canvas at position (x, y)
+        // Copy scaled frame to composite canvas
         for (int plane = 0; plane < 3; ++plane) {
             int planeHeight = (plane == 0) ? cellHeight : cellHeight / 2;
             int planeWidth = (plane == 0) ? cellWidth : cellWidth / 2;
@@ -1505,8 +1408,7 @@ bool RecordingSink::createCompositeFrame() {
                        scaledFrame->data[plane] + py * scaledFrame->linesize[plane], planeWidth);
             }
         }
-
-        // Note: No cleanup here - frames and contexts are cached for reuse
+        av_frame_free(&scaledFrame);
     }
 
     // Set timestamp from the most recent frame
@@ -1519,18 +1421,12 @@ bool RecordingSink::createCompositeFrame() {
     if (!context->hasFirstVideoFrame) {
         context->firstVideoTimestamp = latestTimestamp;
         context->hasFirstVideoFrame = true;
-
-        if (!context->hasFirstAudioFrame) {
-            context->firstAudioTimestamp = latestTimestamp;
-        }
-
-        std::cout << "[RecordingSink] First composite frame timestamp: " << latestTimestamp
-                  << std::endl;
     }
 
-    // Calculate PTS using frame count for stable timestamps
-    context->videoFrame->pts = context->videoFrameCount;
-    context->videoFrame->duration = 1;
+    // Calculate PTS based on the timestamp from the frame
+    context->videoFrame->pts = (latestTimestamp - context->firstVideoTimestamp) *
+                               context->videoCodecContext->time_base.den /
+                               (context->videoCodecContext->time_base.num * 1000);
 
     context->videoFrameCount++;
 
@@ -1560,8 +1456,6 @@ bool RecordingSink::createCompositeFrame() {
         av_packet_rescale_ts(packet, context->videoCodecContext->time_base,
                              context->videoStream->time_base);
 
-        // Don't override the packet PTS/DTS - they're already set correctly by the rescaling
-
         if (!writePacket(packet, context->formatContext, context->videoStream)) {
             av_packet_free(&packet);
             return false;
@@ -1569,65 +1463,6 @@ bool RecordingSink::createCompositeFrame() {
     }
 
     av_packet_free(&packet);
-
-    // End performance measurement and adaptive FPS control
-    auto processingEnd = std::chrono::steady_clock::now();
-    uint64_t processingTime =
-        std::chrono::duration_cast<std::chrono::milliseconds>(processingEnd - processingStart)
-            .count();
-
-    totalFrameProcessingTime_ += processingTime;
-    frameProcessingCount_++;
-
-    // Check performance every 5 seconds
-    uint64_t currentTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now().time_since_epoch())
-                               .count();
-
-    if (currentTime - lastPerformanceCheck_ >= 5000) {  // 5 seconds
-        if (frameProcessingCount_ > 0) {
-            uint64_t avgProcessingTime = totalFrameProcessingTime_ / frameProcessingCount_;
-            uint64_t actualFPS =
-                frameProcessingCount_ * 1000 / (currentTime - lastPerformanceCheck_);
-            uint64_t targetFPS = 1000 / currentCompositeInterval_;
-
-            std::cout << "[Performance] Avg processing time: " << avgProcessingTime << "ms, "
-                      << "Actual FPS: " << actualFPS << ", Target FPS: " << targetFPS
-                      << ", Dropped frames: " << droppedFrames_ << std::endl;
-
-            // Adaptive FPS control based on performance
-            if (avgProcessingTime > currentCompositeInterval_) {
-                // Processing is taking longer than frame interval - need to reduce FPS
-                uint64_t newInterval =
-                    std::min(currentCompositeInterval_ * 2, MAX_COMPOSITE_INTERVAL_MS);
-                if (newInterval != currentCompositeInterval_) {
-                    currentCompositeInterval_ = newInterval;
-                    std::cout
-                        << "[Performance] WARNING: High processing time detected. Reducing FPS to "
-                        << (1000 / currentCompositeInterval_)
-                        << " FPS (interval: " << currentCompositeInterval_ << "ms)" << std::endl;
-                }
-            } else if (avgProcessingTime < currentCompositeInterval_ / 3 && droppedFrames_ == 0) {
-                // Processing is fast and we're not dropping frames - can try to increase FPS
-                uint64_t newInterval =
-                    std::max(currentCompositeInterval_ / 2, MIN_COMPOSITE_INTERVAL_MS);
-                if (newInterval != currentCompositeInterval_) {
-                    currentCompositeInterval_ = newInterval;
-                    std::cout << "[Performance] Good performance detected. Increasing FPS to "
-                              << (1000 / currentCompositeInterval_)
-                              << " FPS (interval: " << currentCompositeInterval_ << "ms)"
-                              << std::endl;
-                }
-            }
-        }
-
-        // Reset counters
-        totalFrameProcessingTime_ = 0;
-        frameProcessingCount_ = 0;
-        droppedFrames_ = 0;
-        lastPerformanceCheck_ = currentTime;
-    }
-
     return true;
 }
 
