@@ -299,24 +299,12 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
             return;
         }
 
-        // Configure recording
-        state.recording_file_path = msg.recording_file;
-        state.recording_width = msg.recording_width;
-        state.recording_height = msg.recording_height;
-        state.recording_fps = msg.recording_fps > 0 ? msg.recording_fps : 30;
-
-        // Start recording with proper config
+        // Start recording with pre-configured settings
         if (recording_sink_) {
-            agora::rtc::RecordingSink::Config config = recording_config_;
-            config.outputDir = state.recording_file_path;
-            config.videoWidth = state.recording_width;
-            config.videoHeight = state.recording_height;
-            config.videoFps = state.recording_fps;
-
-            if (recording_sink_->initialize(config) && recording_sink_->start()) {
+            if (recording_sink_->initialize(recording_config_) && recording_sink_->start()) {
                 state.is_recording_active = true;
                 logInfo("Started recording for channel: " + msg.channel + " to " +
-                            state.recording_file_path,
+                            recording_config_.outputDir,
                         instance_id_);
             } else {
                 logError("Failed to start recording for channel: " + msg.channel, instance_id_);
@@ -343,9 +331,7 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
         }
 
         state.is_recording_active = false;
-        logInfo(
-            "Stopped recording for channel: " + msg.channel + " at " + state.recording_file_path,
-            instance_id_);
+        logInfo("Stopped recording for channel: " + msg.channel, instance_id_);
 
         // Release the connection if no other tasks are using it
         releaseConnection(msg.channel);
@@ -374,8 +360,7 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
         if (it != channel_states_.end()) {
             const auto& state = it->second;
             logInfo("Recording Status - Channel: " + msg.channel +
-                        ", Active: " + (state.is_recording_active ? "yes" : "no") + ", File: " +
-                        (state.is_recording_active ? state.recording_file_path : "none"),
+                        ", Active: " + (state.is_recording_active ? "yes" : "no"),
                     instance_id_);
         } else {
             logInfo("No recording active for channel: " + msg.channel, instance_id_);
@@ -593,20 +578,6 @@ void TaskPipe::thread_func() {
                         msg.channel = json.value("channel", "");
                         msg.access_token = json.value("access_token", "");
                         msg.interval_in_ms = json.value("interval_in_ms", 0);
-
-                        // Parse recording configuration if present
-                        if (json.contains("recording_file")) {
-                            msg.recording_file = json.value("recording_file", "");
-                        }
-                        if (json.contains("recording_width")) {
-                            msg.recording_width = json.value("recording_width", 0);
-                        }
-                        if (json.contains("recording_height")) {
-                            msg.recording_height = json.value("recording_height", 0);
-                        }
-                        if (json.contains("recording_fps")) {
-                            msg.recording_fps = json.value("recording_fps", 30);
-                        }
 
                         // Handle the command
                         auto it = command_handlers_.find(msg.cmd);

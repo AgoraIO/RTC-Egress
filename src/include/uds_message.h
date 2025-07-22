@@ -15,12 +15,6 @@ struct UDSMessage {
     std::string access_token;        // Access token for authentication
     int workerUid = 0;               // Worker UID
     int interval_in_ms = 0;          // Interval in milliseconds
-
-    // Additional fields for recording functionality
-    std::string recording_file;  // Output file path for recording
-    int recording_width = 0;     // Width for recording
-    int recording_height = 0;    // Height for recording
-    int recording_fps = 30;      // Frames per second for recording
 };
 
 inline void to_json(nlohmann::json& j, const UDSMessage& m) {
@@ -32,11 +26,7 @@ inline void to_json(nlohmann::json& j, const UDSMessage& m) {
                        {"channel", m.channel},
                        {"access_token", m.access_token},
                        {"workerUid", m.workerUid},
-                       {"interval_in_ms", m.interval_in_ms},
-                       {"recording_file", m.recording_file},
-                       {"recording_width", m.recording_width},
-                       {"recording_height", m.recording_height},
-                       {"recording_fps", m.recording_fps}};
+                       {"interval_in_ms", m.interval_in_ms}};
 }
 
 inline void from_json(const nlohmann::json& j, UDSMessage& m) {
@@ -52,8 +42,4 @@ inline void from_json(const nlohmann::json& j, UDSMessage& m) {
     j.at("access_token").get_to(m.access_token);
     if (j.contains("workerUid")) j.at("workerUid").get_to(m.workerUid);
     if (j.contains("interval_in_ms")) j.at("interval_in_ms").get_to(m.interval_in_ms);
-    if (j.contains("recording_file")) j.at("recording_file").get_to(m.recording_file);
-    if (j.contains("recording_width")) j.at("recording_width").get_to(m.recording_width);
-    if (j.contains("recording_height")) j.at("recording_height").get_to(m.recording_height);
-    if (j.contains("recording_fps")) j.at("recording_fps").get_to(m.recording_fps);
 }

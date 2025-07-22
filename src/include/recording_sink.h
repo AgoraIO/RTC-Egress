@@ -230,6 +230,14 @@ class RecordingSink {
     uint64_t lastPerformanceCheck_ = 0;
     uint64_t droppedFrames_ = 0;
 
+    // Audio mixing
+    float maxAudioLevel_ = 0.0f;
+
+    // Layout caching
+    size_t lastLayoutUserCount_ = 0;
+    int lastCols_ = 0;
+    int lastRows_ = 0;
+
     // Timing
     std::chrono::steady_clock::time_point startTime_;
 };
