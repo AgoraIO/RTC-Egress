@@ -3,11 +3,14 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
-#include <opencv2/opencv.hpp>
 #include <queue>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "snapshot_encoder.h"
+#include "video_compositor.h"
+#include "video_frame.h"
 
 namespace agora {
 namespace rtc {
@@ -15,12 +18,15 @@ namespace rtc {
 class SnapshotSink {
    public:
     struct Config {
-        std::string outputDir = "./snapshots";  // Directory to save snapshots
-        int width = 1280;                       // Frame width
-        int height = 720;                       // Frame height
-        int64_t intervalInMs = 20000;           // Interval between snapshots in milliseconds
-        int quality = 90;                       // JPEG quality (1-100)
-        std::vector<std::string> targetUsers;   // Empty means capture all users
+        std::string outputDir = "./snapshots";     // Directory to save snapshots
+        int width = 1280;                          // Frame width
+        int height = 720;                          // Frame height
+        int64_t intervalInMs = 20000;              // Interval between snapshots in milliseconds
+        int quality = 90;                          // JPEG quality (1-100)
+        std::vector<std::string> targetUsers;      // Empty means capture all users
+        bool enableComposition = true;             // Enable multi-user composition
+        VideoCompositor::Config compositorConfig;  // Video compositor configuration
+        SnapshotEncoder::Config encoderConfig;     // Snapshot encoder configuration
     };
 
     SnapshotSink();
@@ -55,13 +61,9 @@ class SnapshotSink {
     // Worker thread function
     void captureThread();
 
-    // Save a single frame
-    bool saveFrame(const cv::Mat& frame, const std::string& filename);
-
-    // Convert YUV to BGR
-    cv::Mat yuvToBgr(const uint8_t* yBuffer, const uint8_t* uBuffer, const uint8_t* vBuffer,
-                     int32_t yStride, int32_t uStride, int32_t vStride, uint32_t width,
-                     uint32_t height);
+    // Save a single frame using new encoder
+    bool saveFrame(const VideoFrame& frame, const std::string& filename);
+    bool saveFrame(const AVFrame* frame, const std::string& filename);
 
    private:
     Config config_;
@@ -71,10 +73,10 @@ class SnapshotSink {
     std::atomic<bool> stopRequested_{false};
     std::unique_ptr<std::thread> captureThread_;
 
-    // Frame buffer
+    // Frame buffer using new VideoFrame
     struct FrameData {
         uint64_t timestamp = 0;
-        cv::Mat frame;
+        VideoFrame frame;
         bool valid = false;
         std::string userId;  // User ID for organizing snapshots
     };
@@ -85,6 +87,10 @@ class SnapshotSink {
     int64_t startTimeMs_ = 0;
     int fileCounter_ = 0;
     int64_t lastSnapshotTimeMs_ = 0;
+
+    // Modular components
+    std::unique_ptr<VideoCompositor> compositor_;
+    std::unique_ptr<SnapshotEncoder> encoder_;
 };
 
 }  // namespace rtc

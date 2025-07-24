@@ -27,10 +27,15 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <opencv2/opencv.hpp>
+// Modular video processing components
 #include <sstream>
 #include <string>
 #include <thread>
+
+#include "layout_detector.h"
+#include "snapshot_encoder.h"
+#include "video_compositor.h"
+#include "video_frame.h"
 
 namespace agora {
 namespace rtc {
@@ -216,7 +221,7 @@ class RtcClient {
                             }
                         }
 
-                        if (frameCounts[userId] % 50 == 0) {
+                        if (frameCounts[userId] % 200 == 0) {
                             printf(
                                 "[RtcClient] User %s audio frame %d: %d samples, hasData=%s, "
                                 "first_sample=%d\n",
@@ -234,9 +239,10 @@ class RtcClient {
                     }
 
                     // Always forward the audio frame - let the encoder handle format conversion
-                    printf("[RtcClient] Forwarding audio frame: %dHz, %dch, %d samples, user: %s\n",
-                           audioFrame.samplesPerSec, audioFrame.channels,
-                           audioFrame.samplesPerChannel, userId.c_str());
+                    // printf("[RtcClient] Forwarding audio frame: %dHz, %dch, %d samples, user:
+                    // %s\n",
+                    //        audioFrame.samplesPerSec, audioFrame.channels,
+                    //        audioFrame.samplesPerChannel, userId.c_str());
                     callback_(pcmFrame, userId);
                 }
             }
@@ -296,13 +302,6 @@ class RtcClient {
     std::atomic<bool> connected_{false};
     FrameCallback frameCallback_;
     AudioFrameCallback audioFrameCallback_;
-
-    // Frame saving members
-    std::atomic<bool> saveFrames_{false};
-    std::string saveDirectory_;
-    int saveInterval_{20};  // in seconds
-    std::chrono::time_point<std::chrono::steady_clock> lastSaveTime_;
-    std::mutex frameSaveMutex_;
 
     // Agora SDK objects
     std::unique_ptr<agora::base::IAgoraService, AgoraServiceDeleter> service_;
