@@ -107,9 +107,9 @@ open http://localhost:3000
 
 ## Development Notes
 
-- The C++ worker supports two modes: standalone (auto-connect) and managed (socket-based IPC)
-- Video frames are captured per-user and saved to separate directories
+- The C++ worker supports two modes: standalone (auto-connect) and managed (socket-based IPC). For the standalone mode, it will connect to Agora RTC channels and capture video frames, do snapshot and record at same time, this is for testing and need to handle 'Ctrl + C' to stop the worker, for the managed mode, dont need to handle 'Ctrl + C' to stop the worker, it will be stopped by the manager
 - The system uses Unix domain sockets for IPC between Go manager and C++ workers
+- Video frames are captured per-user and may be composited before saving to disk
 - S3 uploads are handled asynchronously by a file watcher
 - All executables are built to the `bin/` directory
 - Agora SDK libraries are automatically copied to `bin/` during build

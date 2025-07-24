@@ -15,7 +15,6 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
 # Find required packages
 find_package(PkgConfig REQUIRED)
-find_package(OpenCV REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 # FFmpeg packages
@@ -65,14 +64,19 @@ add_library(snapshot_sink SHARED
     src/rtc_client.cpp
     src/snapshot_sink.cpp
     src/recording_sink.cpp
+    src/video_frame.cpp
+    src/video_compositor.cpp
+    src/snapshot_encoder.cpp
+    src/layout_detector.cpp
     src/common/sample_common.cpp
+    src/common/ffmpeg_utils.cpp
+    src/common/file_utils.cpp
 )
 
 target_include_directories(snapshot_sink PUBLIC
     ${CMAKE_SOURCE_DIR}/src/include
     ${CMAKE_SOURCE_DIR}/src/common
     ${AGORA_INCLUDE_DIR}
-    ${OpenCV_INCLUDE_DIRS}
 )
 
 target_link_libraries(snapshot_sink PUBLIC
@@ -80,7 +84,6 @@ target_link_libraries(snapshot_sink PUBLIC
     ${LIB_AOSL}
     ${LIB_AGORA_FDKAAC}
     PkgConfig::FFMPEG
-    ${OpenCV_LIBS}
     yaml-cpp
     pthread
     dl

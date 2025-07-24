@@ -13,6 +13,9 @@
 #include <thread>
 #include <vector>
 
+#include "video_compositor.h"
+#include "video_frame.h"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -32,19 +35,7 @@ struct AudioFrame {
     std::string userId;
 };
 
-struct VideoFrame {
-    std::vector<uint8_t> yData;
-    std::vector<uint8_t> uData;
-    std::vector<uint8_t> vData;
-    int yStride;
-    int uStride;
-    int vStride;
-    uint32_t width;
-    uint32_t height;
-    uint64_t timestamp;
-    bool valid = false;
-    std::string userId;
-};
+// Using modular VideoFrame from video_frame.h
 
 class RecordingSink {
    public:
@@ -93,7 +84,7 @@ class RecordingSink {
     bool start();
     void stop();
     bool isRecording() const {
-        return isRecording_.load();
+        return isRecording_.load() && !stopRequested_.load();
     }
 
     // Video frame input
@@ -115,8 +106,8 @@ class RecordingSink {
 
     // Compositing methods
     bool updateCompositeFrame(const VideoFrame& frame, const std::string& userId);
-    bool createCompositeFrame();
     void cleanupCompositeResources();
+    void onComposedFrame(const AVFrame* composedFrame);
 
     // Audio mixing methods
     bool mixAudioFromMultipleUsers(const AudioFrame& frame, const std::string& userId);
@@ -150,7 +141,8 @@ class RecordingSink {
 
         // Audio sample buffering for AAC frame size requirements
         std::vector<int16_t> audioSampleBuffer;  // Buffer to accumulate audio samples
-        uint64_t lastBufferedTimestamp = 0;      // Track timestamp for buffered samples
+        uint64_t lastBufferedTimestamp =
+            0;  // Track timestamp for buffered samples and PTS monotonic progression
     };
 
     // Thread functions
@@ -161,6 +153,7 @@ class RecordingSink {
     // FFmpeg setup and cleanup
     bool initializeEncoder(const std::string& userId = "");
     void cleanupEncoder(const std::string& userId = "");
+    void flushAllEncoders();  // Flush encoders to prevent blocking during shutdown
     bool setupVideoEncoder(AVCodecContext** videoCodecContext, const std::string& userId = "");
     bool setupAudioEncoder(AVCodecContext** audioCodecContext, const std::string& userId = "");
     bool setupOutputFormat(AVFormatContext** formatContext, const std::string& filename);
@@ -201,6 +194,7 @@ class RecordingSink {
 
     // For composite mode
     std::unique_ptr<UserContext> compositeContext_;
+    std::unique_ptr<VideoCompositor> videoCompositor_;
 
     // Composite frame buffer - stores latest frame from each user with timestamps
     std::map<std::string, VideoFrame> compositeFrameBuffer_;

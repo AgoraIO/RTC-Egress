@@ -5,7 +5,7 @@
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
-#include <opencv2/imgcodecs.hpp>
+#include <iostream>
 #include <sstream>
 #include <thread>
 
@@ -37,6 +37,24 @@ bool SnapshotSink::initialize(const Config& config) {
     if (!fs::exists(config_.outputDir)) {
         if (!fs::create_directories(config_.outputDir)) {
             std::cerr << "Failed to create output directory: " << config_.outputDir << std::endl;
+            return false;
+        }
+    }
+
+    // Initialize modular components
+    encoder_ = std::make_unique<SnapshotEncoder>();
+    config_.encoderConfig.jpegQuality = config_.quality;
+    if (!encoder_->initialize(config_.encoderConfig)) {
+        std::cerr << "Failed to initialize SnapshotEncoder" << std::endl;
+        return false;
+    }
+
+    if (config_.enableComposition) {
+        compositor_ = std::make_unique<VideoCompositor>();
+        config_.compositorConfig.outputWidth = config_.width;
+        config_.compositorConfig.outputHeight = config_.height;
+        if (!compositor_->initialize(config_.compositorConfig)) {
+            std::cerr << "Failed to initialize VideoCompositor" << std::endl;
             return false;
         }
     }
@@ -130,36 +148,38 @@ void SnapshotSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
     }
 
     try {
-        // Convert YUV to BGR with proper error handling
-        cv::Mat bgrFrame =
-            yuvToBgr(yBuffer, uBuffer, vBuffer, yStride, uStride, vStride, width, height);
-
-        if (bgrFrame.empty()) {
-            std::cerr << "[SnapshotSink] Failed to convert YUV frame to BGR" << std::endl;
+        // Create VideoFrame from YUV data
+        VideoFrame videoFrame;
+        if (!videoFrame.initializeFromYUV(yBuffer, uBuffer, vBuffer, yStride, uStride, vStride,
+                                          width, height, timestamp, userId)) {
+            std::cerr << "[SnapshotSink] Failed to create VideoFrame from YUV data" << std::endl;
             return;
         }
 
-        // Update current frame - use clone() to ensure deep copy and avoid memory sharing
-        currentFrame_.frame = bgrFrame.clone();
-        currentFrame_.timestamp = timestamp;
-        currentFrame_.valid = true;
-        currentFrame_.userId = userId;
-
-        lock.unlock();
-
-        if (!userId.empty()) {
-            std::cout << "[SnapshotSink] Received video frame from user " << userId << ": " << width
-                      << "x" << height << std::endl;
+        // Handle frame based on configuration
+        if (config_.enableComposition && compositor_) {
+            // Add frame to compositor for multi-user composition
+            compositor_->addUserFrame(videoFrame, userId);
         } else {
-            std::cout << "[SnapshotSink] Received video frame: " << width << "x" << height
-                      << std::endl;
+            // Direct single-frame processing
+            currentFrame_.frame = std::move(videoFrame);
+            currentFrame_.timestamp = timestamp;
+            currentFrame_.valid = true;
+            currentFrame_.userId = userId;
+
+            lock.unlock();
+
+            if (!userId.empty()) {
+                std::cout << "[SnapshotSink] Received video frame from user " << userId << ": "
+                          << width << "x" << height << std::endl;
+            } else {
+                std::cout << "[SnapshotSink] Received video frame: " << width << "x" << height
+                          << std::endl;
+            }
+
+            cv_.notify_one();
         }
 
-        cv_.notify_one();
-
-    } catch (const cv::Exception& e) {
-        std::cerr << "[SnapshotSink] OpenCV exception: " << e.what() << std::endl;
-        return;
     } catch (const std::exception& e) {
         std::cerr << "[SnapshotSink] Exception processing video frame: " << e.what() << std::endl;
         return;
@@ -224,102 +244,28 @@ void SnapshotSink::captureThread() {
     std::cout << "[SnapshotSink] Capture thread stopped" << std::endl;
 }
 
-bool SnapshotSink::saveFrame(const cv::Mat& frame, const std::string& filename) {
-    if (frame.empty()) {
+bool SnapshotSink::saveFrame(const VideoFrame& frame, const std::string& filename) {
+    if (!frame.valid() || !encoder_) {
         return false;
     }
 
-    std::vector<int> params;
-    params.push_back(cv::IMWRITE_JPEG_QUALITY);
-    params.push_back(config_.quality);
+    // Convert VideoFrame to AVFrame and use that for encoding
+    AVFrame* avFrame = frame.toAVFrame();
+    if (!avFrame) {
+        return false;
+    }
 
-    return cv::imwrite(filename, frame, params);
+    bool result = encoder_->encodeFrameToJPEG(avFrame, filename);
+    av_frame_free(&avFrame);
+    return result;
 }
 
-cv::Mat SnapshotSink::yuvToBgr(const uint8_t* yBuffer, const uint8_t* uBuffer,
-                               const uint8_t* vBuffer, int32_t yStride, int32_t uStride,
-                               int32_t vStride, uint32_t width, uint32_t height) {
-    try {
-        // Validate input parameters
-        if (!yBuffer || !uBuffer || !vBuffer) {
-            std::cerr << "[SnapshotSink] Invalid buffer pointers in yuvToBgr" << std::endl;
-            return cv::Mat();
-        }
-
-        if (width <= 0 || height <= 0) {
-            std::cerr << "[SnapshotSink] Invalid dimensions in yuvToBgr" << std::endl;
-            return cv::Mat();
-        }
-
-        // Sanity check frame size to prevent excessive memory allocation
-        const uint32_t MAX_DIMENSION = 4096;  // 4K max
-        if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-            std::cerr << "[SnapshotSink] Frame dimensions too large: " << width << "x" << height
-                      << std::endl;
-            return cv::Mat();
-        }
-
-        // Create YUV image with proper size validation
-        int yuvHeight = height + height / 2;
-        cv::Mat yuvImg(yuvHeight, width, CV_8UC1);
-
-        if (yuvImg.empty()) {
-            std::cerr << "[SnapshotSink] Failed to allocate YUV image" << std::endl;
-            return cv::Mat();
-        }
-
-        // Copy Y plane with bounds checking
-        for (uint32_t i = 0; i < height; ++i) {
-            if (i * yStride + width <= static_cast<uint32_t>(yStride * height)) {
-                std::memcpy(yuvImg.ptr(i), yBuffer + i * yStride, width);
-            } else {
-                std::cerr << "[SnapshotSink] Y plane copy bounds error at row " << i << std::endl;
-                return cv::Mat();
-            }
-        }
-
-        // Copy U and V planes (interleaved) with bounds checking
-        uint8_t* uvPlane = yuvImg.ptr(height);
-        uint32_t uvHeight = height / 2;
-        uint32_t uvWidth = width / 2;
-
-        for (uint32_t i = 0; i < uvHeight; ++i) {
-            for (uint32_t j = 0; j < uvWidth; ++j) {
-                uint32_t srcUOffset = i * uStride + j;
-                uint32_t srcVOffset = i * vStride + j;
-                uint32_t dstOffset = i * width + j * 2;
-
-                if (dstOffset + 1 < static_cast<uint32_t>(uvHeight * width)) {
-                    uvPlane[dstOffset] = uBuffer[srcUOffset];
-                    uvPlane[dstOffset + 1] = vBuffer[srcVOffset];
-                } else {
-                    std::cerr << "[SnapshotSink] UV plane copy bounds error" << std::endl;
-                    return cv::Mat();
-                }
-            }
-        }
-
-        // Convert YUV to BGR
-        cv::Mat bgrImg;
-        cv::cvtColor(yuvImg, bgrImg, cv::COLOR_YUV2BGR_NV12);
-
-        if (bgrImg.empty()) {
-            std::cerr << "[SnapshotSink] Failed to convert YUV to BGR" << std::endl;
-            return cv::Mat();
-        }
-
-        // Release YUV image memory explicitly
-        yuvImg.release();
-
-        return bgrImg;
-
-    } catch (const cv::Exception& e) {
-        std::cerr << "[SnapshotSink] OpenCV exception in yuvToBgr: " << e.what() << std::endl;
-        return cv::Mat();
-    } catch (const std::exception& e) {
-        std::cerr << "[SnapshotSink] Exception in yuvToBgr: " << e.what() << std::endl;
-        return cv::Mat();
+bool SnapshotSink::saveFrame(const AVFrame* frame, const std::string& filename) {
+    if (!frame || !encoder_) {
+        return false;
     }
+
+    return encoder_->encodeFrameToJPEG(frame, filename);
 }
 
 bool SnapshotSink::shouldCaptureUser(const std::string& userId) const {

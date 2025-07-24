@@ -44,13 +44,21 @@ void signal_handler(int signal) {
 
     if (!g_running) {
         // Already shutting down, ignore additional signals
+        std::cout << "\nSignal " << signal << " received but already shutting down, ignoring..."
+                  << std::endl;
+        std::flush(std::cout);
         return;
     }
 
     std::cout << "\nReceived signal " << signal << ", shutting down..." << std::endl;
+    std::flush(std::cout);
     g_signal_status = signal;
     g_running = false;
+    std::cout << "Set g_running to false, notifying all waiting threads..." << std::endl;
+    std::flush(std::cout);
     g_shutdown_cv.notify_all();  // Wake up any waiting threads
+    std::cout << "Signal handler completed" << std::endl;
+    std::flush(std::cout);
 }
 
 int main(int argc, char* argv[]) {
@@ -466,51 +474,56 @@ int main(int argc, char* argv[]) {
         g_rtcClient->setVideoFrameCallback(
             [&user_snapshot_sinks, &user_sinks_mutex, &snapshots_config](
                 const agora::media::base::VideoFrame& frame, const std::string& userId) {
+                if (!g_running) {
+                    return;
+                }
+
                 std::lock_guard<std::mutex> lock(user_sinks_mutex);
 
-                // Check if this user should be captured for snapshots
-                if (!snapshots_config.targetUsers.empty()) {
-                    auto it = std::find(snapshots_config.targetUsers.begin(),
-                                        snapshots_config.targetUsers.end(), userId);
-                    if (it == snapshots_config.targetUsers.end()) {
-                        // User not in target list, skip snapshot but continue with recording
-                        if (g_recordingSink->isRecording()) {
-                            g_recordingSink->onVideoFrame(frame.yBuffer, frame.uBuffer,
-                                                          frame.vBuffer, frame.yStride,
-                                                          frame.uStride, frame.vStride, frame.width,
-                                                          frame.height, frame.renderTimeMs, userId);
+                // First handle snapshot if needed
+                {
+                    // Check if we should process snapshots for this user
+                    bool shouldProcessSnapshot =
+                        snapshots_config.targetUsers.empty() ||
+                        std::find(snapshots_config.targetUsers.begin(),
+                                  snapshots_config.targetUsers.end(),
+                                  userId) != snapshots_config.targetUsers.end();
+
+                    if (shouldProcessSnapshot) {
+                        // Get or create snapshot sink for this user
+                        auto& user_snapshot_sink = user_snapshot_sinks[userId];
+                        if (!user_snapshot_sink && g_running) {
+                            user_snapshot_sink = std::make_unique<agora::rtc::SnapshotSink>();
+                            agora::rtc::SnapshotSink::Config user_config = snapshots_config;
+                            user_config.outputDir = snapshots_config.outputDir + "/user_" + userId;
+
+                            if (!user_snapshot_sink->initialize(user_config)) {
+                                std::cerr << "Failed to initialize snapshot sink for user "
+                                          << userId << std::endl;
+                                return;  // Skip this frame if initialization fails
+                            }
+                            if (!user_snapshot_sink->start()) {
+                                std::cerr << "Failed to start snapshot sink for user " << userId
+                                          << std::endl;
+                                return;  // Skip this frame if start fails
+                            }
+                            std::cout << "Started capturing snapshots for user " << userId
+                                      << " to: " << user_config.outputDir << std::endl;
                         }
-                        return;
-                    }
-                }
 
-                // Get or create snapshot sink for this user
-                auto& user_sink = user_snapshot_sinks[userId];
-                if (!user_sink) {
-                    user_sink = std::make_unique<agora::rtc::SnapshotSink>();
-                    agora::rtc::SnapshotSink::Config user_config = snapshots_config;
-                    user_config.outputDir = snapshots_config.outputDir + "/user_" + userId;
-                    if (!user_sink->initialize(user_config)) {
-                        std::cerr << "Failed to initialize snapshot sink for user " << userId
-                                  << std::endl;
-                        return;
+                        // Send frame to user-specific snapshot sink
+                        user_snapshot_sink->onVideoFrame(frame.yBuffer, frame.uBuffer,
+                                                         frame.vBuffer, frame.yStride,
+                                                         frame.uStride, frame.vStride, frame.width,
+                                                         frame.height, frame.renderTimeMs);
                     }
-                    if (!user_sink->start()) {
-                        std::cerr << "Failed to start snapshot sink for user " << userId
-                                  << std::endl;
-                        return;
-                    }
-                    std::cout << "Started capturing snapshots for user " << userId
-                              << " to: " << user_config.outputDir << std::endl;
-                }
+                }  // Release the lock here
 
-                // Send frame to user-specific snapshot sink
-                user_sink->onVideoFrame(frame.yBuffer, frame.uBuffer, frame.vBuffer, frame.yStride,
-                                        frame.uStride, frame.vStride, frame.width, frame.height,
-                                        frame.renderTimeMs);
-
-                // Send frame to recording sink if enabled
+                // Then handle recording (unconditionally for all frames)
                 if (g_recordingSink->isRecording()) {
+                    if (!g_running) {
+                        return;
+                    }
                     g_recordingSink->onVideoFrame(
                         frame.yBuffer, frame.uBuffer, frame.vBuffer, frame.yStride, frame.uStride,
                         frame.vStride, frame.width, frame.height, frame.renderTimeMs, userId);
@@ -522,6 +535,9 @@ int main(int argc, char* argv[]) {
                                               const std::string& userId) {
             // Send audio frame to recording sink if enabled
             if (g_recordingSink->isRecording()) {
+                if (!g_running) {
+                    return;
+                }
                 g_recordingSink->onAudioFrame(reinterpret_cast<const uint8_t*>(frame.data_),
                                               frame.samples_per_channel_, frame.sample_rate_hz_,
                                               frame.num_channels_, frame.capture_timestamp, userId);
@@ -553,6 +569,7 @@ int main(int argc, char* argv[]) {
         // Main loop
         try {
             auto last_status = std::chrono::steady_clock::now();
+            std::cout << "Entering main loop, g_running = " << g_running.load() << std::endl;
 
             while (g_running) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -583,8 +600,12 @@ int main(int argc, char* argv[]) {
 
                 // Wait for shutdown signal or timeout
                 std::unique_lock<std::mutex> lock(g_shutdown_mutex);
-                if (g_shutdown_cv.wait_for(lock, std::chrono::milliseconds(100),
-                                           [] { return !g_running.load(); })) {
+                bool should_exit = g_shutdown_cv.wait_for(lock, std::chrono::milliseconds(100),
+                                                          [] { return !g_running.load(); });
+                if (should_exit) {
+                    std::cout << "Condition variable signaled shutdown, exiting main loop..."
+                              << std::endl;
+                    std::flush(std::cout);
                     break;
                 }
             }
@@ -596,19 +617,19 @@ int main(int argc, char* argv[]) {
         std::cout << "Shutting down..." << std::endl;
 
         // Stop capturing and disconnect
-        std::cout << "Stopping all captures..." << std::endl;
+        std::cout << "Stopping all snapshots..." << std::endl;
         {
             std::lock_guard<std::mutex> lock(user_sinks_mutex);
             for (auto& pair : user_snapshot_sinks) {
                 if (pair.second) {
                     try {
-                        std::cout << "Stopping capture for user " << pair.first << "..."
+                        std::cout << "Stopping snapshot for user " << pair.first << "..."
                                   << std::endl;
                         pair.second->stop();
-                        std::cout << "Successfully stopped capture for user " << pair.first
+                        std::cout << "Successfully stopped snapshot for user " << pair.first
                                   << std::endl;
                     } catch (const std::exception& e) {
-                        std::cerr << "Error stopping capture for user " << pair.first << ": "
+                        std::cerr << "Error stopping snapshot for user " << pair.first << ": "
                                   << e.what() << std::endl;
                     }
                 }
