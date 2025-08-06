@@ -1,3 +1,5 @@
+#define AG_LOG_TAG "RtcClient"
+
 // rtc_client.cpp
 #include "include/rtc_client.h"
 
@@ -138,9 +140,9 @@ bool RtcClient::connect() {
     }
 
     // Create and register frame observer to receive video frames
-    if (frameCallback_) {
+    if (videoFrameCallback_) {
         try {
-            frameObserver_ = new YuvFrameObserver(frameCallback_);
+            frameObserver_ = new YuvFrameObserver(videoFrameCallback_);
             if (!frameObserver_) {
                 AG_LOG(ERROR, "Failed to create frame observer");
                 return false;

@@ -1,5 +1,8 @@
+#define AG_LOG_TAG "FFmpegUtils"
+
 #include "ffmpeg_utils.h"
 #include <iostream>
+#include "log.h"
 
 extern "C" {
 #include <libavutil/error.h>
@@ -19,27 +22,27 @@ bool validateYUVBuffers(const uint8_t* yBuffer, const uint8_t* uBuffer,
                        int32_t vStride, uint32_t width, uint32_t height) {
     // Validate pointers
     if (!yBuffer || !uBuffer || !vBuffer) {
-        std::cerr << "[FFmpegUtils] Invalid YUV buffer pointers" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid YUV buffer pointers");
         return false;
     }
 
     // Validate dimensions
     if (width == 0 || height == 0) {
-        std::cerr << "[FFmpegUtils] Invalid dimensions: " << width << "x" << height << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid dimensions: %ux%u", width, height);
         return false;
     }
 
     // Validate strides (must be at least as wide as the frame)
     if (yStride < static_cast<int32_t>(width)) {
-        std::cerr << "[FFmpegUtils] Y stride (" << yStride << ") less than width (" << width << ")" << std::endl;
+        AG_LOG_FAST(ERROR, "Y stride (%d) less than width (%u)", yStride, width);
         return false;
     }
 
     // For YUV420P, U and V planes are half the width
     uint32_t chromaWidth = (width + 1) / 2;
     if (uStride < static_cast<int32_t>(chromaWidth) || vStride < static_cast<int32_t>(chromaWidth)) {
-        std::cerr << "[FFmpegUtils] Chroma stride too small. U: " << uStride
-                  << ", V: " << vStride << ", required: " << chromaWidth << std::endl;
+        AG_LOG_FAST(ERROR, "Chroma stride too small. U: %d, V: %d, required: %u",
+                  uStride, vStride, chromaWidth);
         return false;
     }
 

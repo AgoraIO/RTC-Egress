@@ -1,3 +1,5 @@
+#define AG_LOG_TAG "TaskPipe"
+
 #include "task_pipe.h"
 
 #include <sys/socket.h>
@@ -11,6 +13,7 @@
 #include <sstream>
 #include <thread>
 
+#include "common/log.h"
 #include "include/recording_sink.h"
 #include "include/uds_message.h"
 #include "rtc_client.h"
@@ -22,25 +25,25 @@ constexpr const char* kLogTag = "[TaskPipe]";
 
 void logInfo(const std::string& message, const std::string& instance_id = "") {
     if (!instance_id.empty()) {
-        std::cout << kLogTag << "[" << instance_id << "] " << message << std::endl;
+        AG_LOG_FAST(INFO, "[%s] %s", instance_id.c_str(), message.c_str());
     } else {
-        std::cout << kLogTag << " " << message << std::endl;
+        AG_LOG_FAST(INFO, "%s", message.c_str());
     }
 }
 
 void logError(const std::string& message, const std::string& instance_id = "") {
     if (!instance_id.empty()) {
-        std::cerr << kLogTag << "[" << instance_id << "] [ERROR] " << message << std::endl;
+        AG_LOG_FAST(ERROR, "[%s] %s", instance_id.c_str(), message.c_str());
     } else {
-        std::cerr << kLogTag << " [ERROR] " << message << std::endl;
+        AG_LOG_FAST(ERROR, "%s", message.c_str());
     }
 }
 
 void logDebug(const std::string& message, const std::string& instance_id = "") {
     if (!instance_id.empty()) {
-        std::cout << kLogTag << "[" << instance_id << "] [DEBUG] " << message << std::endl;
+        AG_LOG_FAST(INFO, "[%s] [DEBUG] %s", instance_id.c_str(), message.c_str());
     } else {
-        std::cout << kLogTag << " [DEBUG] " << message << std::endl;
+        AG_LOG_FAST(INFO, "[DEBUG] %s", message.c_str());
     }
 }
 
@@ -130,7 +133,8 @@ void TaskPipe::start(agora::rtc::RtcClient& rtc_client, agora::rtc::SnapshotSink
     });
 
     rtc_client_->setAudioFrameCallback(
-        [this](const agora::media::base::AudioPcmFrame& frame, const std::string& userId) {
+        [this](const agora::media::IAudioFrameObserverBase::AudioFrame& frame,
+               const std::string& userId) {
             // Only forward audio frames if there are active recording tasks
             bool has_active_recording = false;
             {
@@ -144,9 +148,9 @@ void TaskPipe::start(agora::rtc::RtcClient& rtc_client, agora::rtc::SnapshotSink
             }
 
             if (has_active_recording && recording_sink_) {
-                recording_sink_->onAudioFrame(reinterpret_cast<const uint8_t*>(frame.data_),
-                                              frame.samples_per_channel_, frame.sample_rate_hz_,
-                                              frame.num_channels_, frame.capture_timestamp, userId);
+                recording_sink_->onAudioFrame(reinterpret_cast<const uint8_t*>(frame.buffer),
+                                              frame.samplesPerChannel, frame.samplesPerSec,
+                                              frame.channels, frame.renderTimeMs, userId);
             }
         });
 

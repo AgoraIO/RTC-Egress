@@ -1,8 +1,12 @@
+#define AG_LOG_TAG "VideoFrame"
+
 #include "include/video_frame.h"
 
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+
+#include "common/log.h"
 
 extern "C" {
 #include <libavutil/imgutils.h>
@@ -94,19 +98,19 @@ bool VideoFrame::initializeFromYUV(const uint8_t* yBuffer, const uint8_t* uBuffe
                                    uint64_t timestamp, const std::string& userId) {
     // Validate input parameters
     if (!yBuffer || !uBuffer || !vBuffer) {
-        std::cerr << "[VideoFrame] Invalid buffer pointers" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid buffer pointers");
         return false;
     }
 
     if (width == 0 || height == 0 || yStride <= 0 || uStride <= 0 || vStride <= 0) {
-        std::cerr << "[VideoFrame] Invalid frame dimensions or strides" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid frame dimensions or strides");
         return false;
     }
 
     // Validate stride vs width relationships
     if (yStride < static_cast<int32_t>(width) || uStride < static_cast<int32_t>(width / 2) ||
         vStride < static_cast<int32_t>(width / 2)) {
-        std::cerr << "[VideoFrame] Invalid stride values" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid stride values");
         return false;
     }
 
@@ -128,8 +132,7 @@ bool VideoFrame::initializeFromYUV(const uint8_t* yBuffer, const uint8_t* uBuffe
         // Sanity check: prevent excessive memory allocation
         const size_t MAX_FRAME_SIZE = 8 * 1024 * 1024;  // 8MB per plane max
         if (ySize > MAX_FRAME_SIZE || uSize > MAX_FRAME_SIZE || vSize > MAX_FRAME_SIZE) {
-            std::cerr << "[VideoFrame] Frame size too large: Y=" << ySize << ", U=" << uSize
-                      << ", V=" << vSize << std::endl;
+            AG_LOG_FAST(ERROR, "Frame size too large: Y=%zu, U=%zu, V=%zu", ySize, uSize, vSize);
             return false;
         }
 
@@ -149,11 +152,11 @@ bool VideoFrame::initializeFromYUV(const uint8_t* yBuffer, const uint8_t* uBuffe
         return true;
 
     } catch (const std::bad_alloc& e) {
-        std::cerr << "[VideoFrame] Memory allocation failed: " << e.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Memory allocation failed: %s", e.what());
         clear();
         return false;
     } catch (const std::exception& e) {
-        std::cerr << "[VideoFrame] Error initializing frame: " << e.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Error initializing frame: %s", e.what());
         clear();
         return false;
     }
@@ -162,12 +165,12 @@ bool VideoFrame::initializeFromYUV(const uint8_t* yBuffer, const uint8_t* uBuffe
 bool VideoFrame::initializeFromAVFrame(const AVFrame* frame, uint64_t timestamp,
                                        const std::string& userId) {
     if (!frame) {
-        std::cerr << "[VideoFrame] Invalid AVFrame pointer" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid AVFrame pointer");
         return false;
     }
 
     if (frame->format != AV_PIX_FMT_YUV420P) {
-        std::cerr << "[VideoFrame] Unsupported pixel format: " << frame->format << std::endl;
+        AG_LOG_FAST(ERROR, "Unsupported pixel format: %d", frame->format);
         return false;
     }
 
@@ -269,7 +272,7 @@ bool VideoFrame::allocateBuffers() {
 
         return true;
     } catch (const std::bad_alloc& e) {
-        std::cerr << "[VideoFrame] Buffer allocation failed: " << e.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Buffer allocation failed: %s", e.what());
         clear();
         return false;
     }
