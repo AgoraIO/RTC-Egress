@@ -1,3 +1,5 @@
+#define AG_LOG_TAG "Main"
+
 #include <sys/socket.h>
 #include <sys/stat.h>  // For mkdir
 #include <sys/un.h>
@@ -44,21 +46,16 @@ void signal_handler(int signal) {
 
     if (!g_running) {
         // Already shutting down, ignore additional signals
-        std::cout << "\nSignal " << signal << " received but already shutting down, ignoring..."
-                  << std::endl;
-        std::flush(std::cout);
+        AG_LOG_FAST(INFO, "\nSignal %d received but already shutting down, ignoring...", signal);
         return;
     }
 
-    std::cout << "\nReceived signal " << signal << ", shutting down..." << std::endl;
-    std::flush(std::cout);
+    AG_LOG_FAST(INFO, "\nReceived signal %d, shutting down...", signal);
     g_signal_status = signal;
     g_running = false;
-    std::cout << "Set g_running to false, notifying all waiting threads..." << std::endl;
-    std::flush(std::cout);
+    AG_LOG_FAST(INFO, "Set g_running to false, notifying all waiting threads...");
     g_shutdown_cv.notify_all();  // Wake up any waiting threads
-    std::cout << "Signal handler completed" << std::endl;
-    std::flush(std::cout);
+    AG_LOG_FAST(INFO, "Signal handler completed");
 }
 
 int main(int argc, char* argv[]) {
@@ -175,36 +172,36 @@ int main(int argc, char* argv[]) {
             }
 
             // Explicitly clean up resources
-            std::cout << "Socket mode cleanup starting..." << std::endl;
+            AG_LOG_FAST(INFO, "Socket mode cleanup starting...");
             if (g_recordingSink) {
-                std::cout << "Stopping recording sink in socket mode..." << std::endl;
+                AG_LOG_FAST(INFO, "Stopping recording sink in socket mode...");
                 g_recordingSink->stop();
-                std::cout << "Recording sink stopped in socket mode" << std::endl;
+                AG_LOG_FAST(INFO, "Recording sink stopped in socket mode");
                 g_recordingSink.reset();
-                std::cout << "Recording sink reset in socket mode" << std::endl;
+                AG_LOG_FAST(INFO, "Recording sink reset in socket mode");
             }
 
             if (g_snapshotSink) {
-                std::cout << "Stopping snapshot sink in socket mode..." << std::endl;
+                AG_LOG_FAST(INFO, "Stopping snapshot sink in socket mode...");
                 g_snapshotSink->stop();
-                std::cout << "Snapshot sink stopped in socket mode" << std::endl;
+                AG_LOG_FAST(INFO, "Snapshot sink stopped in socket mode");
                 g_snapshotSink.reset();
-                std::cout << "Snapshot sink reset in socket mode" << std::endl;
+                AG_LOG_FAST(INFO, "Snapshot sink reset in socket mode");
             }
 
             // Cleanup
-            std::cout << "Stopping task pipe..." << std::endl;
+            AG_LOG_FAST(INFO, "Stopping task pipe...");
             task_pipe->stop();
-            std::cout << "Task pipe stopped" << std::endl;
+            AG_LOG_FAST(INFO, "Task pipe stopped");
             task_pipe.reset();
-            std::cout << "Task pipe reset" << std::endl;
+            AG_LOG_FAST(INFO, "Task pipe reset");
 
             if (g_rtcClient) {
-                std::cout << "Disconnecting RTC client in socket mode..." << std::endl;
+                AG_LOG_FAST(INFO, "Disconnecting RTC client in socket mode...");
                 g_rtcClient->disconnect();
-                std::cout << "RTC client disconnected in socket mode" << std::endl;
+                AG_LOG_FAST(INFO, "RTC client disconnected in socket mode");
                 g_rtcClient.reset();
-                std::cout << "RTC client reset in socket mode" << std::endl;
+                AG_LOG_FAST(INFO, "RTC client reset in socket mode");
             }
 
             return 0;
@@ -368,19 +365,22 @@ int main(int argc, char* argv[]) {
             if (userList.size() == 1) {
                 // Single user - individual recording (only record this specific user)
                 recording_config.mode = agora::rtc::RecordingSink::RecordingMode::INDIVIDUAL;
-                std::cout << "[Config] Single user specified (" << userList[0]
-                          << ") - individual recording mode (only this user will be recorded)"
-                          << std::endl;
+                AG_LOG_FAST(INFO,
+                            "[Config] Single user specified (%s) - individual recording mode (only "
+                            "this user will be recorded)",
+                            userList[0].c_str());
             } else {
                 // Multiple users or empty list - composite recording with dynamic layout
                 recording_config.mode = agora::rtc::RecordingSink::RecordingMode::COMPOSITE;
                 if (userList.empty()) {
-                    std::cout
-                        << "[Config] No users specified - composite recording with dynamic layout "
-                        << "(all users, adaptive grid)" << std::endl;
+                    AG_LOG_FAST(INFO,
+                                "[Config] No users specified - composite recording with dynamic "
+                                "layout (all users, adaptive grid)");
                 } else {
-                    std::cout << "[Config] Multiple users specified (" << userList.size()
-                              << " users) - composite recording with grid layout" << std::endl;
+                    AG_LOG_FAST(INFO,
+                                "[Config] Multiple users specified (%zu users) - composite "
+                                "recording with grid layout",
+                                userList.size());
                 }
             }
 
@@ -474,6 +474,15 @@ int main(int argc, char* argv[]) {
         g_rtcClient->setVideoFrameCallback(
             [&user_snapshot_sinks, &user_sinks_mutex, &snapshots_config](
                 const agora::media::base::VideoFrame& frame, const std::string& userId) {
+                static int rtc_video_count = 0;
+                rtc_video_count++;
+                if (rtc_video_count % 30 == 0) {
+                    AG_LOG_FAST(INFO,
+                                "Orignal RTC Video Frame #%d from user: %s, %dx%d, "
+                                "timestamp: %ld",
+                                rtc_video_count, userId.c_str(), frame.width, frame.height,
+                                frame.renderTimeMs);
+                }
                 if (!g_running) {
                     return;
                 }
@@ -507,8 +516,8 @@ int main(int argc, char* argv[]) {
                                           << std::endl;
                                 return;  // Skip this frame if start fails
                             }
-                            std::cout << "Started capturing snapshots for user " << userId
-                                      << " to: " << user_config.outputDir << std::endl;
+                            AG_LOG_FAST(INFO, "Started capturing snapshots for user %s to: %s",
+                                        userId.c_str(), user_config.outputDir.c_str());
                         }
 
                         // Send frame to user-specific snapshot sink
@@ -524,6 +533,12 @@ int main(int argc, char* argv[]) {
                     if (!g_running) {
                         return;
                     }
+                    static int recording_video_count = 0;
+                    recording_video_count++;
+                    if (recording_video_count % 30 == 0) {
+                        AG_LOG_FAST(INFO, "Sending video frame #%d to RecordingSink from user: %s",
+                                    recording_video_count, userId.c_str());
+                    }
                     g_recordingSink->onVideoFrame(
                         frame.yBuffer, frame.uBuffer, frame.vBuffer, frame.yStride, frame.uStride,
                         frame.vStride, frame.width, frame.height, frame.renderTimeMs, userId);
@@ -531,18 +546,29 @@ int main(int argc, char* argv[]) {
             });
 
         // Set up audio frame callback
-        g_rtcClient->setAudioFrameCallback([](const agora::media::base::AudioPcmFrame& frame,
-                                              const std::string& userId) {
-            // Send audio frame to recording sink if enabled
-            if (g_recordingSink->isRecording()) {
-                if (!g_running) {
-                    return;
+        g_rtcClient->setAudioFrameCallback(
+            [](const agora::media::IAudioFrameObserverBase::AudioFrame& frame,
+               const std::string& userId) {
+                static int rtc_audio_count = 0;
+                rtc_audio_count++;
+                if (rtc_audio_count % 50 == 0) {
+                    AG_LOG_FAST(INFO,
+                                "Orignal RTC Audio Frame #%d from user: %s, %d samples, "
+                                "timestamp: %ld",
+                                rtc_audio_count, userId.c_str(), frame.samplesPerChannel,
+                                frame.renderTimeMs);
                 }
-                g_recordingSink->onAudioFrame(reinterpret_cast<const uint8_t*>(frame.data_),
-                                              frame.samples_per_channel_, frame.sample_rate_hz_,
-                                              frame.num_channels_, frame.capture_timestamp, userId);
-            }
-        });
+
+                // Send audio frame to recording sink if enabled
+                if (g_recordingSink->isRecording()) {
+                    if (!g_running) {
+                        return;
+                    }
+                    g_recordingSink->onAudioFrame(reinterpret_cast<const uint8_t*>(frame.buffer),
+                                                  frame.samplesPerChannel, frame.samplesPerSec,
+                                                  frame.channels, frame.renderTimeMs, userId);
+                }
+            });
 
         // Connect to the channel
         if (!g_rtcClient->connect()) {
@@ -557,19 +583,19 @@ int main(int argc, char* argv[]) {
         }
 
         // Start recording
-        std::cout << "About to start recording sink..." << std::endl;
+        AG_LOG_FAST(INFO, "About to start recording sink...");
         if (!g_recordingSink->start()) {
             std::cerr << "Failed to start recording" << std::endl;
             return 1;
         }
-        std::cout << "Recording sink started successfully" << std::endl;
+        AG_LOG_FAST(INFO, "Recording sink started successfully");
 
-        std::cout << "Snapshot capture & recording active. Press Ctrl+C to stop..." << std::endl;
+        AG_LOG_FAST(INFO, "Snapshot capture & recording active. Press Ctrl+C to stop...");
 
         // Main loop
         try {
             auto last_status = std::chrono::steady_clock::now();
-            std::cout << "Entering main loop, g_running = " << g_running.load() << std::endl;
+            AG_LOG_FAST(INFO, "Entering main loop, g_running = %d", g_running.load());
 
             while (g_running) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -593,8 +619,7 @@ int main(int argc, char* argv[]) {
                 auto now = std::chrono::steady_clock::now();
                 if (std::chrono::duration_cast<std::chrono::seconds>(now - last_status).count() >=
                     5) {
-                    std::cout << "Capturing in progress... (" << num_users << " users)"
-                              << std::endl;
+                    AG_LOG_FAST(INFO, "Capturing in progress... (%zu users)", num_users);
                     last_status = now;
                 }
 
@@ -603,9 +628,7 @@ int main(int argc, char* argv[]) {
                 bool should_exit = g_shutdown_cv.wait_for(lock, std::chrono::milliseconds(100),
                                                           [] { return !g_running.load(); });
                 if (should_exit) {
-                    std::cout << "Condition variable signaled shutdown, exiting main loop..."
-                              << std::endl;
-                    std::flush(std::cout);
+                    AG_LOG_FAST(INFO, "Condition variable signaled shutdown, exiting main loop...");
                     break;
                 }
             }
@@ -614,20 +637,19 @@ int main(int argc, char* argv[]) {
             g_running = false;
         }
 
-        std::cout << "Shutting down..." << std::endl;
+        AG_LOG_FAST(INFO, "Shutting down...");
 
         // Stop capturing and disconnect
-        std::cout << "Stopping all snapshots..." << std::endl;
+        AG_LOG_FAST(INFO, "Stopping all snapshots...");
         {
             std::lock_guard<std::mutex> lock(user_sinks_mutex);
             for (auto& pair : user_snapshot_sinks) {
                 if (pair.second) {
                     try {
-                        std::cout << "Stopping snapshot for user " << pair.first << "..."
-                                  << std::endl;
+                        AG_LOG_FAST(INFO, "Stopping snapshot for user %s...", pair.first.c_str());
                         pair.second->stop();
-                        std::cout << "Successfully stopped snapshot for user " << pair.first
-                                  << std::endl;
+                        AG_LOG_FAST(INFO, "Successfully stopped snapshot for user %s",
+                                    pair.first.c_str());
                     } catch (const std::exception& e) {
                         std::cerr << "Error stopping snapshot for user " << pair.first << ": "
                                   << e.what() << std::endl;
@@ -643,30 +665,26 @@ int main(int argc, char* argv[]) {
         // Explicitly clean up resources in reverse order of initialization
         if (g_recordingSink) {
             try {
-                std::cout << "Stopping recording..." << std::endl;
-                std::flush(std::cout);
+                AG_LOG_FAST(INFO, "Stopping recording...");
 
-                std::cout << "About to call g_recordingSink->stop()..." << std::endl;
-                std::flush(std::cout);
+                AG_LOG_FAST(INFO, "About to call g_recordingSink->stop()...");
 
                 g_recordingSink->stop();
 
-                std::cout << "g_recordingSink->stop() returned successfully" << std::endl;
-                std::flush(std::cout);
-                std::cout << "Recording stopped successfully" << std::endl;
+                AG_LOG_FAST(INFO, "g_recordingSink->stop() returned successfully");
+                AG_LOG_FAST(INFO, "Recording stopped successfully");
             } catch (const std::exception& e) {
                 std::cerr << "Error stopping recording: " << e.what() << std::endl;
                 std::flush(std::cerr);
             }
-            std::cout << "Resetting recording sink..." << std::endl;
-            std::flush(std::cout);
+            AG_LOG_FAST(INFO, "Resetting recording sink...");
             g_recordingSink.reset();
-            std::cout << "Recording sink reset complete" << std::endl;
+            AG_LOG_FAST(INFO, "Recording sink reset complete");
         }
 
         if (g_snapshotSink) {
             try {
-                std::cout << "Stopping snapshot capture..." << std::endl;
+                AG_LOG_FAST(INFO, "Stopping snapshot capture...");
                 g_snapshotSink->stop();
             } catch (const std::exception& e) {
                 std::cerr << "Error stopping snapshot capture: " << e.what() << std::endl;
@@ -676,7 +694,7 @@ int main(int argc, char* argv[]) {
 
         if (g_rtcClient) {
             try {
-                std::cout << "Disconnecting from channel..." << std::endl;
+                AG_LOG_FAST(INFO, "Disconnecting from channel...");
                 g_rtcClient->disconnect();
             } catch (const std::exception& e) {
                 std::cerr << "Error disconnecting from channel: " << e.what() << std::endl;
@@ -685,9 +703,9 @@ int main(int argc, char* argv[]) {
         }
 
         // Final cleanup
-        std::cout << "Cleanup complete. Exiting..." << std::endl;
+        AG_LOG_FAST(INFO, "Cleanup complete. Exiting...");
 
-        std::cout << "Capture&Recording stopped" << std::endl;
+        AG_LOG_FAST(INFO, "Capture&Recording stopped");
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

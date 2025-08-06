@@ -1,3 +1,5 @@
+#define AG_LOG_TAG "RecordingSink"
+
 #include "include/recording_sink.h"
 
 #include <libavformat/avformat.h>
@@ -15,6 +17,7 @@
 
 #include "common/ffmpeg_utils.h"
 #include "common/file_utils.h"
+#include "common/log.h"
 
 namespace agora {
 namespace rtc {
@@ -39,7 +42,7 @@ bool RecordingSink::initialize(const Config& config) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (isRecording_.load()) {
-        std::cerr << "Cannot initialize while recording" << std::endl;
+        AG_LOG_FAST(ERROR, "Cannot initialize while recording");
         return false;
     }
 
@@ -60,15 +63,15 @@ bool RecordingSink::initialize(const Config& config) {
         compositorConfig.minCompositeIntervalMs = 1000 / config_.videoFps;  // Match video FPS
 
         if (!videoCompositor_->initialize(compositorConfig)) {
-            std::cerr << "[RecordingSink] Failed to initialize VideoCompositor" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to initialize VideoCompositor");
             return false;
         }
 
         // Set callback to receive composed frames for encoding
-        videoCompositor_->setComposedFrameCallback(
+        videoCompositor_->setComposedVideoFrameCallback(
             [this](const AVFrame* composedFrame) { this->onComposedFrame(composedFrame); });
 
-        std::cout << "[RecordingSink] VideoCompositor initialized for composite mode" << std::endl;
+        AG_LOG_TS(INFO, "VideoCompositor initialized for composite mode");
     }
 
     return true;
@@ -78,7 +81,7 @@ bool RecordingSink::start() {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (isRecording_.load()) {
-        std::cerr << "Already recording" << std::endl;
+        AG_LOG_FAST(WARN, "Already recording");
         return false;
     }
 
@@ -89,45 +92,33 @@ bool RecordingSink::start() {
     // Create recording thread
     recordingThread_ = std::make_unique<std::thread>(&RecordingSink::recordingThread, this);
 
-    std::cout << "[RecordingSink] Started recording in "
-              << (config_.mode == RecordingMode::INDIVIDUAL ? "individual" : "composite") << " mode"
-              << std::endl;
+    AG_LOG_FAST(INFO, "Started recording in %s mode",
+                (config_.mode == RecordingMode::INDIVIDUAL ? "individual" : "composite"));
 
     return true;
 }
 
 void RecordingSink::stop() {
-    std::cout << "[RecordingSink] stop() called, requesting thread shutdown..." << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[RecordingSink] stop() called, requesting thread shutdown..." << std::endl;
+    // std::flush(std::cout);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (!isRecording_.load()) {
-            std::cout << "[RecordingSink] Already stopped, returning early" << std::endl;
-            std::flush(std::cout);
+            AG_LOG_TS(INFO, "Already stopped, returning early");
             return;
         }
-
-        std::cout << "[RecordingSink] Setting stopRequested to true" << std::endl;
-        std::flush(std::cout);
 
         stopRequested_ = true;
 
         cv_.notify_all();
         videoQueueCv_.notify_all();
         audioQueueCv_.notify_all();
-
-        std::cout << "[RecordingSink] Stop requested and condition variables notified" << std::endl;
-        std::flush(std::cout);
     }
 
     // Give the recording thread a moment to see the stop flag
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // CRITICAL FIX: Flush encoders OUTSIDE mutex to allow recording thread to exit
-    std::cout << "[RecordingSink] Flushing encoders after releasing mutex..." << std::endl;
-    std::flush(std::cout);
 
     flushAllEncoders();
 
@@ -136,76 +127,60 @@ void RecordingSink::stop() {
     }
 
     if (recordingThread_ && recordingThread_->joinable()) {
-        std::cout << "[RecordingSink] About to join recording thread..." << std::endl;
-        std::flush(std::cout);
+        AG_LOG_TS(INFO, "About to join recording thread...");
 
         recordingThread_->join();
 
-        std::cout << "[RecordingSink] Recording thread joined successfully" << std::endl;
-        std::flush(std::cout);
+        AG_LOG_TS(INFO, "Recording thread joined successfully");
 
         recordingThread_.reset();
     }
 
     // Ensure all frames are processed before cleanup
-    std::cout << "[RecordingSink] Processing remaining frames before cleanup..." << std::endl;
-    std::flush(std::cout);
+    AG_LOG_TS(INFO, "Processing remaining frames before cleanup...");
 
     processVideoFrames();
-    std::cout << "[RecordingSink] Final video frames processed" << std::endl;
-    std::flush(std::cout);
+    AG_LOG_TS(INFO, "Final video frames processed");
 
     processAudioFrames();
-    std::cout << "[RecordingSink] Final audio frames processed" << std::endl;
-    std::flush(std::cout);
+    AG_LOG_TS(INFO, "Final audio frames processed");
 
     // Cleanup all user contexts
-    std::cout << "[RecordingSink] Starting cleanup of user contexts..." << std::endl;
-    std::flush(std::cout);
+    AG_LOG_TS(INFO, "Starting cleanup of user contexts...");
 
     {
         std::lock_guard<std::mutex> lock(userContextsMutex_);
 
         // Process composite context first
         if (compositeContext_) {
-            std::cout << "[RecordingSink] Cleaning up composite context..." << std::endl;
-            std::flush(std::cout);
+            AG_LOG_TS(INFO, "Cleaning up composite context...");
             cleanupEncoder("");
             compositeContext_.reset();
-            std::cout << "[RecordingSink] Composite context cleaned up" << std::endl;
-            std::flush(std::cout);
+            AG_LOG_TS(INFO, "Composite context cleaned up");
         }
 
         // Process individual user contexts
-        std::cout << "[RecordingSink] Cleaning up " << userContexts_.size() << " user contexts..."
-                  << std::endl;
-        std::flush(std::cout);
+        AG_LOG_FAST(INFO, "Cleaning up %zu user contexts...", userContexts_.size());
 
         for (auto& pair : userContexts_) {
-            std::cout << "[RecordingSink] Cleaning up encoder for user: " << pair.first
-                      << std::endl;
-            std::flush(std::cout);
+            AG_LOG_FAST(INFO, "Cleaning up encoder for user: %s", pair.first.c_str());
             cleanupEncoder(pair.first);
-            std::cout << "[RecordingSink] Encoder cleaned up for user: " << pair.first << std::endl;
-            std::flush(std::cout);
+            AG_LOG_TS(INFO, "Encoder cleaned up for user: %s", pair.first.c_str());
         }
         userContexts_.clear();
 
-        std::cout << "[RecordingSink] All user contexts cleared" << std::endl;
-        std::flush(std::cout);
+        AG_LOG_TS(INFO, "All user contexts cleared");
     }
 
     // Cleanup performance caches
-    std::cout << "[RecordingSink] Cleaning up composite resources..." << std::endl;
-    std::flush(std::cout);
+    AG_LOG_TS(INFO, "Cleaning up composite resources...");
 
     cleanupCompositeResources();
 
-    std::cout << "[RecordingSink] Composite resources cleaned up" << std::endl;
-    std::flush(std::cout);
+    AG_LOG_TS(INFO, "Composite resources cleaned up");
 
     isRecording_ = false;
-    std::cout << "[RecordingSink] Stopped recording and saved files" << std::endl;
+    AG_LOG_TS(INFO, "Stopped recording and saved files");
 }
 
 void RecordingSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
@@ -224,14 +199,14 @@ void RecordingSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
     // Validate input parameters using shared utility
     if (!agora::common::validateYUVBuffers(yBuffer, uBuffer, vBuffer, yStride, uStride, vStride,
                                            width, height)) {
-        std::cerr << "[RecordingSink] YUV buffer validation failed" << std::endl;
+        AG_LOG_FAST(ERROR, "YUV buffer validation failed");
         return;
     }
 
     VideoFrame frame;
     if (!frame.initializeFromYUV(yBuffer, uBuffer, vBuffer, yStride, uStride, vStride, width,
                                  height, timestamp, userId)) {
-        std::cerr << "[RecordingSink] Failed to initialize VideoFrame" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to initialize VideoFrame");
         return;
     }
 
@@ -248,10 +223,10 @@ void RecordingSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
         videoQueueCv_.notify_one();
 
     } catch (const std::bad_alloc& e) {
-        std::cerr << "[RecordingSink] Memory allocation failed: " << e.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Memory allocation failed: %s", e.what());
         return;
     } catch (const std::exception& e) {
-        std::cerr << "[RecordingSink] Error processing video frame: " << e.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Error processing video frame: %s", e.what());
         return;
     }
 }
@@ -269,20 +244,20 @@ void RecordingSink::onAudioFrame(const uint8_t* audioBuffer, int samples, int sa
 
     static int audio_log_count = 0;
     if (audio_log_count % 200 == 0) {  // Log every 50th audio frame to reduce spam
-        std::cout << "[RecordingSink] Received audio frame: " << samples << " samples, "
-                  << sampleRate << "Hz, " << channels << " channels, user: " << userId << std::endl;
+        AG_LOG_FAST(INFO, "Received audio frame: %d samples, %dHz, %d channels, user: %s", samples,
+                    sampleRate, channels, userId.c_str());
     }
     audio_log_count++;
 
     // Validate input parameters
     if (!audioBuffer) {
-        std::cerr << "[RecordingSink] Invalid audio buffer pointer" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid audio buffer pointer");
         return;
     }
 
     if (samples <= 0 || sampleRate <= 0 || channels <= 0 || channels > 8) {
-        std::cerr << "[RecordingSink] Invalid audio parameters: samples=" << samples
-                  << ", sampleRate=" << sampleRate << ", channels=" << channels << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid audio parameters: samples=%d, sampleRate=%d, channels=%d",
+                    samples, sampleRate, channels);
         return;
     }
 
@@ -300,8 +275,7 @@ void RecordingSink::onAudioFrame(const uint8_t* audioBuffer, int samples, int sa
         // Sanity check: prevent excessive memory allocation (max 10MB audio frame)
         const size_t MAX_AUDIO_FRAME_SIZE = 10 * 1024 * 1024;
         if (dataSize > MAX_AUDIO_FRAME_SIZE) {
-            std::cerr << "[RecordingSink] Audio frame size too large: " << dataSize << " bytes"
-                      << std::endl;
+            AG_LOG_FAST(ERROR, "Audio frame size too large: %zu bytes", dataSize);
             return;
         }
 
@@ -322,51 +296,41 @@ void RecordingSink::onAudioFrame(const uint8_t* audioBuffer, int samples, int sa
         audioQueueCv_.notify_one();
 
     } catch (const std::bad_alloc& e) {
-        std::cerr << "[RecordingSink] Audio memory allocation failed: " << e.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Audio memory allocation failed: %s", e.what());
         return;
     } catch (const std::exception& e) {
-        std::cerr << "[RecordingSink] Error processing audio frame: " << e.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Error processing audio frame: %s", e.what());
         return;
     }
 }
 
 void RecordingSink::recordingThread() {
-    std::cout << "[RecordingSink] Recording thread started" << std::endl;
-    std::flush(std::cout);
+    AG_LOG_FAST(INFO, "Recording thread started");
 
     while (!stopRequested_.load()) {
         // Process video frames
         if (config_.recordVideo) {
-            std::cout << "[RecordingSink] About to process video frames..." << std::endl;
-            std::flush(std::cout);
             processVideoFrames();
-            std::cout << "[RecordingSink] Video frames processed" << std::endl;
-            std::flush(std::cout);
         }
 
         // Process audio frames
         if (config_.recordAudio) {
-            std::cout << "[RecordingSink] About to process audio frames..." << std::endl;
-            std::flush(std::cout);
             processAudioFrames();
-            std::cout << "[RecordingSink] Audio frames processed" << std::endl;
-            std::flush(std::cout);
         }
 
         // Check for timeout
         auto elapsed = std::chrono::steady_clock::now() - startTime_;
         if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >=
             config_.maxDurationSeconds) {
-            std::cout << "[RecordingSink] Max duration reached, breaking from recording loop"
-                      << std::endl;
-            std::flush(std::cout);
+            AG_LOG_FAST(INFO, "Max duration reached, breaking from recording loop");
             break;
         }
 
-        std::cout
-            << "[RecordingSink] Recording thread loop iteration completed, waiting with timeout..."
-            << std::endl;
-        std::flush(std::cout);
+        // std::cout
+        //     << "[RecordingSink] Recording thread loop iteration completed, waiting with
+        //     timeout..."
+        //     << std::endl;
+        // std::flush(std::cout);
 
         // Use condition variable with timeout instead of sleep_for
         // This allows the thread to be woken up immediately when stop is requested
@@ -374,49 +338,34 @@ void RecordingSink::recordingThread() {
         bool shouldStop = cv_.wait_for(lock, std::chrono::milliseconds(10),
                                        [this] { return stopRequested_.load(); });
 
-        std::cout << "[RecordingSink] Recording thread woke up, stopRequested="
-                  << stopRequested_.load() << ", shouldStop=" << shouldStop << std::endl;
-        std::flush(std::cout);
-
         // If we were woken up due to stop request, exit immediately
         if (shouldStop || stopRequested_.load()) {
-            std::cout << "[RecordingSink] Stop condition detected after wait, breaking from loop"
-                      << std::endl;
-            std::flush(std::cout);
+            AG_LOG_TS(INFO, "Stop condition detected after wait, breaking from loop");
             break;
         }
     }
-
-    std::cout << "[RecordingSink] Recording thread exiting loop, stopRequested="
-              << stopRequested_.load() << std::endl;
-    std::flush(std::cout);
 }
 
 void RecordingSink::processVideoFrames() {
-    std::cout << "[RecordingSink] processVideoFrames() called" << std::endl;
-    std::flush(std::cout);
-
     // Early exit if stop is requested - don't even try to process frames
     if (stopRequested_.load()) {
-        std::cout << "[RecordingSink] processVideoFrames() - stopRequested detected at entry, "
-                     "exiting immediately"
-                  << std::endl;
-        std::flush(std::cout);
+        AG_LOG_FAST(INFO,
+                    "processVideoFrames() - stopRequested detected at entry, exiting immediately");
         return;
     }
 
     std::unique_lock<std::mutex> lock(videoQueueMutex_);
 
-    std::cout << "[RecordingSink] processVideoFrames() - queue size: " << videoFrameQueue_.size()
-              << std::endl;
-    std::flush(std::cout);
+    static int process_log_count = 0;
+    if (process_log_count % 30 == 0) {  // Log every 50th encode to reduce spam
+        AG_LOG_FAST(INFO, "processVideoFrames() - queue size: %zu", videoFrameQueue_.size());
+    }
+    process_log_count++;
 
     while (!videoFrameQueue_.empty()) {
         // Check stop condition at the beginning of each iteration
         if (stopRequested_.load()) {
-            std::cout << "[RecordingSink] processVideoFrames() - stopRequested detected, breaking"
-                      << std::endl;
-            std::flush(std::cout);
+            AG_LOG_FAST(INFO, "processVideoFrames() - stopRequested detected, breaking");
             break;
         }
 
@@ -424,58 +373,43 @@ void RecordingSink::processVideoFrames() {
         videoFrameQueue_.pop();
         lock.unlock();
 
-        std::cout << "[RecordingSink] processVideoFrames() - about to encode frame" << std::endl;
-        std::flush(std::cout);
-
         if (frame.valid() && !stopRequested_.load()) {
             encodeVideoFrame(frame, frame.userId());
         }
-
-        std::cout << "[RecordingSink] processVideoFrames() - frame encoded, checking stop"
-                  << std::endl;
-        std::flush(std::cout);
 
         lock.lock();
 
         // Check stop again after potentially blocking encode operation
         if (stopRequested_.load()) {
-            std::cout
-                << "[RecordingSink] processVideoFrames() - stopRequested after encode, breaking"
-                << std::endl;
-            std::flush(std::cout);
+            AG_LOG_FAST(INFO, "processVideoFrames() - stopRequested after encode, breaking");
             break;
         }
     }
-
-    std::cout << "[RecordingSink] processVideoFrames() - exiting" << std::endl;
-    std::flush(std::cout);
 }
 
 void RecordingSink::processAudioFrames() {
-    std::cout << "[RecordingSink] processAudioFrames() called" << std::endl;
-    std::flush(std::cout);
-
     // Early exit if stop is requested - don't even try to process frames
     if (stopRequested_.load()) {
-        std::cout << "[RecordingSink] processAudioFrames() - stopRequested detected at entry, "
-                     "exiting immediately"
-                  << std::endl;
-        std::flush(std::cout);
+        // std::cout << "[RecordingSink] processAudioFrames() - stopRequested detected at entry, "
+        //              "exiting immediately"
+        //           << std::endl;
+        // std::flush(std::cout);
         return;
     }
 
     std::unique_lock<std::mutex> lock(audioQueueMutex_);
 
-    std::cout << "[RecordingSink] processAudioFrames() - queue size: " << audioFrameQueue_.size()
-              << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[RecordingSink] processAudioFrames() - queue size: " << audioFrameQueue_.size()
+    //           << std::endl;
+    // std::flush(std::cout);
 
     while (!audioFrameQueue_.empty()) {
         // Check stop condition at the beginning of each iteration
         if (stopRequested_.load()) {
-            std::cout << "[RecordingSink] processAudioFrames() - stopRequested detected, breaking"
-                      << std::endl;
-            std::flush(std::cout);
+            // std::cout << "[RecordingSink] processAudioFrames() - stopRequested detected,
+            // breaking"
+            // << std::endl;
+            // std::flush(std::cout);
             break;
         }
 
@@ -483,31 +417,28 @@ void RecordingSink::processAudioFrames() {
         audioFrameQueue_.pop();
         lock.unlock();
 
-        std::cout << "[RecordingSink] processAudioFrames() - about to encode frame" << std::endl;
-        std::flush(std::cout);
+        // std::cout << "[RecordingSink] processAudioFrames() - about to encode frame" << std::endl;
+        // std::flush(std::cout);
 
         if (frame.valid && !stopRequested_.load()) {
             encodeAudioFrame(frame, frame.userId);
         }
 
-        std::cout << "[RecordingSink] processAudioFrames() - frame encoded, checking stop"
-                  << std::endl;
-        std::flush(std::cout);
+        // std::cout << "[RecordingSink] processAudioFrames() - frame encoded, checking stop"
+        //           << std::endl;
+        // std::flush(std::cout);
 
         lock.lock();
 
         // Check stop again after potentially blocking encode operation
         if (stopRequested_.load()) {
-            std::cout
-                << "[RecordingSink] processAudioFrames() - stopRequested after encode, breaking"
-                << std::endl;
-            std::flush(std::cout);
+            AG_LOG_FAST(INFO, "processAudioFrames() - stopRequested after encode, breaking");
             break;
         }
     }
 
-    std::cout << "[RecordingSink] processAudioFrames() - exiting" << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[RecordingSink] processAudioFrames() - exiting" << std::endl;
+    // std::flush(std::cout);
 }
 
 bool RecordingSink::initializeEncoder(const std::string& userId) {
@@ -517,24 +448,21 @@ bool RecordingSink::initializeEncoder(const std::string& userId) {
 
     // Setup output format
     if (!setupOutputFormat(&context->formatContext, context->filename)) {
-        std::cerr << "[RecordingSink] Failed to setup output format for user " << userId
-                  << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to setup output format for user %s", userId.c_str());
         return false;
     }
 
     // Setup video encoder if enabled
     if (config_.recordVideo) {
         if (!setupVideoEncoder(&context->videoCodecContext, userId)) {
-            std::cerr << "[RecordingSink] Failed to setup video encoder for user " << userId
-                      << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to setup video encoder for user %s", userId.c_str());
             return false;
         }
 
         context->videoStream =
             avformat_new_stream(context->formatContext, context->videoCodecContext->codec);
         if (!context->videoStream) {
-            std::cerr << "[RecordingSink] Failed to create video stream for user " << userId
-                      << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to create video stream for user %s", userId.c_str());
             return false;
         }
 
@@ -547,8 +475,7 @@ bool RecordingSink::initializeEncoder(const std::string& userId) {
         // Allocate video frame
         context->videoFrame = av_frame_alloc();
         if (!context->videoFrame) {
-            std::cerr << "[RecordingSink] Failed to allocate video frame for user " << userId
-                      << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to allocate video frame for user %s", userId.c_str());
             return false;
         }
 
@@ -557,8 +484,7 @@ bool RecordingSink::initializeEncoder(const std::string& userId) {
         context->videoFrame->height = context->videoCodecContext->height;
 
         if (av_frame_get_buffer(context->videoFrame, 32) < 0) {
-            std::cerr << "[RecordingSink] Failed to allocate video frame buffer for user " << userId
-                      << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to allocate video frame buffer for user %s", userId.c_str());
             return false;
         }
 
@@ -568,20 +494,17 @@ bool RecordingSink::initializeEncoder(const std::string& userId) {
 
     // Setup audio encoder if enabled
     if (config_.recordAudio) {
-        std::cout << "[RecordingSink] Setting up audio encoder for user " << userId << std::endl;
+        AG_LOG_FAST(INFO, "Setting up audio encoder for user %s", userId.c_str());
         if (!setupAudioEncoder(&context->audioCodecContext, userId)) {
-            std::cerr << "[RecordingSink] Failed to setup audio encoder for user " << userId
-                      << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to setup audio encoder for user %s", userId.c_str());
             return false;
         }
-        std::cout << "[RecordingSink] Audio encoder setup successful for user " << userId
-                  << std::endl;
+        AG_LOG_FAST(INFO, "Audio encoder setup successful for user %s", userId.c_str());
 
         context->audioStream =
             avformat_new_stream(context->formatContext, context->audioCodecContext->codec);
         if (!context->audioStream) {
-            std::cerr << "[RecordingSink] Failed to create audio stream for user " << userId
-                      << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to create audio stream for user %s", userId.c_str());
             return false;
         }
 
@@ -591,8 +514,7 @@ bool RecordingSink::initializeEncoder(const std::string& userId) {
         // Allocate audio frame for output
         context->audioFrame = av_frame_alloc();
         if (!context->audioFrame) {
-            std::cerr << "[RecordingSink] Failed to allocate audio frame for user " << userId
-                      << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to allocate audio frame for user %s", userId.c_str());
             return false;
         }
 
@@ -603,15 +525,15 @@ bool RecordingSink::initializeEncoder(const std::string& userId) {
 
     // Write header
     if (avformat_write_header(context->formatContext, nullptr) < 0) {
-        std::cerr << "[RecordingSink] Failed to write header for user " << userId << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to write header for user %s", userId.c_str());
         return false;
     }
 
     // Log the actual time bases after header is written
-    std::cout << "[RecordingSink] Stream time base: " << context->videoStream->time_base.num << "/"
-              << context->videoStream->time_base.den
-              << ", Codec time base: " << context->videoCodecContext->time_base.num << "/"
-              << context->videoCodecContext->time_base.den << std::endl;
+    AG_LOG_FAST(INFO, "Stream time base: %d/%d, Codec time base: %d/%d",
+                context->videoStream->time_base.num, context->videoStream->time_base.den,
+                context->videoCodecContext->time_base.num,
+                context->videoCodecContext->time_base.den);
 
     // Save filename before moving context
     std::string filename = context->filename;
@@ -623,8 +545,8 @@ bool RecordingSink::initializeEncoder(const std::string& userId) {
         compositeContext_ = std::move(context);
     }
 
-    std::cout << "[RecordingSink] Initialized encoder for user " << userId
-              << ", output file: " << filename << std::endl;
+    AG_LOG_FAST(INFO, "Initialized encoder for user %s, output file: %s", userId.c_str(),
+                filename.c_str());
 
     return true;
 }
@@ -648,20 +570,22 @@ bool RecordingSink::setupVideoEncoder(AVCodecContext** videoCodecContext,
                                       const std::string& userId) {
     const AVCodec* codec = avcodec_find_encoder_by_name(config_.videoCodec.c_str());
     if (!codec) {
-        std::cerr << "[RecordingSink] Video codec not found: " << config_.videoCodec << std::endl;
+        AG_LOG_FAST(ERROR, "Video codec not found: %s", config_.videoCodec.c_str());
         return false;
     }
 
     *videoCodecContext = avcodec_alloc_context3(codec);
     if (!*videoCodecContext) {
-        std::cerr << "[RecordingSink] Failed to allocate video codec context" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to allocate video codec context");
         return false;
     }
 
     (*videoCodecContext)->bit_rate = config_.videoBitrate;
     (*videoCodecContext)->width = config_.videoWidth;
     (*videoCodecContext)->height = config_.videoHeight;
-    (*videoCodecContext)->time_base = {1, config_.videoFps};  // Standard time base for video
+    // Modern best practice time base for video: 1/90000 (MPEG-2/H.264 standard)
+    // This is the standard time base used in modern video containers and codecs
+    (*videoCodecContext)->time_base = {1, 90000};
     (*videoCodecContext)->framerate = {config_.videoFps, 1};
     (*videoCodecContext)->gop_size = config_.videoFps;
     (*videoCodecContext)->max_b_frames = 0;  // Disable B-frames for stability
@@ -682,7 +606,7 @@ bool RecordingSink::setupVideoEncoder(AVCodecContext** videoCodecContext,
     av_dict_set(&opts, "fflags", "+flush_packets", 0);    // Flush packets immediately
 
     if (avcodec_open2(*videoCodecContext, codec, &opts) < 0) {
-        std::cerr << "[RecordingSink] Failed to open video codec" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to open video codec");
         av_dict_free(&opts);
         return false;
     }
@@ -696,7 +620,7 @@ bool RecordingSink::setupAudioEncoder(AVCodecContext** audioCodecContext,
                                       const std::string& userId) {
     const AVCodec* codec = avcodec_find_encoder_by_name(config_.audioCodec.c_str());
     if (!codec) {
-        std::cerr << "[RecordingSink] Audio codec not found: " << config_.audioCodec << std::endl;
+        AG_LOG_FAST(ERROR, "Audio codec not found: %s", config_.audioCodec.c_str());
         return false;
     }
 
@@ -710,7 +634,9 @@ bool RecordingSink::setupAudioEncoder(AVCodecContext** audioCodecContext,
     // Use the target audio parameters from config (48kHz stereo)
     (*audioCodecContext)->sample_rate = config_.audioSampleRate;
     av_channel_layout_default(&(*audioCodecContext)->ch_layout, config_.audioChannels);
-    (*audioCodecContext)->time_base = {1, config_.audioSampleRate};
+    // Modern best practice time base for audio: 1/90000 (MPEG standard)
+    // This provides high precision while avoiding overflow and is MP4/H.264 standard
+    (*audioCodecContext)->time_base = {1, 90000};
 
     if (avcodec_open2(*audioCodecContext, codec, nullptr) < 0) {
         return false;
@@ -720,23 +646,21 @@ bool RecordingSink::setupAudioEncoder(AVCodecContext** audioCodecContext,
 }
 
 bool RecordingSink::encodeVideoFrame(const VideoFrame& frame, const std::string& userId) {
-    std::cout << "[RecordingSink] encodeVideoFrame() - ENTRY, userId=" << userId << std::endl;
-    std::flush(std::cout);
-
     // Check if stop was requested before doing expensive video encoding
     if (stopRequested_.load()) {
-        std::cout << "[RecordingSink] encodeVideoFrame() - stopRequested detected, returning early"
-                  << std::endl;
-        std::flush(std::cout);
+        // std::cout << "[RecordingSink] encodeVideoFrame() - stopRequested detected, returning
+        // early"
+        //           << std::endl;
+        // std::flush(std::cout);
         return false;
     }
 
-    std::cout << "[RecordingSink] encodeVideoFrame() - stopRequested check passed" << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[RecordingSink] encodeVideoFrame() - stopRequested check passed" << std::endl;
+    // std::flush(std::cout);
 
     if (config_.mode == RecordingMode::INDIVIDUAL) {
-        std::cout << "[RecordingSink] encodeVideoFrame() - using INDIVIDUAL mode" << std::endl;
-        std::flush(std::cout);
+        // std::cout << "[RecordingSink] encodeVideoFrame() - using INDIVIDUAL mode" << std::endl;
+        // std::flush(std::cout);
         // Individual mode - encode each user separately
         std::lock_guard<std::mutex> lock(userContextsMutex_);
 
@@ -751,16 +675,8 @@ bool RecordingSink::encodeVideoFrame(const VideoFrame& frame, const std::string&
 
         return encodeIndividualFrame(frame, it->second.get());
     } else {
-        std::cout << "[RecordingSink] encodeVideoFrame() - using COMPOSITE mode" << std::endl;
-        std::flush(std::cout);
         // Composite mode - update composite buffer and potentially create composite frame
-        std::cout << "[RecordingSink] encodeVideoFrame() - about to call updateCompositeFrame()"
-                  << std::endl;
-        std::flush(std::cout);
         bool result = updateCompositeFrame(frame, userId);
-        std::cout << "[RecordingSink] encodeVideoFrame() - updateCompositeFrame() returned: "
-                  << result << std::endl;
-        std::flush(std::cout);
         return result;
     }
 }
@@ -779,10 +695,9 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
             context->videoCodecContext->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
 
         if (!context->swsContext) {
-            std::cerr << "[RecordingSink] Failed to create scaling context for frame "
-                      << frame.width() << "x" << frame.height() << " -> "
-                      << context->videoCodecContext->width << "x"
-                      << context->videoCodecContext->height << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to create scaling context for frame %ux%u -> %dx%d",
+                        frame.width(), frame.height(), context->videoCodecContext->width,
+                        context->videoCodecContext->height);
             return false;
         }
     }
@@ -790,13 +705,13 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
     // Convert VideoFrame to AVFrame for processing
     AVFrame* srcFrame = frame.toAVFrame();
     if (!srcFrame) {
-        std::cerr << "[RecordingSink] Failed to convert VideoFrame to AVFrame" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to convert VideoFrame to AVFrame");
         return false;
     }
 
     // Ensure frame is writable before scaling
     if (av_frame_make_writable(context->videoFrame) < 0) {
-        std::cerr << "[RecordingSink] Failed to make frame writable" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to make frame writable");
         av_frame_free(&srcFrame);
         return false;
     }
@@ -810,18 +725,40 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
     if (!context->hasFirstVideoFrame) {
         context->firstVideoTimestamp = frame.timestamp();
         context->hasFirstVideoFrame = true;
+        AG_LOG_TS(INFO, "FIRST VIDEO timestamp: %ld", context->firstVideoTimestamp);
+
+        // Compare timestamps if audio timestamp is already set
+        if (context->hasFirstAudioFrame) {
+            int64_t diff = context->firstAudioTimestamp - context->firstVideoTimestamp;
+            AG_LOG_TS(INFO,
+                      "TIMESTAMP COMPARISON - Audio vs Video base difference: %ldms (Audio: %ld, "
+                      "Video: %ld)",
+                      diff, context->firstAudioTimestamp, context->firstVideoTimestamp);
+        }
     }
 
-    // Calculate PTS based on the timestamp from the frame
-    context->videoFrame->pts = (frame.timestamp() - context->firstVideoTimestamp) *
-                               context->videoCodecContext->time_base.den /
-                               (context->videoCodecContext->time_base.num * 1000);
+    // Use relative timestamps to prevent overflow
+    // Calculate PTS using frame-based counting for video precision
+    int64_t timestamp_diff_ms = frame.timestamp() - context->firstVideoTimestamp;
+
+    // Ensure we don't have negative or excessive differences
+    if (timestamp_diff_ms < 0) {
+        timestamp_diff_ms = 0;
+    } else if (timestamp_diff_ms > INT64_MAX / 90000) {
+        // Prevent overflow during rescaling to 90kHz time base
+        AG_LOG_FAST(WARN, "Video timestamp diff too large: %ld ms, using frame count",
+                    timestamp_diff_ms);
+        timestamp_diff_ms = context->videoFrameCount * 1000 / config_.videoFps;
+    }
+
+    // Convert milliseconds to video time base (frame intervals)
+    context->videoFrame->pts =
+        av_rescale_q(timestamp_diff_ms, {1, 1000}, context->videoCodecContext->time_base);
 
     static int pts_log_count = 0;
     if (pts_log_count % 30 == 0) {
-        std::cout << "[RecordingSink] Video PTS: " << context->videoFrame->pts
-                  << ", timestamp: " << frame.timestamp()
-                  << ", first_timestamp: " << context->firstVideoTimestamp << std::endl;
+        AG_LOG_FAST(INFO, "Video PTS: %ld, timestamp: %ld, first_timestamp: %ld",
+                    context->videoFrame->pts, frame.timestamp(), context->firstVideoTimestamp);
     }
     pts_log_count++;
 
@@ -833,40 +770,34 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
         return false;
     }
 
-    std::cout << "[RecordingSink] About to call avcodec_send_frame()" << std::endl;
-    std::flush(std::cout);
+    AG_LOG_FAST(INFO, "About to call avcodec_send_frame()");
 
     int ret = avcodec_send_frame(context->videoCodecContext, context->videoFrame);
 
-    std::cout << "[RecordingSink] avcodec_send_frame() returned: " << ret << std::endl;
-    std::flush(std::cout);
+    AG_LOG_FAST(INFO, "avcodec_send_frame() returned: %d", ret);
 
     if (ret < 0) {
         av_packet_free(&packet);
         return false;
     }
 
-    std::cout << "[RecordingSink] Entering avcodec_receive_packet() loop" << std::endl;
-    std::flush(std::cout);
+    AG_LOG_FAST(INFO, "Entering avcodec_receive_packet() loop");
 
     while (ret >= 0) {
         // Check if stop was requested during encoding loop
         if (stopRequested_.load()) {
-            std::cout << "[RecordingSink] encodeIndividualFrame() - stopRequested detected in "
-                         "encoding loop, breaking"
-                      << std::endl;
-            std::flush(std::cout);
+            AG_LOG_FAST(
+                INFO,
+                "encodeIndividualFrame() - stopRequested detected in encoding loop, breaking");
             av_packet_free(&packet);
             return false;
         }
 
-        std::cout << "[RecordingSink] About to call avcodec_receive_packet()" << std::endl;
-        std::flush(std::cout);
+        AG_LOG_FAST(INFO, "About to call avcodec_receive_packet()");
 
         ret = avcodec_receive_packet(context->videoCodecContext, packet);
 
-        std::cout << "[RecordingSink] avcodec_receive_packet() returned: " << ret << std::endl;
-        std::flush(std::cout);
+        AG_LOG_FAST(INFO, "avcodec_receive_packet() returned: %d", ret);
 
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
             break;
@@ -878,21 +809,59 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
         // Set the stream index
         packet->stream_index = context->videoStream->index;
 
-        // Rescale timestamps to stream time base for proper muxing
-        av_packet_rescale_ts(packet, context->videoCodecContext->time_base,
-                             context->videoStream->time_base);
+        // Fix: Use manual rescaling to avoid overflow
+        if (packet->pts != AV_NOPTS_VALUE) {
+            // Manual rescaling with bounds checking to prevent overflow
+            int64_t rescaled_pts = av_rescale_q(packet->pts, context->videoCodecContext->time_base,
+                                                context->videoStream->time_base);
+
+            // Bounds check to prevent overflow
+            if (rescaled_pts != AV_NOPTS_VALUE && rescaled_pts >= 0) {
+                packet->pts = rescaled_pts;
+            } else {
+                // Fallback: use frame count based PTS
+                packet->pts =
+                    context->videoFrameCount * av_rescale_q(1, (AVRational){1, config_.videoFps},
+                                                            context->videoStream->time_base);
+            }
+        } else {
+            // If encoder didn't set PTS, use frame count based PTS
+            packet->pts =
+                context->videoFrameCount *
+                av_rescale_q(1, (AVRational){1, config_.videoFps}, context->videoStream->time_base);
+        }
+
+        // Set DTS equal to PTS for video (no B-frames)
+        packet->dts = packet->pts;
+
+        // Debug: Log PTS/DTS values
+        static int rescale_log_count = 0;
+        if (rescale_log_count % 30 == 0) {
+            AG_LOG_FAST(INFO, "Video packet - PTS: %ld, DTS: %ld, frame: %lu", packet->pts,
+                        packet->dts, context->videoFrameCount);
+        }
+        rescale_log_count++;
+
+        // Set packet duration for proper MP4 timing
+        if (packet->duration <= 0) {
+            packet->duration =
+                av_rescale_q(1, (AVRational){1, config_.videoFps}, context->videoStream->time_base);
+        }
+
+        // Capture PTS value before writing (muxer may modify packet)
+        int64_t original_pts = packet->pts;
 
         // Write packet - use av_interleaved_write_frame for proper timestamp ordering
         int write_ret = av_interleaved_write_frame(context->formatContext, packet);
         if (write_ret < 0) {
             char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
             av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, write_ret);
-            std::cerr << "[RecordingSink] Failed to write video frame: " << errbuf << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to write video frame: %s", errbuf);
         } else {
             static int video_log_count = 0;
             if (video_log_count % 30 == 0) {  // Log every 30th frame to reduce spam
-                std::cout << "[RecordingSink] Successfully wrote video packet " << video_log_count
-                          << ", pts: " << packet->pts << std::endl;
+                AG_LOG_FAST(INFO, "Successfully wrote video packet %d, pts: %ld", video_log_count,
+                            original_pts);
             }
             video_log_count++;
         }
@@ -906,10 +875,11 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
 bool RecordingSink::encodeAudioFrame(const AudioFrame& frame, const std::string& userId) {
     static int encode_log_count = 0;
     if (encode_log_count % 50 == 0) {  // Log every 50th encode to reduce spam
-        std::cout << "[RecordingSink] Encoding audio frame for user: " << userId
-                  << ", input: " << frame.sampleRate << "Hz, " << frame.channels << " channels"
-                  << ", target: " << config_.audioSampleRate << "Hz, " << config_.audioChannels
-                  << " channels" << std::endl;
+        AG_LOG_FAST(INFO,
+                    "Encoding audio frame for user: %s, input: %dHz, %d channels, target: %dHz, %d "
+                    "channels",
+                    userId.c_str(), frame.sampleRate, frame.channels, config_.audioSampleRate,
+                    config_.audioChannels);
     }
     encode_log_count++;
 
@@ -929,8 +899,8 @@ bool RecordingSink::encodeAudioFrame(const AudioFrame& frame, const std::string&
         return encodeIndividualAudioFrame(frame, context, userId);
     } else {
         // Composite mode - mix audio from multiple users
-        std::cout << "[RecordingSink] Composite mode: mixing audio from user " << userId
-                  << std::endl;
+        // std::cout << "[RecordingSink] Composite mode: mixing audio from user " << userId
+        //           << std::endl;
         return mixAudioFromMultipleUsers(frame, userId);
     }
 }
@@ -945,10 +915,11 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
     bool needsResampling =
         (frame.sampleRate != config_.audioSampleRate || frame.channels != config_.audioChannels);
 
-    std::cout << "[RecordingSink] Audio format check: input=" << frame.sampleRate << "Hz/"
-              << frame.channels << "ch, target=" << config_.audioSampleRate << "Hz/"
-              << config_.audioChannels << "ch, needsResampling=" << (needsResampling ? "YES" : "NO")
-              << std::endl;
+    // std::cout << "[RecordingSink] Audio format check: input=" << frame.sampleRate << "Hz/"
+    //           << frame.channels << "ch, target=" << config_.audioSampleRate << "Hz/"
+    //           << config_.audioChannels << "ch, needsResampling=" << (needsResampling ? "YES" :
+    //           "NO")
+    //           << std::endl;
 
     if (needsResampling && !context->swrContext) {
         // Create resampling context to convert input format to target format
@@ -962,20 +933,19 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
                                       0, nullptr);
 
         if (ret < 0 || !context->swrContext) {
-            std::cerr << "[RecordingSink] Failed to allocate resampling context" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to allocate resampling context");
             return false;
         }
 
         ret = swr_init(context->swrContext);
         if (ret < 0) {
-            std::cerr << "[RecordingSink] Failed to initialize resampling context" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to initialize resampling context");
             swr_free(&context->swrContext);
             return false;
         }
 
-        std::cout << "[RecordingSink] Initialized audio resampler: " << frame.sampleRate << "Hz "
-                  << frame.channels << "ch -> " << config_.audioSampleRate << "Hz "
-                  << config_.audioChannels << "ch" << std::endl;
+        AG_LOG_FAST(INFO, "Initialized audio resampler: %dHz %dch -> %dHz %dch", frame.sampleRate,
+                    frame.channels, config_.audioSampleRate, config_.audioChannels);
     }
 
     // Calculate input samples from the frame data
@@ -1005,27 +975,36 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
         // Not enough samples yet, return and wait for more
         static int buffer_log_count = 0;
         if (buffer_log_count % 50 == 0) {
-            std::cout << "[RecordingSink] Buffering audio: " << context->audioSampleBuffer.size()
-                      << "/" << required_samples << " samples" << std::endl;
+            AG_LOG_FAST(INFO, "Buffering audio: %zu/%d samples", context->audioSampleBuffer.size(),
+                        required_samples);
         }
         buffer_log_count++;
         return true;  // Successfully buffered, but not ready to encode yet
     }
 
-    std::cout << "[RecordingSink] Ready to encode: " << context->audioSampleBuffer.size()
-              << " samples (need " << required_samples << ")" << std::endl;
+    // std::cout << "[RecordingSink] Ready to encode: " << context->audioSampleBuffer.size()
+    //           << " samples (need " << required_samples << ")" << std::endl;
 
     // Initialize first frame timestamp for synchronization
     if (!context->hasFirstAudioFrame) {
         context->firstAudioTimestamp = frame.timestamp;
         context->hasFirstAudioFrame = true;
+        AG_LOG_TS(INFO, "FIRST AUDIO timestamp: %ld", context->firstAudioTimestamp);
+
+        // Compare timestamps if video timestamp is already set
+        if (context->hasFirstVideoFrame) {
+            int64_t diff = context->firstAudioTimestamp - context->firstVideoTimestamp;
+            AG_LOG_TS(INFO,
+                      "TIMESTAMP COMPARISON - Audio vs Video base difference: %ldms (Audio: %ld, "
+                      "Video: %ld)",
+                      diff, context->firstAudioTimestamp, context->firstVideoTimestamp);
+        }
     }
 
     static int audio_pts_log_count = 0;
     if (audio_pts_log_count % 50 == 0) {
-        std::cout << "[RecordingSink] Audio frame " << context->audioFrameCount
-                  << ", timestamp: " << frame.timestamp
-                  << ", firstTimestamp: " << context->firstAudioTimestamp << std::endl;
+        AG_LOG_FAST(INFO, "Audio frame %ld, timestamp: %ld, firstTimestamp: %ld",
+                    context->audioFrameCount, frame.timestamp, context->firstAudioTimestamp);
     }
     audio_pts_log_count++;
 
@@ -1035,21 +1014,33 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
     context->audioFrame->sample_rate = context->audioCodecContext->sample_rate;
     av_channel_layout_copy(&context->audioFrame->ch_layout, &context->audioCodecContext->ch_layout);
 
-    // Individual mode: Use frame.timestamp directly (simplified approach)
-    // Calculate PTS directly from RTC timestamp without complex buffering logic
-    int64_t pts = (frame.timestamp - context->firstAudioTimestamp) *
-                  context->audioCodecContext->time_base.den /
-                  (context->audioCodecContext->time_base.num * 1000);
+    // Use relative timestamps to prevent overflow
+    // Calculate PTS using sample-based counting for audio precision
+    int64_t timestamp_diff_ms = frame.timestamp - context->firstAudioTimestamp;
+
+    // Ensure we don't have negative or excessive differences
+    if (timestamp_diff_ms < 0) {
+        timestamp_diff_ms = 0;
+    } else if (timestamp_diff_ms > INT64_MAX / 90000) {
+        // Prevent overflow during rescaling to 90kHz time base
+        AG_LOG_FAST(WARN, "Audio timestamp diff too large: %ld ms, using frame count",
+                    timestamp_diff_ms);
+        timestamp_diff_ms = context->audioFrameCount * 1000 /
+                            (config_.audioSampleRate / context->audioCodecContext->frame_size);
+    }
+
+    // Convert milliseconds to audio time base (samples)
+    int64_t pts = av_rescale_q(timestamp_diff_ms, {1, 1000}, context->audioCodecContext->time_base);
 
     context->audioFrame->pts = pts;
     context->lastBufferedTimestamp = frame.timestamp;  // Track for debugging
 
-    std::cout << "[RecordingSink] Individual audio PTS: " << pts
-              << " from timestamp: " << frame.timestamp << std::endl;
+    // std::cout << "[RecordingSink] Individual audio PTS: " << pts
+    //           << " from timestamp: " << frame.timestamp << std::endl;
 
     // Allocate buffer for audio frame
     if (av_frame_get_buffer(context->audioFrame, 0) < 0) {
-        std::cerr << "[RecordingSink] Failed to make audio frame writable" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to make audio frame writable");
         return false;
     }
 
@@ -1069,7 +1060,7 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
                                          samples_per_frame, input, input_samples_for_resampling);
 
         if (output_samples < 0) {
-            std::cerr << "[RecordingSink] Audio resampling failed" << std::endl;
+            AG_LOG_FAST(ERROR, "Audio resampling failed");
             return false;
         }
 
@@ -1078,8 +1069,8 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
 
         static int resample_log_count = 0;
         if (resample_log_count % 100 == 0) {
-            std::cout << "[RecordingSink] Resampled " << input_samples_for_resampling << " -> "
-                      << output_samples << " samples" << std::endl;
+            AG_LOG_FAST(INFO, "Resampled %d -> %d samples", input_samples_for_resampling,
+                        output_samples);
         }
         resample_log_count++;
 
@@ -1161,32 +1152,48 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
         // Set proper timestamps for audio packet
         packet->stream_index = context->audioStream->index;
 
-        // Debug: Check PTS before rescaling
-        std::cout << "[RecordingSink] BEFORE rescale - packet PTS: " << packet->pts
-                  << " (effectiveTimestamp: " << context->lastBufferedTimestamp << ")"
-                  << ", codec time_base: " << context->audioCodecContext->time_base.num << "/"
-                  << context->audioCodecContext->time_base.den
-                  << ", stream time_base: " << context->audioStream->time_base.num << "/"
-                  << context->audioStream->time_base.den << std::endl;
+        // Fix: Use safe audio timestamp handling
+        if (packet->pts != AV_NOPTS_VALUE) {
+            // Audio packets: rescale with bounds checking
+            int64_t rescaled_pts = av_rescale_q(packet->pts, context->audioCodecContext->time_base,
+                                                context->audioStream->time_base);
 
-        // Rescale timestamps to stream time base for proper muxing
-        av_packet_rescale_ts(packet, context->audioCodecContext->time_base,
-                             context->audioStream->time_base);
+            if (rescaled_pts != AV_NOPTS_VALUE && rescaled_pts >= 0) {
+                packet->pts = rescaled_pts;
+            } else {
+                // Fallback: frame-based calculation
+                packet->pts = context->audioFrameCount * context->audioCodecContext->frame_size;
+            }
+        } else {
+            // If encoder didn't set PTS, calculate from frame count
+            packet->pts = context->audioFrameCount * context->audioCodecContext->frame_size;
+        }
 
-        // Debug: Check PTS after rescaling
-        std::cout << "[RecordingSink] AFTER rescale - packet PTS: " << packet->pts << std::endl;
+        // For audio, DTS = PTS (no reordering)
+        packet->dts = packet->pts;
+
+        // Debug: Log audio packet info
+        static int audio_rescale_log_count = 0;
+        if (audio_rescale_log_count % 50 == 0) {
+            AG_LOG_FAST(INFO, "Audio packet - PTS: %ld, DTS: %ld, frame: %lu", packet->pts,
+                        packet->dts, context->audioFrameCount);
+        }
+        audio_rescale_log_count++;
+
+        // Capture PTS value before writing (muxer may modify packet)
+        int64_t original_pts = packet->pts;
 
         // Write packet using interleaved write for proper timestamp ordering
         int write_ret = av_interleaved_write_frame(context->formatContext, packet);
         if (write_ret < 0) {
             char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
             av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, write_ret);
-            std::cerr << "[RecordingSink] Failed to write audio frame: " << errbuf << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to write audio frame: %s", errbuf);
         } else {
             static int audio_write_log_count = 0;
             if (audio_write_log_count % 50 == 0) {
-                std::cout << "[RecordingSink] Successfully wrote audio packet "
-                          << audio_write_log_count << ", pts: " << packet->pts << std::endl;
+                AG_LOG_FAST(INFO, "Successfully wrote audio packet %d, pts: %ld",
+                            audio_write_log_count, original_pts);
             }
             audio_write_log_count++;
         }
@@ -1198,8 +1205,9 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
 }
 
 bool RecordingSink::mixAudioFromMultipleUsers(const AudioFrame& frame, const std::string& userId) {
-    std::cout << "[RecordingSink] mixAudioFromMultipleUsers called for user " << userId << " with "
-              << frame.data.size() << " bytes" << std::endl;
+    // std::cout << "[RecordingSink] mixAudioFromMultipleUsers called for user " << userId << " with
+    // "
+    //           << frame.data.size() << " bytes" << std::endl;
 
     // Convert audio frame to float format for mixing
     std::vector<float> audioSamples;
@@ -1221,8 +1229,8 @@ bool RecordingSink::mixAudioFromMultipleUsers(const AudioFrame& frame, const std
         // This preserves the original RTC client timing like lastBufferedTimestamp does
         lastAudioMixTime_ = frame.timestamp;
 
-        std::cout << "[RecordingSink] Audio mixing buffer now has " << audioMixingBuffer_.size()
-                  << " users, using RTC timestamp: " << frame.timestamp << std::endl;
+        // std::cout << "[RecordingSink] Audio mixing buffer now has " << audioMixingBuffer_.size()
+        //           << " users, using RTC timestamp: " << frame.timestamp << std::endl;
     }
 
     // Trigger mixing immediately when new audio data is available
@@ -1233,8 +1241,9 @@ bool RecordingSink::createMixedAudioFrame() {
     std::lock_guard<std::mutex> mixLock(audioMixingMutex_);
     std::lock_guard<std::mutex> contextLock(userContextsMutex_);
 
-    std::cout << "[RecordingSink] createMixedAudioFrame called with " << audioMixingBuffer_.size()
-              << " users in buffer" << std::endl;
+    // std::cout << "[RecordingSink] createMixedAudioFrame called with " <<
+    // audioMixingBuffer_.size()
+    //           << " users in buffer" << std::endl;
 
     if (audioMixingBuffer_.empty()) {
         return true;  // No audio to mix
@@ -1306,21 +1315,20 @@ bool RecordingSink::createMixedAudioFrame() {
         if (rtcTimestamp <= compositeContext_->lastBufferedTimestamp) {
             // Minimal safety increment (1ms) to maintain monotonic progression
             mixedFrame.timestamp = compositeContext_->lastBufferedTimestamp + 1;
-            std::cout << "[RecordingSink] Mixed audio monotonic safety: " << mixedFrame.timestamp
-                      << " (RTC: " << rtcTimestamp
-                      << " would go backwards, last: " << compositeContext_->lastBufferedTimestamp
-                      << ")" << std::endl;
+            AG_LOG_FAST(
+                INFO, "Mixed audio monotonic safety: %lu (RTC: %lu would go backwards, last: %lu)",
+                mixedFrame.timestamp, rtcTimestamp, compositeContext_->lastBufferedTimestamp);
         } else {
             // Use real RTC timestamp for perfect sync
             mixedFrame.timestamp = rtcTimestamp;
-            std::cout << "[RecordingSink] Mixed audio using RTC timestamp: " << mixedFrame.timestamp
-                      << std::endl;
+            // std::cout << "[RecordingSink] Mixed audio using RTC timestamp: " <<
+            // mixedFrame.timestamp
+            //           << std::endl;
         }
     } else {
         // First frame: always use RTC timestamp
         mixedFrame.timestamp = rtcTimestamp;
-        std::cout << "[RecordingSink] Mixed audio first RTC timestamp: " << mixedFrame.timestamp
-                  << std::endl;
+        AG_LOG_TS(INFO, "Mixed audio first RTC timestamp: %ld", mixedFrame.timestamp);
     }
     mixedFrame.valid = true;
 
@@ -1387,21 +1395,20 @@ bool RecordingSink::writePacket(AVPacket* packet, AVFormatContext* formatContext
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
         av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, ret);
-        std::cerr << "[RecordingSink] Failed to write packet: " << errbuf << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to write packet: %s", errbuf);
         return false;
     }
     return true;
 }
 
 void RecordingSink::flushAllEncoders() {
-    std::cout << "[RecordingSink] Flushing all encoders to prevent blocking..." << std::endl;
-    std::flush(std::cout);
+    AG_LOG_TS(INFO, "Flushing all encoders to prevent blocking...");
 
     std::lock_guard<std::mutex> lock(userContextsMutex_);
 
     // Flush composite encoder
     if (compositeContext_ && compositeContext_->videoCodecContext) {
-        std::cout << "[RecordingSink] Flushing composite video encoder" << std::endl;
+        AG_LOG_TS(INFO, "Flushing composite video encoder");
         // Send NULL frame to signal end-of-stream and flush buffers
         avcodec_send_frame(compositeContext_->videoCodecContext, nullptr);
 
@@ -1416,7 +1423,7 @@ void RecordingSink::flushAllEncoders() {
     }
 
     if (compositeContext_ && compositeContext_->audioCodecContext) {
-        std::cout << "[RecordingSink] Flushing composite audio encoder" << std::endl;
+        AG_LOG_TS(INFO, "Flushing composite audio encoder");
         avcodec_send_frame(compositeContext_->audioCodecContext, nullptr);
 
         AVPacket* pkt = av_packet_alloc();
@@ -1434,7 +1441,7 @@ void RecordingSink::flushAllEncoders() {
         UserContext* context = pair.second.get();
 
         if (context && context->videoCodecContext) {
-            std::cout << "[RecordingSink] Flushing video encoder for user: " << userId << std::endl;
+            AG_LOG_FAST(INFO, "Flushing video encoder for user: %s", userId.c_str());
             avcodec_send_frame(context->videoCodecContext, nullptr);
 
             AVPacket* pkt = av_packet_alloc();
@@ -1447,7 +1454,7 @@ void RecordingSink::flushAllEncoders() {
         }
 
         if (context && context->audioCodecContext) {
-            std::cout << "[RecordingSink] Flushing audio encoder for user: " << userId << std::endl;
+            AG_LOG_FAST(INFO, "Flushing audio encoder for user: %s", userId.c_str());
             avcodec_send_frame(context->audioCodecContext, nullptr);
 
             AVPacket* pkt = av_packet_alloc();
@@ -1460,8 +1467,7 @@ void RecordingSink::flushAllEncoders() {
         }
     }
 
-    std::cout << "[RecordingSink] All encoders flushed successfully" << std::endl;
-    std::flush(std::cout);
+    AG_LOG_TS(INFO, "All encoders flushed successfully");
 }
 
 void RecordingSink::cleanupEncoder(const std::string& userId) {
@@ -1479,6 +1485,39 @@ void RecordingSink::cleanupEncoder(const std::string& userId) {
 
     if (!context) {
         return;
+    }
+
+    // Flush remaining audio samples first to prevent cutting
+    if (context->audioCodecContext && !context->audioSampleBuffer.empty()) {
+        AG_LOG_FAST(INFO, "Flushing remaining %zu audio samples for user %s",
+                    context->audioSampleBuffer.size(), userId.c_str());
+
+        int samples_per_frame = context->audioCodecContext->frame_size;
+        if (samples_per_frame == 0) samples_per_frame = 1024;
+
+        size_t required_samples = samples_per_frame * config_.audioChannels;
+
+        // Pad with silence if necessary
+        if (context->audioSampleBuffer.size() < required_samples) {
+            size_t old_size = context->audioSampleBuffer.size();
+            context->audioSampleBuffer.resize(required_samples, 0);  // Pad with silence
+            AG_LOG_FAST(INFO, "Padded audio buffer from %zu to %zu samples", old_size,
+                        required_samples);
+        }
+
+        // Create final audio frame
+        AudioFrame finalFrame;
+        finalFrame.data.resize(required_samples * sizeof(int16_t));
+        std::memcpy(finalFrame.data.data(), context->audioSampleBuffer.data(),
+                    finalFrame.data.size());
+        finalFrame.sampleRate = config_.audioSampleRate;
+        finalFrame.channels = config_.audioChannels;
+        finalFrame.timestamp = context->lastBufferedTimestamp + 20;
+        finalFrame.valid = true;
+        finalFrame.userId = userId;
+
+        encodeIndividualAudioFrame(finalFrame, context, userId);
+        context->audioSampleBuffer.clear();
     }
 
     // Write any buffered frames
@@ -1584,18 +1623,15 @@ bool RecordingSink::shouldRecordUser(const std::string& userId) const {
 }
 
 bool RecordingSink::updateCompositeFrame(const VideoFrame& frame, const std::string& userId) {
-    std::cout << "[RecordingSink] updateCompositeFrame() - ENTRY, userId=" << userId << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[RecordingSink] updateCompositeFrame() - ENTRY, userId=" << userId <<
+    // std::endl; std::flush(std::cout);
 
     {
-        std::cout
-            << "[RecordingSink] updateCompositeFrame() - about to acquire compositeBufferMutex_"
-            << std::endl;
-        std::flush(std::cout);
+        // std::cout
+        //     << "[RecordingSink] updateCompositeFrame() - about to acquire compositeBufferMutex_"
+        //     << std::endl;
+        // std::flush(std::cout);
         std::lock_guard<std::mutex> lock(compositeBufferMutex_);
-        std::cout << "[RecordingSink] updateCompositeFrame() - acquired compositeBufferMutex_"
-                  << std::endl;
-        std::flush(std::cout);
 
         // Store the latest frame from this user
         compositeFrameBuffer_[userId] = frame;
@@ -1613,8 +1649,8 @@ bool RecordingSink::updateCompositeFrame(const VideoFrame& frame, const std::str
             uint64_t frameTime = compositeFrameTimestamps_[user];
 
             if (currentTime - frameTime > COMPOSITE_FRAME_TIMEOUT_MS) {
-                std::cout << "[RecordingSink] Removing old frame for user " << user
-                          << " (age: " << (currentTime - frameTime) << "ms)" << std::endl;
+                AG_LOG_FAST(INFO, "Removing old frame for user %s (age: %lums)", user.c_str(),
+                            (currentTime - frameTime));
                 compositeFrameTimestamps_.erase(user);
                 it = compositeFrameBuffer_.erase(it);
             } else {
@@ -1640,35 +1676,36 @@ bool RecordingSink::updateCompositeFrame(const VideoFrame& frame, const std::str
     lastCompositeTime_ = currentTime;
 
     // Use VideoCompositor for all video composition
-    std::cout
-        << "[RecordingSink] updateCompositeFrame() - about to call videoCompositor_->addUserFrame()"
-        << std::endl;
-    std::flush(std::cout);
+    // std::cout
+    //     << "[RecordingSink] updateCompositeFrame() - about to call
+    //     videoCompositor_->addUserFrame()"
+    //     << std::endl;
+    // std::flush(std::cout);
 
     if (videoCompositor_) {
-        std::cout
-            << "[RecordingSink] updateCompositeFrame() - calling videoCompositor_->addUserFrame()"
-            << std::endl;
-        std::flush(std::cout);
+        // std::cout
+        //     << "[RecordingSink] updateCompositeFrame() - calling
+        //     videoCompositor_->addUserFrame()"
+        //     << std::endl;
+        // std::flush(std::cout);
 
         // Skip VideoCompositor if stop was requested to avoid blocking
         if (stopRequested_.load()) {
-            std::cout << "[RecordingSink] updateCompositeFrame() - stopRequested detected, "
-                         "skipping VideoCompositor"
-                      << std::endl;
-            std::flush(std::cout);
+            // std::cout << "[RecordingSink] updateCompositeFrame() - stopRequested detected, "
+            //              "skipping VideoCompositor"
+            //           << std::endl;
+            // std::flush(std::cout);
             return true;
         }
 
         bool result = videoCompositor_->addUserFrame(frame, userId);
-        std::cout << "[RecordingSink] updateCompositeFrame() - videoCompositor_->addUserFrame() "
-                     "returned: "
-                  << result << std::endl;
-        std::flush(std::cout);
+        // std::cout << "[RecordingSink] updateCompositeFrame() - videoCompositor_->addUserFrame() "
+        //              "returned: "
+        //           << result << std::endl;
+        // std::flush(std::cout);
         return result;
     } else {
-        std::cerr << "[RecordingSink] VideoCompositor not initialized for composite mode"
-                  << std::endl;
+        AG_LOG_FAST(ERROR, "VideoCompositor not initialized for composite mode");
         return false;
     }
 }
@@ -1678,95 +1715,168 @@ void RecordingSink::onComposedFrame(const AVFrame* composedFrame) {
         return;
     }
 
+    static int debug_composed_count = 0;
+    debug_composed_count++;
+    if (debug_composed_count % 30 == 0) {
+        AG_LOG_FAST(INFO, "DEBUG: onComposedFrame() #%d - Raw composedFrame->pts: %ld",
+                    debug_composed_count, composedFrame->pts);
+    }
+
     std::lock_guard<std::mutex> contextLock(userContextsMutex_);
 
     // Initialize composite context if needed
     if (!compositeContext_) {
         if (!initializeEncoder("")) {
-            std::cerr << "[RecordingSink] Failed to initialize encoder for composite frame"
-                      << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to initialize encoder for composite frame");
             return;
         }
     }
 
     UserContext* context = compositeContext_.get();
     if (!context || !context->videoCodecContext || !context->videoFrame) {
-        std::cerr << "[RecordingSink] Invalid composite context for encoding" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid composite context for encoding");
         return;
     }
 
     // Copy the composed frame to our encoding frame
     if (av_frame_copy(context->videoFrame, composedFrame) < 0) {
-        std::cerr << "[RecordingSink] Failed to copy composed frame" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to copy composed frame");
         return;
     }
 
-    // Apply RTC timestamp with monotonic safety (from VideoCompositor)
-    context->videoFrame->pts = composedFrame->pts;
-
+    // Initialize first frame timestamp for synchronization in composite mode
     if (!context->hasFirstVideoFrame) {
         context->firstVideoTimestamp = composedFrame->pts;
         context->hasFirstVideoFrame = true;
-        std::cout << "[RecordingSink] First composed frame PTS: " << composedFrame->pts
-                  << std::endl;
+        AG_LOG_TS(INFO, "FIRST VIDEO timestamp (composite): %ld", context->firstVideoTimestamp);
+
+        // Compare timestamps if audio timestamp is already set
+        if (context->hasFirstAudioFrame) {
+            int64_t diff = context->firstAudioTimestamp - context->firstVideoTimestamp;
+            AG_LOG_TS(INFO,
+                      "TIMESTAMP COMPARISON - Audio vs Video base difference: %ldms (Audio: %ld, "
+                      "Video: %ld)",
+                      diff, context->firstAudioTimestamp, context->firstVideoTimestamp);
+        }
     }
+
+    // Use relative timestamps to prevent overflow
+    // Convert RTC timestamp to video timebase using frame-based precision
+    int64_t timestamp_diff_ms = composedFrame->pts - context->firstVideoTimestamp;
+
+    // Ensure we don't have negative or excessive differences
+    if (timestamp_diff_ms < 0) {
+        timestamp_diff_ms = 0;
+    } else if (timestamp_diff_ms > INT64_MAX / 90000) {
+        // Prevent overflow during rescaling to 90kHz time base
+        AG_LOG_FAST(WARN, "Composite timestamp diff too large: %ld ms, using frame count",
+                    timestamp_diff_ms);
+        timestamp_diff_ms = context->videoFrameCount * 1000 / config_.videoFps;
+    }
+
+    // Convert milliseconds to video time base (frame intervals)
+    context->videoFrame->pts =
+        av_rescale_q(timestamp_diff_ms, {1, 1000}, context->videoCodecContext->time_base);
+
+    static int composite_pts_log_count = 0;
+    if (composite_pts_log_count % 30 == 0) {
+        AG_LOG_FAST(INFO,
+                    "COMPOSITE FRAME PTS FIX - Original RTC: %ld, diff_ms: %ld, FIXED PTS: %ld",
+                    composedFrame->pts, timestamp_diff_ms, context->videoFrame->pts);
+    }
+    composite_pts_log_count++;
 
     context->videoFrameCount++;
 
     // Encode the composed frame
     AVPacket* packet = av_packet_alloc();
     if (!packet) {
-        std::cerr << "[RecordingSink] Failed to allocate packet for composed frame" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to allocate packet for composed frame");
         return;
     }
 
-    std::cout << "[RecordingSink] Composite: About to call avcodec_send_frame()" << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[RecordingSink] Composite: About to call avcodec_send_frame()" << std::endl;
+    // std::flush(std::cout);
 
     int ret = avcodec_send_frame(context->videoCodecContext, context->videoFrame);
 
-    std::cout << "[RecordingSink] Composite: avcodec_send_frame() returned: " << ret << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[RecordingSink] Composite: avcodec_send_frame() returned: " << ret <<
+    // std::endl; std::flush(std::cout);
 
     if (ret < 0) {
         av_packet_free(&packet);
-        std::cerr << "[RecordingSink] Failed to send composed frame to encoder" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to send composed frame to encoder");
         return;
     }
 
-    std::cout << "[RecordingSink] Composite: Entering avcodec_receive_packet() loop" << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[RecordingSink] Composite: Entering avcodec_receive_packet() loop" <<
+    // std::endl; std::flush(std::cout);
 
     while (ret >= 0) {
-        std::cout << "[RecordingSink] Composite: About to call avcodec_receive_packet()"
-                  << std::endl;
-        std::flush(std::cout);
+        // std::cout << "[RecordingSink] Composite: About to call avcodec_receive_packet()"
+        //           << std::endl;
+        // std::flush(std::cout);
 
         ret = avcodec_receive_packet(context->videoCodecContext, packet);
 
-        std::cout << "[RecordingSink] Composite: avcodec_receive_packet() returned: " << ret
-                  << std::endl;
-        std::flush(std::cout);
+        // std::cout << "[RecordingSink] Composite: avcodec_receive_packet() returned: " << ret
+        //           << std::endl;
+        // std::flush(std::cout);
 
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
             break;
         } else if (ret < 0) {
             av_packet_free(&packet);
-            std::cerr << "[RecordingSink] Failed to receive packet from encoder" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to receive packet from encoder");
             return;
         }
 
         packet->stream_index = context->videoStream->index;
-        av_packet_rescale_ts(packet, context->videoCodecContext->time_base,
-                             context->videoStream->time_base);
+
+        static int rescale_log_count = 0;
+        if (rescale_log_count % 30 == 0) {
+            AG_LOG_FAST(
+                INFO, "BEFORE rescale - PTS: %ld, codec time_base: %d/%d, stream time_base: %d/%d",
+                packet->pts, context->videoCodecContext->time_base.num,
+                context->videoCodecContext->time_base.den, context->videoStream->time_base.num,
+                context->videoStream->time_base.den);
+        }
+        rescale_log_count++;
+
+        // Fix: Use manual rescaling to avoid overflow (same as individual mode)
+        if (packet->pts != AV_NOPTS_VALUE) {
+            int64_t rescaled_pts = av_rescale_q(packet->pts, context->videoCodecContext->time_base,
+                                                context->videoStream->time_base);
+            if (rescaled_pts != AV_NOPTS_VALUE && rescaled_pts >= 0) {
+                packet->pts = rescaled_pts;
+            } else {
+                packet->pts =
+                    context->videoFrameCount * av_rescale_q(1, (AVRational){1, config_.videoFps},
+                                                            context->videoStream->time_base);
+            }
+        } else {
+            packet->pts =
+                context->videoFrameCount *
+                av_rescale_q(1, (AVRational){1, config_.videoFps}, context->videoStream->time_base);
+        }
+
+        // Set DTS equal to PTS for video (no B-frames)
+        packet->dts = packet->pts;
+
+        if (rescale_log_count % 30 == 0) {
+            AG_LOG_FAST(INFO, "AFTER rescale - PTS: %ld", packet->pts);
+        }
+
+        // Capture PTS value before writing (muxer may modify packet)
+        int64_t original_pts = packet->pts;
 
         if (!writePacket(packet, context->formatContext, context->videoStream)) {
-            std::cerr << "[RecordingSink] Failed to write composed frame packet" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to write composed frame packet");
         } else {
             static int composed_log_count = 0;
             if (composed_log_count % 30 == 0) {
-                std::cout << "[RecordingSink] Successfully encoded composed frame "
-                          << composed_log_count << ", pts: " << packet->pts << std::endl;
+                AG_LOG_FAST(INFO, "Successfully encoded composed frame %d, pts: %ld",
+                            composed_log_count, original_pts);
             }
             composed_log_count++;
         }
@@ -1806,7 +1916,7 @@ void RecordingSink::cleanupCompositeResources() {
         audioMixingBuffer_.clear();
     }
 
-    std::cout << "[RecordingSink] Cleaned up composite performance caches" << std::endl;
+    AG_LOG_FAST(INFO, "Cleaned up composite performance caches");
 }
 
 }  // namespace rtc

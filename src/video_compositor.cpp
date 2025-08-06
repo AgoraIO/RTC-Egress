@@ -1,13 +1,17 @@
+#define AG_LOG_TAG "VideoCompositor"
+
 #include "include/video_compositor.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <limits>
 
 #include "common/ffmpeg_utils.h"
+#include "common/log.h"
 
 extern "C" {
 #include <libavutil/imgutils.h>
@@ -34,7 +38,7 @@ bool VideoCompositor::initialize(const Config& config) {
     // Initialize LayoutDetector (always enabled for layout stability)
     layoutDetector_ = std::make_unique<LayoutDetector>();
     if (!layoutDetector_->initialize(config_.layoutDetectorConfig)) {
-        std::cerr << "[VideoCompositor] Failed to initialize LayoutDetector" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to initialize LayoutDetector");
         return false;
     }
 
@@ -43,19 +47,19 @@ bool VideoCompositor::initialize(const Config& config) {
         [this](const std::vector<std::string>& activeUsers) { this->onLayoutChange(activeUsers); });
 
     layoutDetector_->start();
-    std::cout << "[VideoCompositor] LayoutDetector started (always enabled)" << std::endl;
+    AG_LOG_FAST(INFO, "LayoutDetector started (always enabled)");
 
     initialized_ = true;
     lastCompositeTime_ = getCurrentTimeMs();
 
-    std::cout << "[VideoCompositor] Initialized with " << config_.outputWidth << "x"
-              << config_.outputHeight << " output resolution" << std::endl;
+    AG_LOG_FAST(INFO, "Initialized with %dx%d output resolution", config_.outputWidth,
+                config_.outputHeight);
 
     return true;
 }
 
-void VideoCompositor::setComposedFrameCallback(ComposedFrameCallback callback) {
-    frameCallback_ = std::move(callback);
+void VideoCompositor::setComposedVideoFrameCallback(ComposedVideoFrameCallback callback) {
+    videoFrameCallback_ = std::move(callback);
 }
 
 bool VideoCompositor::addUserFrame(const VideoFrame& frame, const std::string& userId) {
@@ -81,31 +85,29 @@ bool VideoCompositor::addUserFrame(const VideoFrame& frame, const std::string& u
     // Clean up old frames
     cleanupOldFramesWithoutLock();
 
-    // Dynamic frame rate control based on user count
+    // Performance-based frame rate control - only reduce frames when needed
     uint64_t minInterval = config_.minCompositeIntervalMs;
-    size_t userCount = getActiveUserCountWithoutLock();
-    if (userCount > 4) {
-        minInterval = 33;  // 30fps for 5+ users
-    }
-    if (userCount > 9) {
-        minInterval = 66;  // 15fps for 10+ users
-    }
+    uint64_t interval = currentTime - lastCompositeTime_;
 
-    // Only create composite frame if enough time has passed
-    if (currentTime - lastCompositeTime_ >= minInterval) {
-        std::cout << "[VideoCompositor] addUserFrame() about to call createCompositeFrame()"
-                  << std::endl;
-        std::flush(std::cout);
+    // Always try to create composite frame at configured rate
+    // Only skip if we're processing too fast or if performance is poor
+    if (interval >= minInterval) {
         bool result = createCompositeFrameWithoutLock(activeUsers);
-        std::cout << "[VideoCompositor] addUserFrame() createCompositeFrame() returned " << result
-                  << std::endl;
-        std::flush(std::cout);
+        static int create_composite_frame_log_count = 0;
+        if (create_composite_frame_log_count % 30 == 0) {
+            AG_LOG_FAST(INFO, "addUserFrame() createCompositeFrame() returned %d", result);
+        }
+        create_composite_frame_log_count++;
         return result;
     }
 
-    std::cout << "[VideoCompositor] addUserFrame() skipping composite frame creation (too soon)"
-              << std::endl;
-    std::flush(std::cout);
+    // Frame rate limiting - only skip if we're processing faster than configured rate
+    static int skip_frame_log_count = 0;
+    if (skip_frame_log_count % 100 == 0) {  // Log every 100 skips to avoid spam
+        AG_LOG_FAST(INFO, "addUserFrame() frame rate limiting (interval %lu < %lu)", interval,
+                    minInterval);
+    }
+    skip_frame_log_count++;
     return true;
 }
 
@@ -116,7 +118,7 @@ bool VideoCompositor::addUserFrame(const uint8_t* yBuffer, const uint8_t* uBuffe
     // Validate input parameters using shared utility
     if (!agora::common::validateYUVBuffers(yBuffer, uBuffer, vBuffer, yStride, uStride, vStride,
                                            width, height)) {
-        std::cerr << "[VideoCompositor] YUV buffer validation failed" << std::endl;
+        AG_LOG_FAST(ERROR, "YUV buffer validation failed");
         return false;
     }
 
@@ -166,7 +168,7 @@ bool VideoCompositor::createCompositeFrameWithoutLock(const std::vector<std::str
 
     // Clear composite frame to black
     if (av_frame_make_writable(compositeFrame_) < 0) {
-        std::cerr << "[VideoCompositor] Failed to make composite frame writable" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to make composite frame writable");
         return false;
     }
 
@@ -198,8 +200,7 @@ bool VideoCompositor::createCompositeFrameWithoutLock(const std::vector<std::str
                                SWS_BILINEAR, nullptr, nullptr, nullptr);
 
             if (!swsContext) {
-                std::cerr << "[VideoCompositor] Failed to create scaling context for user "
-                          << userId << std::endl;
+                AG_LOG_FAST(ERROR, "Failed to create scaling context for user %s", userId.c_str());
                 continue;
             }
 
@@ -269,14 +270,18 @@ bool VideoCompositor::createCompositeFrameWithoutLock(const std::vector<std::str
     // encoding
     compositeFrame_->pts = latestRtcTimestamp;
 
-    std::cout << "[VideoCompositor] Composite frame timestamp: " << latestRtcTimestamp << " from "
-              << usersWithFrames.size() << " users" << std::endl;
+    static int create_composite_frame_callback_log_count = 0;
+    if (create_composite_frame_callback_log_count % 30 == 0) {
+        AG_LOG_FAST(INFO, "Composite frame timestamp: %lu from %zu users", latestRtcTimestamp,
+                    usersWithFrames.size());
+    }
+    create_composite_frame_callback_log_count++;
 
     lastCompositeTime_ = currentTime;
 
     // Call the callback with the composed frame
-    if (frameCallback_) {
-        frameCallback_(compositeFrame_);
+    if (videoFrameCallback_) {
+        videoFrameCallback_(compositeFrame_);
     }
 
     return true;
@@ -411,8 +416,8 @@ void VideoCompositor::cleanupOldFramesWithoutLock() {
     auto it = frameBuffer_.begin();
     while (it != frameBuffer_.end()) {
         if (currentTime - it->second.receivedTime > config_.frameTimeoutMs) {
-            std::cout << "[VideoCompositor] Removing old frame for user " << it->first
-                      << " (age: " << (currentTime - it->second.receivedTime) << "ms)" << std::endl;
+            AG_LOG_FAST(INFO, "Removing old frame for user %s (age: %lums)", it->first.c_str(),
+                        (currentTime - it->second.receivedTime));
 
             // Clean up scaling contexts for this user
             auto scaleIt = scalingContexts_.begin();
@@ -498,8 +503,7 @@ void VideoCompositor::setExpectedUsers(const std::vector<std::string>& users) {
 }
 
 void VideoCompositor::onLayoutChange(const std::vector<std::string>& activeUsers) {
-    std::cout << "[VideoCompositor] Layout change detected: " << activeUsers.size()
-              << " stable users" << std::endl;
+    AG_LOG_FAST(INFO, "Layout change detected: %zu stable users", activeUsers.size());
 
     // Optionally trigger immediate composition when layout changes
     if (initialized_ && !activeUsers.empty()) {
@@ -508,11 +512,11 @@ void VideoCompositor::onLayoutChange(const std::vector<std::string>& activeUsers
 
         // Create composite frame with new layout
         std::lock_guard<std::mutex> lock(frameBufferMutex_);
-        if (frameCallback_) {
+        if (videoFrameCallback_) {
             createCompositeFrameWithoutLock(activeUsers);
         }
     }
-    std::cout << "[VideoCompositor] Layout change completed" << std::endl;
+    AG_LOG_FAST(INFO, "Layout change completed");
 }
 
 }  // namespace rtc

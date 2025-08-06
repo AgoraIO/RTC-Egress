@@ -1,9 +1,13 @@
+#define AG_LOG_TAG "SnapshotEncoder"
+
 #include "include/snapshot_encoder.h"
 
 #include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+
+#include "common/log.h"
 
 extern "C" {
 #include <libavutil/imgutils.h>
@@ -30,8 +34,8 @@ bool SnapshotEncoder::initialize(const Config& config) {
         av_log_set_level(AV_LOG_ERROR);  // Reduce log verbosity
     });
 
-    std::cout << "[SnapshotEncoder] Initialized with quality=" << config_.jpegQuality
-              << ", threads=" << (config_.useThreads ? "enabled" : "disabled") << std::endl;
+    AG_LOG_FAST(INFO, "Initialized with quality=%d, threads=%s", config_.jpegQuality,
+                (config_.useThreads ? "enabled" : "disabled"));
 
     return true;
 }
@@ -228,8 +232,7 @@ bool SnapshotEncoder::setupEncoder(int width, int height) {
     context_->lastWidth = width;
     context_->lastHeight = height;
 
-    std::cout << "[SnapshotEncoder] Setup encoder for " << width << "x" << height
-              << ", quality=" << config_.jpegQuality << std::endl;
+    AG_LOG_FAST(INFO, "Setup encoder for %dx%d, quality=%d", width, height, config_.jpegQuality);
 
     return true;
 }

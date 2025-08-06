@@ -38,14 +38,14 @@ class VideoCompositor {
     };
 
     // Callback for composed frames
-    using ComposedFrameCallback = std::function<void(const AVFrame* frame)>;
+    using ComposedVideoFrameCallback = std::function<void(const AVFrame* frame)>;
 
     VideoCompositor();
     ~VideoCompositor();
 
     // Configuration
     bool initialize(const Config& config);
-    void setComposedFrameCallback(ComposedFrameCallback callback);
+    void setComposedVideoFrameCallback(ComposedVideoFrameCallback callback);
 
     // Frame input
     bool addUserFrame(const VideoFrame& frame, const std::string& userId);
@@ -102,7 +102,7 @@ class VideoCompositor {
     AVFrame* compositeFrame_ = nullptr;
 
     // Callback
-    ComposedFrameCallback frameCallback_;
+    ComposedVideoFrameCallback videoFrameCallback_;
 
     // Layout detection (always enabled for stability)
     std::unique_ptr<LayoutDetector> layoutDetector_;

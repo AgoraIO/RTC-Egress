@@ -1,3 +1,5 @@
+#define AG_LOG_TAG "SnapshotSink"
+
 #include "snapshot_sink.h"
 
 #include <algorithm>
@@ -8,6 +10,8 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+
+#include "common/log.h"
 
 namespace agora {
 namespace rtc {
@@ -27,7 +31,7 @@ bool SnapshotSink::initialize(const Config& config) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (isCapturing_.load()) {
-        std::cerr << "Cannot initialize while capturing" << std::endl;
+        AG_LOG_FAST(ERROR, "Cannot initialize while capturing");
         return false;
     }
 
@@ -36,7 +40,7 @@ bool SnapshotSink::initialize(const Config& config) {
     // Create output directory if it doesn't exist
     if (!fs::exists(config_.outputDir)) {
         if (!fs::create_directories(config_.outputDir)) {
-            std::cerr << "Failed to create output directory: " << config_.outputDir << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to create output directory: %s", config_.outputDir.c_str());
             return false;
         }
     }
@@ -45,7 +49,7 @@ bool SnapshotSink::initialize(const Config& config) {
     encoder_ = std::make_unique<SnapshotEncoder>();
     config_.encoderConfig.jpegQuality = config_.quality;
     if (!encoder_->initialize(config_.encoderConfig)) {
-        std::cerr << "Failed to initialize SnapshotEncoder" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to initialize SnapshotEncoder");
         return false;
     }
 
@@ -54,7 +58,7 @@ bool SnapshotSink::initialize(const Config& config) {
         config_.compositorConfig.outputWidth = config_.width;
         config_.compositorConfig.outputHeight = config_.height;
         if (!compositor_->initialize(config_.compositorConfig)) {
-            std::cerr << "Failed to initialize VideoCompositor" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to initialize VideoCompositor");
             return false;
         }
     }
@@ -71,7 +75,7 @@ bool SnapshotSink::start() {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (isCapturing_.load()) {
-        std::cerr << "Already capturing" << std::endl;
+        AG_LOG_FAST(WARN, "Already capturing");
         return false;
     }
 
@@ -103,7 +107,7 @@ void SnapshotSink::stop() {
     }
 
     isCapturing_ = false;
-    std::cout << "Stopped capturing snapshots" << std::endl;
+    AG_LOG_FAST(INFO, "Stopped capturing snapshots");
 }
 
 void SnapshotSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
@@ -121,19 +125,19 @@ void SnapshotSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
 
     // Validate input parameters
     if (!yBuffer || !uBuffer || !vBuffer) {
-        std::cerr << "[SnapshotSink] Invalid buffer pointers" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid buffer pointers");
         return;
     }
 
     if (width == 0 || height == 0 || yStride <= 0 || uStride <= 0 || vStride <= 0) {
-        std::cerr << "[SnapshotSink] Invalid frame dimensions or strides" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid frame dimensions or strides");
         return;
     }
 
     // Validate stride vs width relationships
     if (yStride < static_cast<int32_t>(width) || uStride < static_cast<int32_t>(width / 2) ||
         vStride < static_cast<int32_t>(width / 2)) {
-        std::cerr << "[SnapshotSink] Invalid stride values" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid stride values");
         return;
     }
 
@@ -152,7 +156,7 @@ void SnapshotSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
         VideoFrame videoFrame;
         if (!videoFrame.initializeFromYUV(yBuffer, uBuffer, vBuffer, yStride, uStride, vStride,
                                           width, height, timestamp, userId)) {
-            std::cerr << "[SnapshotSink] Failed to create VideoFrame from YUV data" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to create VideoFrame from YUV data");
             return;
         }
 
@@ -170,25 +174,23 @@ void SnapshotSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
             lock.unlock();
 
             if (!userId.empty()) {
-                std::cout << "[SnapshotSink] Received video frame from user " << userId << ": "
-                          << width << "x" << height << std::endl;
+                AG_LOG_FAST(INFO, "Received video frame from user %s: %dx%d", userId.c_str(), width,
+                            height);
             } else {
-                std::cout << "[SnapshotSink] Received video frame: " << width << "x" << height
-                          << std::endl;
+                AG_LOG_FAST(INFO, "Received video frame: %dx%d", width, height);
             }
 
             cv_.notify_one();
         }
 
     } catch (const std::exception& e) {
-        std::cerr << "[SnapshotSink] Exception processing video frame: " << e.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Exception processing video frame: %s", e.what());
         return;
     }
 }
 
 void SnapshotSink::captureThread() {
-    std::cout << "[SnapshotSink] Capture thread started, interval: " << config_.intervalInMs << "ms"
-              << std::endl;
+    AG_LOG_FAST(INFO, "Capture thread started, interval: %dms", config_.intervalInMs);
     while (!stopRequested_.load()) {
         FrameData frameToSave;
         {
@@ -231,17 +233,17 @@ void SnapshotSink::captureThread() {
         }
 
         std::string filename = oss.str();
-        std::cout << "[SnapshotSink] Saving snapshot to: " << filename << std::endl;
+        AG_LOG_FAST(INFO, "Saving snapshot to: %s", filename.c_str());
 
         // Save the frame
         if (!saveFrame(frameToSave.frame, filename)) {
-            std::cerr << "Failed to save frame: " << filename << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to save frame: %s", filename.c_str());
         } else {
-            std::cout << "[SnapshotSink] Successfully saved snapshot: " << filename << std::endl;
+            AG_LOG_FAST(INFO, "Successfully saved snapshot: %s", filename.c_str());
             lastSnapshotTimeMs_ = msSinceEpoch;
         }
     }
-    std::cout << "[SnapshotSink] Capture thread stopped" << std::endl;
+    AG_LOG_FAST(INFO, "Capture thread stopped");
 }
 
 bool SnapshotSink::saveFrame(const VideoFrame& frame, const std::string& filename) {

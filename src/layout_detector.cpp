@@ -1,9 +1,11 @@
+#define AG_LOG_TAG "LayoutDetector"
+
 #include "include/layout_detector.h"
 
 #include <algorithm>
 #include <iostream>
 
-#define MUTEX_DEBUG
+#include "common/log.h"
 
 // Debug macro for mutex locking
 #ifdef MUTEX_DEBUG
@@ -49,17 +51,15 @@ bool LayoutDetector::initialize(const Config& config) {
             users_[userId] = UserInfo(userId, currentTime);
             users_[userId].state = UserState::JOINING;
         }
-        std::cout << "[LayoutDetector] Pre-populated " << config_.expectedUsers.size()
-                  << " expected users (only these will be considered)" << std::endl;
+        AG_LOG_FAST(INFO, "Pre-populated %zu expected users (only these will be considered)",
+                    config_.expectedUsers.size());
     } else {
-        std::cout << "[LayoutDetector] Auto-detect mode: will consider any user that sends frames"
-                  << std::endl;
+        AG_LOG_FAST(INFO, "Auto-detect mode: will consider any user that sends frames");
     }
 
-    std::cout << "[LayoutDetector] Initialized with config:"
-              << " userTimeout=" << config_.userTimeoutMs << "ms"
-              << " layoutStability=" << config_.layoutStabilityMs << "ms"
-              << " maxUsers=" << config_.maxUsers << std::endl;
+    AG_LOG_FAST(INFO,
+                "Initialized with config: userTimeout=%lums layoutStability=%lums maxUsers=%zu",
+                config_.userTimeoutMs, config_.layoutStabilityMs, config_.maxUsers);
 
     return true;
 }
@@ -68,14 +68,14 @@ void LayoutDetector::start() {
     LOCK_GUARD(mutex_);
 
     if (running_.load()) {
-        std::cout << "[LayoutDetector] Already running" << std::endl;
+        AG_LOG_FAST(INFO, "Already running");
         return;
     }
 
     running_ = true;
     detectionThread_ = std::make_unique<std::thread>(&LayoutDetector::detectionThread, this);
 
-    std::cout << "[LayoutDetector] Started detection thread" << std::endl;
+    AG_LOG_FAST(INFO, "Started detection thread");
 }
 
 void LayoutDetector::stop() {
@@ -95,8 +95,8 @@ void LayoutDetector::stop() {
         detectionThread_.reset();
     }
 
-    std::cout << "[LayoutDetector] Stopped. Stats: " << totalFramesProcessed_
-              << " frames processed, " << layoutChanges_ << " layout changes" << std::endl;
+    AG_LOG_FAST(INFO, "Stopped. Stats: %lu frames processed, %lu layout changes",
+                totalFramesProcessed_, layoutChanges_);
 }
 
 std::vector<std::string> LayoutDetector::onUserFrame(const std::string& userId,
@@ -106,22 +106,22 @@ std::vector<std::string> LayoutDetector::onUserFrame(const std::string& userId,
         return {};
     }
 
-    std::cout << "[LayoutDetector] onUserFrame() ENTRY, userId=" << userId << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[LayoutDetector] onUserFrame() ENTRY, userId=" << userId << std::endl;
+    // std::flush(std::cout);
 
     if (userId.empty()) {
-        std::cout << "[LayoutDetector] onUserFrame() early return - empty userId" << std::endl;
-        std::flush(std::cout);
+        // std::cout << "[LayoutDetector] onUserFrame() early return - empty userId" << std::endl;
+        // std::flush(std::cout);
         return {};
     }
 
-    std::cout << "[LayoutDetector] onUserFrame() about to acquire mutex_" << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[LayoutDetector] onUserFrame() about to acquire mutex_" << std::endl;
+    // std::flush(std::cout);
 
     LOCK_GUARD(mutex_);
 
-    std::cout << "[LayoutDetector] onUserFrame() acquired mutex_" << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[LayoutDetector] onUserFrame() acquired mutex_" << std::endl;
+    // std::flush(std::cout);
 
     totalFramesProcessed_++;
 
@@ -143,7 +143,7 @@ std::vector<std::string> LayoutDetector::onUserFrame(const std::string& userId,
         }
 
         users_[userId] = UserInfo(userId, timestamp);
-        std::cout << "[LayoutDetector] New user: " << userId << std::endl;
+        AG_LOG_FAST(INFO, "New user: %s", userId.c_str());
     } else {
         // Update existing user
         it->second.lastFrameMs = timestamp;
@@ -151,8 +151,8 @@ std::vector<std::string> LayoutDetector::onUserFrame(const std::string& userId,
         it->second.hasRecentFrames = true;
     }
 
-    std::cout << "[LayoutDetector] onUserFrame() EXIT, userId=" << userId << std::endl;
-    std::flush(std::cout);
+    // std::cout << "[LayoutDetector] onUserFrame() EXIT, userId=" << userId << std::endl;
+    // std::flush(std::cout);
 
     return getActiveUsersWithoutLock();
 }
@@ -261,7 +261,7 @@ void LayoutDetector::removeExpectedUser(const std::string& userId) {
 }
 
 void LayoutDetector::detectionThread() {
-    std::cout << "[LayoutDetector] Detection thread started" << std::endl;
+    AG_LOG_FAST(INFO, "Detection thread started");
 
     while (running_.load()) {
         updateUserStates();
@@ -277,7 +277,7 @@ void LayoutDetector::detectionThread() {
         }
     }
 
-    std::cout << "[LayoutDetector] Detection thread stopped" << std::endl;
+    AG_LOG_FAST(INFO, "Detection thread stopped");
 }
 
 void LayoutDetector::updateUserStates() {
@@ -300,33 +300,28 @@ void LayoutDetector::updateUserStates() {
             case UserState::JOINING:
                 if (hasRecentFrames && isUserStable(user)) {
                     user.state = UserState::ACTIVE;
-                    std::cout << "[LayoutDetector] User " << user.userId << " is now ACTIVE"
-                              << std::endl;
+                    AG_LOG_FAST(INFO, "User %s is now ACTIVE", user.userId.c_str());
                 } else if (!hasRecentFrames &&
                            (currentTime - user.firstSeenMs) > config_.userTimeoutMs) {
                     user.state = UserState::LEFT;
-                    std::cout << "[LayoutDetector] User " << user.userId
-                              << " LEFT (timeout during joining)" << std::endl;
+                    AG_LOG_FAST(INFO, "User %s LEFT (timeout during joining)", user.userId.c_str());
                 }
                 break;
 
             case UserState::ACTIVE:
                 if (!hasRecentFrames) {
                     user.state = UserState::LEAVING;
-                    std::cout << "[LayoutDetector] User " << user.userId
-                              << " is LEAVING (no recent frames)" << std::endl;
+                    AG_LOG_FAST(INFO, "User %s is LEAVING (no recent frames)", user.userId.c_str());
                 }
                 break;
 
             case UserState::LEAVING:
                 if (hasRecentFrames) {
                     user.state = UserState::ACTIVE;
-                    std::cout << "[LayoutDetector] User " << user.userId << " returned to ACTIVE"
-                              << std::endl;
+                    AG_LOG_FAST(INFO, "User %s returned to ACTIVE", user.userId.c_str());
                 } else if ((currentTime - user.lastFrameMs) > config_.userTimeoutMs) {
                     user.state = UserState::LEFT;
-                    std::cout << "[LayoutDetector] User " << user.userId << " LEFT (timeout)"
-                              << std::endl;
+                    AG_LOG_FAST(INFO, "User %s LEFT (timeout)", user.userId.c_str());
                 }
                 break;
 
@@ -344,8 +339,7 @@ void LayoutDetector::updateUserStates() {
     while (it != users_.end()) {
         if (it->second.state == UserState::LEFT &&
             (currentTime - it->second.lastFrameMs) > (config_.userTimeoutMs * 2)) {
-            std::cout << "[LayoutDetector] Removing user " << it->first << " from tracking"
-                      << std::endl;
+            AG_LOG_FAST(INFO, "Removing user %s from tracking", it->first.c_str());
             it = users_.erase(it);
         } else {
             ++it;
@@ -384,18 +378,19 @@ void LayoutDetector::checkLayoutChange() {
         lastLayoutChangeMs_ = currentTime;
         layoutChanges_++;
 
-        std::cout << "[LayoutDetector] Layout changed to " << newLayout.size() << " users: ";
+        std::string userList;
         for (const auto& userId : newLayout) {
-            std::cout << userId << " ";
+            if (!userList.empty()) userList += ", ";
+            userList += userId;
         }
-        std::cout << std::endl;
+        AG_LOG_FAST(INFO, "Layout changed to %zu users: %s", newLayout.size(), userList.c_str());
 
         // Notify callback
         if (layoutCallback_) {
             layoutCallback_(currentLayout_);
         }
 
-        std::cout << "[LayoutDetector] Layout callback done";
+        AG_LOG_FAST(INFO, "Layout callback done");
     }
 }
 

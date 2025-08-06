@@ -1,3 +1,5 @@
+#define AG_LOG_TAG "FileUtils"
+
 #include "file_utils.h"
 #include <filesystem>
 #include <chrono>
@@ -6,6 +8,7 @@
 #include <iostream>
 #include <algorithm>
 #include <vector>
+#include "log.h"
 
 namespace fs = std::filesystem;
 
@@ -14,7 +17,7 @@ namespace common {
 
 bool createDirectoriesIfNotExists(const std::string& path) {
     if (path.empty()) {
-        std::cerr << "[FileUtils] Empty path provided" << std::endl;
+        AG_LOG_FAST(ERROR, "Empty path provided");
         return false;
     }
 
@@ -24,26 +27,24 @@ bool createDirectoriesIfNotExists(const std::string& path) {
             if (fs::is_directory(path)) {
                 return true;
             } else {
-                std::cerr << "[FileUtils] Path exists but is not a directory: " << path << std::endl;
+                AG_LOG_FAST(ERROR, "Path exists but is not a directory: %s", path.c_str());
                 return false;
             }
         }
 
         // Create directories recursively
         if (fs::create_directories(path)) {
-            std::cout << "[FileUtils] Created directory: " << path << std::endl;
+            AG_LOG_FAST(INFO, "Created directory: %s", path.c_str());
             return true;
         } else {
-            std::cerr << "[FileUtils] Failed to create directory: " << path << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to create directory: %s", path.c_str());
             return false;
         }
     } catch (const fs::filesystem_error& ex) {
-        std::cerr << "[FileUtils] Filesystem error creating directory '" << path
-                  << "': " << ex.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Filesystem error creating directory '%s': %s", path.c_str(), ex.what());
         return false;
     } catch (const std::exception& ex) {
-        std::cerr << "[FileUtils] Error creating directory '" << path
-                  << "': " << ex.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Error creating directory '%s': %s", path.c_str(), ex.what());
         return false;
     }
 }
