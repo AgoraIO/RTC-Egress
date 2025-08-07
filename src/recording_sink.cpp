@@ -709,6 +709,40 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
         return false;
     }
 
+    // Check if input resolution has changed, need to recreate swsContext
+    // Input resolution tracking fields are added to UserContext
+    if (context->swsContext && (srcFrame->width != context->lastInputWidth ||
+                                srcFrame->height != context->lastInputHeight)) {
+        AG_LOG_FAST(INFO, "Input resolution changed: %dx%d -> %dx%d, rebuilding swsContext", context->lastInputWidth,
+                    context->lastInputHeight, srcFrame->width, srcFrame->height);
+
+        sws_freeContext(context->swsContext);
+        context->swsContext = nullptr;
+    }
+
+    // If swsContext doesn't exist or input size changed, recreate it
+    if (!context->swsContext) {
+        context->swsContext = sws_getContext(
+            srcFrame->width, srcFrame->height, (AVPixelFormat)srcFrame->format,
+            context->videoCodecContext->width, context->videoCodecContext->height,
+            context->videoCodecContext->pix_fmt, SWS_BICUBIC, nullptr, nullptr, nullptr);
+
+        if (!context->swsContext) {
+            AG_LOG_FAST(ERROR, "Failed to create swsContext for %dx%d -> %dx%d", srcFrame->width,
+                        srcFrame->height, context->videoCodecContext->width,
+                        context->videoCodecContext->height);
+            av_frame_free(&srcFrame);
+            return false;
+        }
+
+        AG_LOG_FAST(INFO, "Successfully created swsContext: %dx%d -> %dx%d", srcFrame->width, srcFrame->height,
+                    context->videoCodecContext->width, context->videoCodecContext->height);
+
+        // Record current input resolution
+        context->lastInputWidth = srcFrame->width;
+        context->lastInputHeight = srcFrame->height;
+    }
+
     // Ensure frame is writable before scaling
     if (av_frame_make_writable(context->videoFrame) < 0) {
         AG_LOG_FAST(ERROR, "Failed to make frame writable");
@@ -716,51 +750,40 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
         return false;
     }
 
-    sws_scale(context->swsContext, srcFrame->data, srcFrame->linesize, 0, frame.height(),
-              context->videoFrame->data, context->videoFrame->linesize);
+    // Safe scaling call, check parameter validity
+    if (srcFrame->height <= 0 || context->videoFrame->height <= 0) {
+        AG_LOG_FAST(ERROR, "Invalid frame height: src=%d, dst=%d", srcFrame->height,
+                    context->videoFrame->height);
+        av_frame_free(&srcFrame);
+        return false;
+    }
+
+    int swsRet =
+        sws_scale(context->swsContext, srcFrame->data, srcFrame->linesize, 0, srcFrame->height,
+                  context->videoFrame->data, context->videoFrame->linesize);
+
+    if (swsRet < 0) {
+        AG_LOG_FAST(ERROR, "sws_scale failed: %d", swsRet);
+        av_frame_free(&srcFrame);
+        return false;
+    }
 
     av_frame_free(&srcFrame);
 
-    // Initialize first frame timestamp for synchronization
-    if (!context->hasFirstVideoFrame) {
-        context->firstVideoTimestamp = frame.timestamp();
-        context->hasFirstVideoFrame = true;
-        AG_LOG_TS(INFO, "FIRST VIDEO timestamp: %ld", context->firstVideoTimestamp);
-
-        // Compare timestamps if audio timestamp is already set
-        if (context->hasFirstAudioFrame) {
-            int64_t diff = context->firstAudioTimestamp - context->firstVideoTimestamp;
-            AG_LOG_TS(INFO,
-                      "TIMESTAMP COMPARISON - Audio vs Video base difference: %ldms (Audio: %ld, "
-                      "Video: %ld)",
-                      diff, context->firstAudioTimestamp, context->firstVideoTimestamp);
-        }
+    // Update stream state and detect restart
+    updateStreamState(context, true, frame.timestamp());
+    if (detectStreamRestart(context, true, frame.timestamp())) {
+        // Stream restart: reset time origin
+        context->hasTimeOrigin = false;
+        context->lastVideoPts = -1;
+        AG_LOG_FAST(WARN, "Detected video stream restart, resetting time origin");
     }
 
-    // Use relative timestamps to prevent overflow
-    // Calculate PTS using frame-based counting for video precision
-    int64_t timestamp_diff_ms = frame.timestamp() - context->firstVideoTimestamp;
+    // Use new unified PTS calculation method
+    int64_t pts = calculateVideoPTS(context, frame.timestamp());
 
-    // Ensure we don't have negative or excessive differences
-    if (timestamp_diff_ms < 0) {
-        timestamp_diff_ms = 0;
-    } else if (timestamp_diff_ms > INT64_MAX / 90000) {
-        // Prevent overflow during rescaling to 90kHz time base
-        AG_LOG_FAST(WARN, "Video timestamp diff too large: %ld ms, using frame count",
-                    timestamp_diff_ms);
-        timestamp_diff_ms = context->videoFrameCount * 1000 / config_.videoFps;
-    }
-
-    // Convert milliseconds to video time base (frame intervals)
-    context->videoFrame->pts =
-        av_rescale_q(timestamp_diff_ms, {1, 1000}, context->videoCodecContext->time_base);
-
-    static int pts_log_count = 0;
-    if (pts_log_count % 30 == 0) {
-        AG_LOG_FAST(INFO, "Video PTS: %ld, timestamp: %ld, first_timestamp: %ld",
-                    context->videoFrame->pts, frame.timestamp(), context->firstVideoTimestamp);
-    }
-    pts_log_count++;
+    // Convert to encoder's time base
+    context->videoFrame->pts = av_rescale_q(pts, {1, 90000}, context->videoCodecContext->time_base);
 
     context->videoFrameCount++;
 
@@ -772,18 +795,18 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
 
     AG_LOG_FAST(INFO, "About to call avcodec_send_frame()");
 
-    int ret = avcodec_send_frame(context->videoCodecContext, context->videoFrame);
+    int sendRet = avcodec_send_frame(context->videoCodecContext, context->videoFrame);
 
-    AG_LOG_FAST(INFO, "avcodec_send_frame() returned: %d", ret);
+    AG_LOG_FAST(INFO, "avcodec_send_frame() returned: %d", sendRet);
 
-    if (ret < 0) {
+    if (sendRet < 0) {
         av_packet_free(&packet);
         return false;
     }
 
     AG_LOG_FAST(INFO, "Entering avcodec_receive_packet() loop");
 
-    while (ret >= 0) {
+    while (sendRet >= 0) {
         // Check if stop was requested during encoding loop
         if (stopRequested_.load()) {
             AG_LOG_FAST(
@@ -795,13 +818,13 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
 
         AG_LOG_FAST(INFO, "About to call avcodec_receive_packet()");
 
-        ret = avcodec_receive_packet(context->videoCodecContext, packet);
+        int recRet = avcodec_receive_packet(context->videoCodecContext, packet);
 
-        AG_LOG_FAST(INFO, "avcodec_receive_packet() returned: %d", ret);
+        AG_LOG_FAST(INFO, "avcodec_receive_packet() returned: %d", recRet);
 
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+        if (recRet == AVERROR(EAGAIN) || recRet == AVERROR_EOF) {
             break;
-        } else if (ret < 0) {
+        } else if (recRet < 0) {
             av_packet_free(&packet);
             return false;
         }
@@ -809,29 +832,14 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
         // Set the stream index
         packet->stream_index = context->videoStream->index;
 
-        // Fix: Use manual rescaling to avoid overflow
+        // Video PTS already correctly set in frame stage, just need to convert time base
         if (packet->pts != AV_NOPTS_VALUE) {
-            // Manual rescaling with bounds checking to prevent overflow
-            int64_t rescaled_pts = av_rescale_q(packet->pts, context->videoCodecContext->time_base,
-                                                context->videoStream->time_base);
-
-            // Bounds check to prevent overflow
-            if (rescaled_pts != AV_NOPTS_VALUE && rescaled_pts >= 0) {
-                packet->pts = rescaled_pts;
-            } else {
-                // Fallback: use frame count based PTS
-                packet->pts =
-                    context->videoFrameCount * av_rescale_q(1, (AVRational){1, config_.videoFps},
-                                                            context->videoStream->time_base);
-            }
-        } else {
-            // If encoder didn't set PTS, use frame count based PTS
-            packet->pts =
-                context->videoFrameCount *
-                av_rescale_q(1, (AVRational){1, config_.videoFps}, context->videoStream->time_base);
+            // Convert encoder time base to stream time base
+            packet->pts = av_rescale_q(packet->pts, context->videoCodecContext->time_base,
+                                       context->videoStream->time_base);
         }
 
-        // Set DTS equal to PTS for video (no B-frames)
+        // DTS = PTS (no B-frame reordering)
         packet->dts = packet->pts;
 
         // Debug: Log PTS/DTS values
@@ -975,7 +983,7 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
         // Not enough samples yet, return and wait for more
         static int buffer_log_count = 0;
         if (buffer_log_count % 50 == 0) {
-            AG_LOG_FAST(INFO, "Buffering audio: %zu/%d samples", context->audioSampleBuffer.size(),
+            AG_LOG_FAST(INFO, "Buffering audio: %zu/%zu samples", context->audioSampleBuffer.size(),
                         required_samples);
         }
         buffer_log_count++;
@@ -985,28 +993,14 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
     // std::cout << "[RecordingSink] Ready to encode: " << context->audioSampleBuffer.size()
     //           << " samples (need " << required_samples << ")" << std::endl;
 
-    // Initialize first frame timestamp for synchronization
-    if (!context->hasFirstAudioFrame) {
-        context->firstAudioTimestamp = frame.timestamp;
-        context->hasFirstAudioFrame = true;
-        AG_LOG_TS(INFO, "FIRST AUDIO timestamp: %ld", context->firstAudioTimestamp);
-
-        // Compare timestamps if video timestamp is already set
-        if (context->hasFirstVideoFrame) {
-            int64_t diff = context->firstAudioTimestamp - context->firstVideoTimestamp;
-            AG_LOG_TS(INFO,
-                      "TIMESTAMP COMPARISON - Audio vs Video base difference: %ldms (Audio: %ld, "
-                      "Video: %ld)",
-                      diff, context->firstAudioTimestamp, context->firstVideoTimestamp);
-        }
+    // Update stream state and detect restart
+    updateStreamState(context, false, frame.timestamp);
+    if (detectStreamRestart(context, false, frame.timestamp)) {
+        // Stream restart: reset time origin
+        context->hasTimeOrigin = false;
+        context->lastAudioPts = -1;
+        AG_LOG_FAST(WARN, "Detected audio stream restart, resetting time origin");
     }
-
-    static int audio_pts_log_count = 0;
-    if (audio_pts_log_count % 50 == 0) {
-        AG_LOG_FAST(INFO, "Audio frame %ld, timestamp: %ld, firstTimestamp: %ld",
-                    context->audioFrameCount, frame.timestamp, context->firstAudioTimestamp);
-    }
-    audio_pts_log_count++;
 
     // Set up audio frame properties for output
     context->audioFrame->nb_samples = samples_per_frame;
@@ -1014,25 +1008,11 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
     context->audioFrame->sample_rate = context->audioCodecContext->sample_rate;
     av_channel_layout_copy(&context->audioFrame->ch_layout, &context->audioCodecContext->ch_layout);
 
-    // Use relative timestamps to prevent overflow
-    // Calculate PTS using sample-based counting for audio precision
-    int64_t timestamp_diff_ms = frame.timestamp - context->firstAudioTimestamp;
+    // Use new unified PTS calculation method
+    int64_t pts = calculateAudioPTS(context, frame.timestamp);
 
-    // Ensure we don't have negative or excessive differences
-    if (timestamp_diff_ms < 0) {
-        timestamp_diff_ms = 0;
-    } else if (timestamp_diff_ms > INT64_MAX / 90000) {
-        // Prevent overflow during rescaling to 90kHz time base
-        AG_LOG_FAST(WARN, "Audio timestamp diff too large: %ld ms, using frame count",
-                    timestamp_diff_ms);
-        timestamp_diff_ms = context->audioFrameCount * 1000 /
-                            (config_.audioSampleRate / context->audioCodecContext->frame_size);
-    }
-
-    // Convert milliseconds to audio time base (samples)
-    int64_t pts = av_rescale_q(timestamp_diff_ms, {1, 1000}, context->audioCodecContext->time_base);
-
-    context->audioFrame->pts = pts;
+    // Convert to encoder's time base
+    context->audioFrame->pts = av_rescale_q(pts, {1, 90000}, context->audioCodecContext->time_base);
     context->lastBufferedTimestamp = frame.timestamp;  // Track for debugging
 
     // std::cout << "[RecordingSink] Individual audio PTS: " << pts
@@ -1152,24 +1132,14 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
         // Set proper timestamps for audio packet
         packet->stream_index = context->audioStream->index;
 
-        // Fix: Use safe audio timestamp handling
+        // Audio PTS already correctly set in frame stage, just need to convert time base
         if (packet->pts != AV_NOPTS_VALUE) {
-            // Audio packets: rescale with bounds checking
-            int64_t rescaled_pts = av_rescale_q(packet->pts, context->audioCodecContext->time_base,
-                                                context->audioStream->time_base);
-
-            if (rescaled_pts != AV_NOPTS_VALUE && rescaled_pts >= 0) {
-                packet->pts = rescaled_pts;
-            } else {
-                // Fallback: frame-based calculation
-                packet->pts = context->audioFrameCount * context->audioCodecContext->frame_size;
-            }
-        } else {
-            // If encoder didn't set PTS, calculate from frame count
-            packet->pts = context->audioFrameCount * context->audioCodecContext->frame_size;
+            // Convert encoder time base to stream time base
+            packet->pts = av_rescale_q(packet->pts, context->audioCodecContext->time_base,
+                                       context->audioStream->time_base);
         }
 
-        // For audio, DTS = PTS (no reordering)
+        // Audio DTS = PTS (no reordering)
         packet->dts = packet->pts;
 
         // Debug: Log audio packet info
@@ -1744,47 +1714,23 @@ void RecordingSink::onComposedFrame(const AVFrame* composedFrame) {
         return;
     }
 
-    // Initialize first frame timestamp for synchronization in composite mode
-    if (!context->hasFirstVideoFrame) {
-        context->firstVideoTimestamp = composedFrame->pts;
-        context->hasFirstVideoFrame = true;
-        AG_LOG_TS(INFO, "FIRST VIDEO timestamp (composite): %ld", context->firstVideoTimestamp);
+    // Composite mode: use unified PTS calculation
+    uint64_t rtcTimestamp = composedFrame->pts;  // composite frame pts is the RTC timestamp
 
-        // Compare timestamps if audio timestamp is already set
-        if (context->hasFirstAudioFrame) {
-            int64_t diff = context->firstAudioTimestamp - context->firstVideoTimestamp;
-            AG_LOG_TS(INFO,
-                      "TIMESTAMP COMPARISON - Audio vs Video base difference: %ldms (Audio: %ld, "
-                      "Video: %ld)",
-                      diff, context->firstAudioTimestamp, context->firstVideoTimestamp);
-        }
+    // Update stream state and detect restart
+    updateStreamState(context, true, rtcTimestamp);
+    if (detectStreamRestart(context, true, rtcTimestamp)) {
+        // Stream restart: reset time origin
+        context->hasTimeOrigin = false;
+        context->lastVideoPts = -1;
+        AG_LOG_FAST(WARN, "Detected Composite video stream restart, resetting time origin");
     }
 
-    // Use relative timestamps to prevent overflow
-    // Convert RTC timestamp to video timebase using frame-based precision
-    int64_t timestamp_diff_ms = composedFrame->pts - context->firstVideoTimestamp;
+    // Use new unified PTS calculation method
+    int64_t pts = calculateVideoPTS(context, rtcTimestamp);
 
-    // Ensure we don't have negative or excessive differences
-    if (timestamp_diff_ms < 0) {
-        timestamp_diff_ms = 0;
-    } else if (timestamp_diff_ms > INT64_MAX / 90000) {
-        // Prevent overflow during rescaling to 90kHz time base
-        AG_LOG_FAST(WARN, "Composite timestamp diff too large: %ld ms, using frame count",
-                    timestamp_diff_ms);
-        timestamp_diff_ms = context->videoFrameCount * 1000 / config_.videoFps;
-    }
-
-    // Convert milliseconds to video time base (frame intervals)
-    context->videoFrame->pts =
-        av_rescale_q(timestamp_diff_ms, {1, 1000}, context->videoCodecContext->time_base);
-
-    static int composite_pts_log_count = 0;
-    if (composite_pts_log_count % 30 == 0) {
-        AG_LOG_FAST(INFO,
-                    "COMPOSITE FRAME PTS FIX - Original RTC: %ld, diff_ms: %ld, FIXED PTS: %ld",
-                    composedFrame->pts, timestamp_diff_ms, context->videoFrame->pts);
-    }
-    composite_pts_log_count++;
+    // Convert to encoder's time base
+    context->videoFrame->pts = av_rescale_q(pts, {1, 90000}, context->videoCodecContext->time_base);
 
     context->videoFrameCount++;
 
@@ -1843,24 +1789,13 @@ void RecordingSink::onComposedFrame(const AVFrame* composedFrame) {
         }
         rescale_log_count++;
 
-        // Fix: Use manual rescaling to avoid overflow (same as individual mode)
+        // Composite video PTS already correctly set in frame stage, just need to convert time base
         if (packet->pts != AV_NOPTS_VALUE) {
-            int64_t rescaled_pts = av_rescale_q(packet->pts, context->videoCodecContext->time_base,
-                                                context->videoStream->time_base);
-            if (rescaled_pts != AV_NOPTS_VALUE && rescaled_pts >= 0) {
-                packet->pts = rescaled_pts;
-            } else {
-                packet->pts =
-                    context->videoFrameCount * av_rescale_q(1, (AVRational){1, config_.videoFps},
-                                                            context->videoStream->time_base);
-            }
-        } else {
-            packet->pts =
-                context->videoFrameCount *
-                av_rescale_q(1, (AVRational){1, config_.videoFps}, context->videoStream->time_base);
+            packet->pts = av_rescale_q(packet->pts, context->videoCodecContext->time_base,
+                                       context->videoStream->time_base);
         }
 
-        // Set DTS equal to PTS for video (no B-frames)
+        // DTS = PTS (no B-frame reordering)
         packet->dts = packet->pts;
 
         if (rescale_log_count % 30 == 0) {
@@ -1917,6 +1852,106 @@ void RecordingSink::cleanupCompositeResources() {
     }
 
     AG_LOG_FAST(INFO, "Cleaned up composite performance caches");
+}
+
+// ========== RTC Timestamp Synchronization Core Implementation ==========
+
+void RecordingSink::initializeRtcTimeOrigin(UserContext* context, uint64_t rtcTimestamp) {
+    if (!context->hasTimeOrigin) {
+        context->rtcTimeOrigin = rtcTimestamp;
+        context->hasTimeOrigin = true;
+        AG_LOG_FAST(INFO, "RTC time origin initialized: %lu ms", context->rtcTimeOrigin);
+    }
+}
+
+int64_t RecordingSink::calculateVideoPTS(UserContext* context, uint64_t rtcTimestamp) {
+    // Establish time origin
+    initializeRtcTimeOrigin(context, rtcTimestamp);
+
+    // Calculate relative time difference (milliseconds)
+    int64_t relativeMs = rtcTimestamp - context->rtcTimeOrigin;
+
+    // Convert to 90kHz time base (FFmpeg standard)
+    int64_t pts = relativeMs * 90;  // 1ms = 90 ticks @ 90kHz
+
+    // Ensure monotonic increment
+    int64_t minIncrement = 90000 / config_.videoFps;  // Time interval per frame
+    pts = ensureMonotonicPTS(pts, context->lastVideoPts, minIncrement);
+
+    static int log_count = 0;
+    if (log_count % 30 == 0) {
+        AG_LOG_FAST(INFO, "Video PTS: %ld (RTC: %lu, relative: %ldms)", pts, rtcTimestamp, relativeMs);
+    }
+    log_count++;
+
+    return pts;
+}
+
+int64_t RecordingSink::calculateAudioPTS(UserContext* context, uint64_t rtcTimestamp) {
+    // Establish time origin
+    initializeRtcTimeOrigin(context, rtcTimestamp);
+
+    // Calculate relative time difference (milliseconds)
+    int64_t relativeMs = rtcTimestamp - context->rtcTimeOrigin;
+
+    // Convert to 90kHz time base
+    int64_t pts = relativeMs * 90;
+
+    // Audio frame time interval (e.g., 1024 samples@48kHz = 21.33ms)
+    int64_t samplesPerFrame = context->audioCodecContext->frame_size;
+    int64_t sampleRate = context->audioCodecContext->sample_rate;
+    int64_t minIncrement = (samplesPerFrame * 90000) / sampleRate;
+
+    pts = ensureMonotonicPTS(pts, context->lastAudioPts, minIncrement);
+
+    static int audio_log_count = 0;
+    if (audio_log_count % 50 == 0) {
+        AG_LOG_FAST(INFO, "Audio PTS: %ld (RTC: %lu, relative: %ldms)", pts, rtcTimestamp, relativeMs);
+    }
+    audio_log_count++;
+
+    return pts;
+}
+
+int64_t RecordingSink::ensureMonotonicPTS(int64_t newPts, int64_t& lastPts, int64_t minIncrement) {
+    if (lastPts < 0) {
+        // First frame: use directly
+        return lastPts = newPts;
+    }
+
+    if (newPts > lastPts) {
+        // Normal case: new PTS is larger
+        return lastPts = newPts;
+    } else {
+        // Abnormal case: timestamp rollback or equal, force increment
+        return lastPts = lastPts + minIncrement;
+    }
+}
+
+void RecordingSink::updateStreamState(UserContext* context, bool isVideo, uint64_t rtcTimestamp) {
+    if (isVideo) {
+        context->videoStreamActive = true;
+        context->lastVideoRtcTs = rtcTimestamp;
+    } else {
+        context->audioStreamActive = true;
+        context->lastAudioRtcTs = rtcTimestamp;
+    }
+}
+
+bool RecordingSink::detectStreamRestart(UserContext* context, bool isVideo, uint64_t rtcTimestamp) {
+    // Detect if stream has restarted (large timestamp jump)
+    uint64_t lastTs = isVideo ? context->lastVideoRtcTs : context->lastAudioRtcTs;
+
+    if (lastTs > 0) {
+        int64_t timeDiff = rtcTimestamp - lastTs;
+        // If time difference exceeds 5 seconds, consider it a stream restart
+        if (timeDiff > 5000 || timeDiff < -1000) {
+            AG_LOG_FAST(WARN, "%s stream suspected restart: time jump %ldms", isVideo ? "Video" : "Audio", timeDiff);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 }  // namespace rtc
