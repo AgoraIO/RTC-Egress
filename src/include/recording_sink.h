@@ -133,11 +133,23 @@ class RecordingSink {
         int64_t videoFrameCount = 0;
         int64_t audioFrameCount = 0;
         bool headerWritten = false;
-        int64_t lastDts = -1;
-        uint64_t firstVideoTimestamp = 0;  // Store first video frame timestamp for relative timing
-        uint64_t firstAudioTimestamp = 0;  // Store first audio frame timestamp for relative timing
-        bool hasFirstVideoFrame = false;
-        bool hasFirstAudioFrame = false;
+        // Unified RTC timestamp synchronization system
+        uint64_t rtcTimeOrigin = 0;  // Unified time origin for RTC streams (milliseconds)
+        bool hasTimeOrigin = false;  // Whether time origin has been established
+
+        // Monotonic PTS tracking
+        int64_t lastVideoPts = -1;  // Last video frame PTS
+        int64_t lastAudioPts = -1;  // Last audio frame PTS
+
+        // Stream state tracking
+        bool videoStreamActive = false;  // Whether video stream is active
+        bool audioStreamActive = false;  // Whether audio stream is active
+        uint64_t lastVideoRtcTs = 0;     // Last received video RTC timestamp
+        uint64_t lastAudioRtcTs = 0;     // Last received audio RTC timestamp
+
+        // swsContext input resolution tracking
+        int lastInputWidth = 0;   // Last input video width
+        int lastInputHeight = 0;  // Last input video height
 
         // Audio sample buffering for AAC frame size requirements
         std::vector<int16_t> audioSampleBuffer;  // Buffer to accumulate audio samples
@@ -165,6 +177,16 @@ class RecordingSink {
     bool encodeIndividualAudioFrame(const AudioFrame& frame, UserContext* context,
                                     const std::string& userId);
     bool writePacket(AVPacket* packet, AVFormatContext* formatContext, AVStream* stream);
+
+    // RTC timestamp synchronization core functions
+    void initializeRtcTimeOrigin(UserContext* context, uint64_t rtcTimestamp);
+    int64_t calculateVideoPTS(UserContext* context, uint64_t rtcTimestamp);
+    int64_t calculateAudioPTS(UserContext* context, uint64_t rtcTimestamp);
+    int64_t ensureMonotonicPTS(int64_t newPts, int64_t& lastPts, int64_t minIncrement);
+
+    // Stream state management
+    void updateStreamState(UserContext* context, bool isVideo, uint64_t rtcTimestamp);
+    bool detectStreamRestart(UserContext* context, bool isVideo, uint64_t rtcTimestamp);
 
     // Utilities
     std::string generateOutputFilename(const std::string& userId = "");
