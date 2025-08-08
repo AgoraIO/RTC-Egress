@@ -837,10 +837,20 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
     // Update stream state and detect restart
     updateStreamState(context, true, frame.timestamp());
     if (detectStreamRestart(context, true, frame.timestamp())) {
-        // Stream restart: reset time origin
+        // Stream restart: reset time origin for both formats
         context->hasTimeOrigin = false;
-        context->lastVideoPts = -1;
-        AG_LOG_FAST(WARN, "Detected video stream restart, resetting time origin");
+
+        // Format-specific PTS handling
+        if (config_.format == OutputFormat::TS) {
+            // For TS: maintain PTS continuity, don't reset to -1
+            AG_LOG_FAST(WARN,
+                        "Detected video stream restart, resetting time origin (TS: maintaining PTS "
+                        "continuity)");
+        } else {
+            // For MP4/AVI/MKV: can safely reset PTS
+            context->lastVideoPts = -1;
+            AG_LOG_FAST(WARN, "Detected video stream restart, resetting time origin and PTS");
+        }
     }
 
     // Use new unified PTS calculation method
@@ -1073,10 +1083,20 @@ bool RecordingSink::encodeIndividualAudioFrame(const AudioFrame& frame, UserCont
     // Update stream state and detect restart
     updateStreamState(context, false, frame.timestamp);
     if (detectStreamRestart(context, false, frame.timestamp)) {
-        // Stream restart: reset time origin
+        // Stream restart: reset time origin for both formats
         context->hasTimeOrigin = false;
-        context->lastAudioPts = -1;
-        AG_LOG_FAST(WARN, "Detected audio stream restart, resetting time origin");
+
+        // Format-specific PTS handling
+        if (config_.format == OutputFormat::TS) {
+            // For TS: maintain PTS continuity, don't reset to -1
+            AG_LOG_FAST(WARN,
+                        "Detected audio stream restart, resetting time origin (TS: maintaining PTS "
+                        "continuity)");
+        } else {
+            // For MP4/AVI/MKV: can safely reset PTS
+            context->lastAudioPts = -1;
+            AG_LOG_FAST(WARN, "Detected audio stream restart, resetting time origin and PTS");
+        }
     }
 
     // Set up audio frame properties for output
@@ -1794,10 +1814,21 @@ void RecordingSink::onComposedFrame(const AVFrame* composedFrame) {
     // Update stream state and detect restart
     updateStreamState(context, true, rtcTimestamp);
     if (detectStreamRestart(context, true, rtcTimestamp)) {
-        // Stream restart: reset time origin
+        // Stream restart: reset time origin for both formats
         context->hasTimeOrigin = false;
-        context->lastVideoPts = -1;
-        AG_LOG_FAST(WARN, "Detected Composite video stream restart, resetting time origin");
+
+        // Format-specific PTS handling
+        if (config_.format == OutputFormat::TS) {
+            // For TS: maintain PTS continuity, don't reset to -1
+            AG_LOG_FAST(WARN,
+                        "Detected composite video stream restart, resetting time origin (TS: "
+                        "maintaining PTS continuity)");
+        } else {
+            // For MP4/AVI/MKV: can safely reset PTS
+            context->lastVideoPts = -1;
+            AG_LOG_FAST(WARN,
+                        "Detected composite video stream restart, resetting time origin and PTS");
+        }
     }
 
     // Use new unified PTS calculation method
@@ -2173,10 +2204,11 @@ bool RecordingSink::switchToNewTSSegment(UserContext* context) {
         return false;
     }
 
-    // 7. Reset PTS counters for new segment (segments are independent)
-    context->lastVideoPts = -1;
-    context->lastAudioPts = -1;
-    context->hasTimeOrigin = false;  // Will be re-established with next frame
+    // 7. CRITICAL: Maintain timestamp continuity for TS format
+    // DO NOT reset PTS counters - TS segments need continuous timestamps
+    // Keep context->lastVideoPts, context->lastAudioPts, and hasTimeOrigin intact
+    AG_LOG_FAST(INFO, "Maintaining timestamp continuity - lastVideoPts: %ld, lastAudioPts: %ld",
+                context->lastVideoPts, context->lastAudioPts);
 
     AG_LOG_FAST(INFO, "Successfully switched to new TS segment: %s", newSegmentPath.c_str());
     return true;
