@@ -12,6 +12,7 @@
 #include <csignal>
 #include <cstdlib>  // For getenv
 #include <filesystem>
+#include <iomanip>  // For std::put_time
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -271,8 +272,22 @@ int main(int argc, char* argv[]) {
         std::string default_output_dir =
             rtc_config.EGRESS_HOME.empty() ? "." : rtc_config.EGRESS_HOME;
 
+        // Generate unique task ID for this session
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+
+        std::ostringstream task_id_stream;
+        task_id_stream << "session_" << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S");
+        task_id_stream << "_" << std::setfill('0') << std::setw(3) << ms.count();
+        std::string session_task_id = task_id_stream.str();
+
+        AG_LOG_FAST(INFO, "Generated session task ID: %s", session_task_id.c_str());
+
         // Configure snapshot sink
         agora::rtc::SnapshotSink::Config snapshots_config;
+        snapshots_config.taskId = session_task_id;  // Set task ID for metadata generation
 
         // Apply snapshots settings if provided
         if (config["snapshots"]) {
@@ -329,6 +344,7 @@ int main(int argc, char* argv[]) {
 
         // Configure recording sink
         agora::rtc::RecordingSink::Config recording_config;
+        recording_config.taskId = session_task_id;  // Set task ID for metadata generation
 
         if (config["recording"]) {
             const auto& recording_node = config["recording"];
@@ -490,7 +506,7 @@ int main(int argc, char* argv[]) {
 
         // Set up video frame callback
         g_rtcClient->setVideoFrameCallback(
-            [&user_snapshot_sinks, &user_sinks_mutex, &snapshots_config](
+            [&user_snapshot_sinks, &user_sinks_mutex, &snapshots_config, &session_task_id](
                 const agora::media::base::VideoFrame& frame, const std::string& userId) {
                 static int rtc_video_count = 0;
                 rtc_video_count++;
@@ -523,6 +539,8 @@ int main(int argc, char* argv[]) {
                             user_snapshot_sink = std::make_unique<agora::rtc::SnapshotSink>();
                             agora::rtc::SnapshotSink::Config user_config = snapshots_config;
                             user_config.outputDir = snapshots_config.outputDir + "/user_" + userId;
+                            user_config.taskId =
+                                session_task_id + "_user_" + userId;  // Unique taskId per user
 
                             if (!user_snapshot_sink->initialize(user_config)) {
                                 std::cerr << "Failed to initialize snapshot sink for user "

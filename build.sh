@@ -158,7 +158,6 @@ install_dependencies() {
             libswscale-dev \
             libswresample-dev \
             libyaml-cpp-dev \
-            libopencv-dev \
             pkg-config \
             golang
     # For CentOS/RHEL

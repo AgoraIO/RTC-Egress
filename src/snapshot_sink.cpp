@@ -45,6 +45,15 @@ bool SnapshotSink::initialize(const Config& config) {
         }
     }
 
+    // Initialize MetadataManager if taskId is provided
+    if (!config_.taskId.empty()) {
+        metadataManager_ = std::make_unique<MetadataManager>();
+        currentOutputFilePrefix_ =
+            metadataManager_->generateOutputFilePrefixWithoutLock(config_.taskId);
+        AG_LOG_FAST(INFO, "MetadataManager initialized for snapshot task: %s",
+                    config_.taskId.c_str());
+    }
+
     // Initialize modular components
     encoder_ = std::make_unique<SnapshotEncoder>();
     config_.encoderConfig.jpegQuality = config_.quality;
@@ -92,6 +101,27 @@ bool SnapshotSink::start() {
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
 
+    // Start metadata session if metadata manager is available
+    if (metadataManager_) {
+        MetadataManager::TaskSession session;
+        session.taskId = config_.taskId;
+        session.description = "snapshot_session";
+        session.channel = "";  // Will be set by main.cpp if available
+        session.users = config_.targetUsers;
+        session.compositionMode = (config_.mode == VideoCompositor::Mode::Individual)
+                                      ? MetadataManager::CompositionMode::Individual
+                                      : MetadataManager::CompositionMode::Composite;
+        session.layout = MetadataManager::Layout::Flat;  // Default for snapshots
+        session.width = config_.width;
+        session.height = config_.height;
+        session.fps = 0;  // Not applicable for snapshots
+        session.outputFormat = "jpeg";
+
+        if (!metadataManager_->startSession(config_.taskId, session)) {
+            AG_LOG_FAST(WARN, "Failed to start metadata session for snapshots");
+        }
+    }
+
     captureThread_ = std::make_unique<std::thread>(&SnapshotSink::captureThread, this);
     return true;
 }
@@ -113,6 +143,12 @@ void SnapshotSink::stop() {
     }
 
     isCapturing_ = false;
+
+    // End metadata session
+    if (metadataManager_ && !config_.taskId.empty()) {
+        metadataManager_->endSession(config_.taskId, "normal");
+    }
+
     AG_LOG_FAST(INFO, "Stopped capturing snapshots");
 }
 
@@ -247,6 +283,36 @@ void SnapshotSink::captureThread() {
         } else {
             AG_LOG_FAST(INFO, "Successfully saved snapshot: %s", filename.c_str());
             lastSnapshotTimeMs_ = msSinceEpoch;
+
+            // Add completed JPEG to metadata
+            if (metadataManager_ && !config_.taskId.empty()) {
+                MetadataManager::FileInfo fileInfo;
+                fileInfo.filename = std::filesystem::path(filename).filename();
+                fileInfo.fullPath = filename;
+                fileInfo.type = MetadataManager::FileType::JPEG;
+
+                // Get file size
+                try {
+                    if (std::filesystem::exists(filename)) {
+                        fileInfo.sizeBytes = std::filesystem::file_size(filename);
+                    }
+                } catch (const std::filesystem::filesystem_error&) {
+                    fileInfo.sizeBytes = 0;
+                }
+
+                fileInfo.createdAt = std::chrono::system_clock::now();
+                fileInfo.completedAt = fileInfo.createdAt;  // Snapshot is immediately complete
+                fileInfo.isComplete = true;
+                fileInfo.width = config_.width;
+                fileInfo.height = config_.height;
+
+                std::string outputPrefix = config_.outputDir + "/" + currentOutputFilePrefix_;
+                if (!metadataManager_->appendFileToMetadata(config_.taskId, fileInfo,
+                                                            outputPrefix)) {
+                    AG_LOG_FAST(WARN, "Failed to add snapshot to metadata: %s",
+                                fileInfo.filename.c_str());
+                }
+            }
         }
     }
     AG_LOG_FAST(INFO, "Capture thread stopped");

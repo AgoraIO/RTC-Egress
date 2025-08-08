@@ -14,7 +14,6 @@ namespace rtc {
 
 /**
  * SnapshotEncoder provides high-performance YUV to JPEG encoding
- * Replaces OpenCV for better performance and reduced dependencies
  */
 class SnapshotEncoder {
    public:

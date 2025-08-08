@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "metadata_manager.h"
 #include "ts_segment_manager.h"
 #include "video_compositor.h"
 #include "video_frame.h"
@@ -76,6 +77,9 @@ class RecordingSink {
         int tsSegmentDurationSeconds = 10;     // TS segment duration
         bool tsGeneratePlaylist = true;        // Generate HLS playlist
         bool tsKeepIncompleteSegments = true;  // Keep incomplete segments on crash
+
+        // Metadata tracking
+        std::string taskId = "";  // Task identifier for metadata
     };
 
     RecordingSink();
@@ -201,6 +205,7 @@ class RecordingSink {
     std::string generateOutputFilename(const std::string& userId = "");
     std::string getFileExtension() const;
     bool createOutputDirectory();
+    uint64_t getFileSize(const std::string& filepath) const;
 
     // Configuration
     Config config_;
@@ -231,6 +236,10 @@ class RecordingSink {
     std::unique_ptr<TSSegmentManager> tsSegmentManager_;
     std::atomic<bool> tsPendingSegmentRotation_{false};  // Thread-safe rotation flag
     std::mutex tsRotationMutex_;                         // Protect segment rotation operations
+
+    // Metadata management
+    std::unique_ptr<MetadataManager> metadataManager_;
+    std::string currentOutputFilePrefix_;  // Current session file prefix
 
     // Composite frame buffer - stores latest frame from each user with timestamps
     std::map<std::string, VideoFrame> compositeFrameBuffer_;

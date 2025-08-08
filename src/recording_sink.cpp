@@ -4,6 +4,7 @@
 
 #include <libavformat/avformat.h>
 #include <libswresample/swresample.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <chrono>
@@ -77,6 +78,15 @@ bool RecordingSink::initialize(const Config& config) {
         AG_LOG_FAST(INFO, "TSSegmentManager initialized for TS recording");
     }
 
+    // Initialize MetadataManager if taskId is provided
+    if (!config_.taskId.empty()) {
+        metadataManager_ = std::make_unique<MetadataManager>();
+        currentOutputFilePrefix_ =
+            metadataManager_->generateOutputFilePrefixWithoutLock(config_.taskId);
+        AG_LOG_FAST(INFO, "MetadataManager initialized for recording task: %s",
+                    config_.taskId.c_str());
+    }
+
     // Initialize VideoCompositor for composite mode
     if (config_.mode == VideoCompositor::Mode::Composite) {
         videoCompositor_ = std::make_unique<VideoCompositor>();
@@ -122,6 +132,42 @@ bool RecordingSink::start() {
         }
     }
 
+    // Start metadata session if metadata manager is available
+    if (metadataManager_) {
+        MetadataManager::TaskSession session;
+        session.taskId = config_.taskId;
+        session.description = "recording_session";
+        session.channel = "";  // Will be set by main.cpp if available
+        session.users = config_.targetUsers;
+        session.compositionMode = (config_.mode == VideoCompositor::Mode::Individual)
+                                      ? MetadataManager::CompositionMode::Individual
+                                      : MetadataManager::CompositionMode::Composite;
+        session.layout = MetadataManager::Layout::Flat;  // Default, can be enhanced later
+        session.width = config_.videoWidth;
+        session.height = config_.videoHeight;
+        session.fps = config_.videoFps;
+        session.videoCodec = config_.videoCodec;
+        session.audioSampleRate = config_.audioSampleRate;
+        session.audioChannels = config_.audioChannels;
+        session.audioCodec = config_.audioCodec;
+
+        if (config_.format == OutputFormat::TS) {
+            session.outputFormat = "ts";
+            session.tsSegmentDuration = config_.tsSegmentDurationSeconds;
+            session.tsGeneratePlaylist = config_.tsGeneratePlaylist;
+        } else if (config_.format == OutputFormat::MP4) {
+            session.outputFormat = "mp4";
+        } else if (config_.format == OutputFormat::AVI) {
+            session.outputFormat = "avi";
+        } else if (config_.format == OutputFormat::MKV) {
+            session.outputFormat = "mkv";
+        }
+
+        if (!metadataManager_->startSession(config_.taskId, session)) {
+            AG_LOG_FAST(WARN, "Failed to start metadata session");
+        }
+    }
+
     // Create recording thread
     recordingThread_ = std::make_unique<std::thread>(&RecordingSink::recordingThread, this);
 
@@ -162,6 +208,53 @@ void RecordingSink::stop() {
     // End TS session if using TS format
     if (config_.format == OutputFormat::TS && tsSegmentManager_) {
         tsSegmentManager_->endCurrentSession();
+
+        // Add final completed TS segments to metadata before ending session
+        if (metadataManager_ && !config_.taskId.empty()) {
+            auto completedSegments = tsSegmentManager_->getCurrentSession().segments;
+            for (const auto& segment : completedSegments) {
+                if (segment.isComplete) {
+                    MetadataManager::FileInfo fileInfo;
+                    fileInfo.filename = segment.filename;
+                    fileInfo.fullPath =
+                        tsSegmentManager_->getCurrentSession().sessionDir + "/" + segment.filename;
+                    fileInfo.type = MetadataManager::FileType::TS;
+                    // Get file size
+                    struct stat st;
+                    if (stat(fileInfo.fullPath.c_str(), &st) == 0) {
+                        fileInfo.sizeBytes = st.st_size;
+                    } else {
+                        fileInfo.sizeBytes = 0;
+                        AG_LOG_FAST(WARN, "Could not get file size for: %s",
+                                    fileInfo.fullPath.c_str());
+                    }
+                    fileInfo.createdAt = std::chrono::system_clock::time_point(
+                        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                            segment.startTime.time_since_epoch()));
+                    fileInfo.completedAt = std::chrono::system_clock::now();
+                    fileInfo.durationSeconds = segment.duration;
+                    fileInfo.isComplete = true;
+                    fileInfo.segmentNumber = segment.segmentNumber;
+                    fileInfo.isKeyframeAligned = true;  // TS segments are always keyframe-aligned
+
+                    std::string outputPrefix = config_.outputDir + "/" + currentOutputFilePrefix_;
+                    if (!metadataManager_->appendFileToMetadata(config_.taskId, fileInfo,
+                                                                outputPrefix)) {
+                        AG_LOG_FAST(WARN,
+                                    "Failed to add TS segment to metadata during session end: %s",
+                                    fileInfo.filename.c_str());
+                    } else {
+                        AG_LOG_FAST(INFO, "Added final TS segment to metadata: %s",
+                                    fileInfo.filename.c_str());
+                    }
+                }
+            }
+        }
+    }
+
+    // End metadata session
+    if (metadataManager_ && !config_.taskId.empty()) {
+        metadataManager_->endSession(config_.taskId, "normal");
     }
 
     if (recordingThread_ && recordingThread_->joinable()) {
@@ -1612,6 +1705,42 @@ void RecordingSink::cleanupEncoder(const std::string& userId) {
     // Write trailer
     if (context->formatContext) {
         av_write_trailer(context->formatContext);
+
+        // Add completed video file to metadata (MP4/AVI/MKV)
+        if (metadataManager_ && !config_.taskId.empty() && config_.format != OutputFormat::TS) {
+            MetadataManager::FileInfo fileInfo;
+            fileInfo.filename = std::filesystem::path(context->filename).filename();
+            fileInfo.fullPath = context->filename;
+
+            if (config_.format == OutputFormat::MP4) {
+                fileInfo.type = MetadataManager::FileType::MP4;
+            } else if (config_.format == OutputFormat::AVI) {
+                fileInfo.type = MetadataManager::FileType::MP4;  // Use MP4 enum for video files
+            } else if (config_.format == OutputFormat::MKV) {
+                fileInfo.type = MetadataManager::FileType::MP4;  // Use MP4 enum for video files
+            }
+
+            fileInfo.sizeBytes = getFileSize(context->filename);
+            fileInfo.createdAt = std::chrono::system_clock::time_point(
+                std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                    context->startTime.time_since_epoch()));
+            fileInfo.completedAt = std::chrono::system_clock::now();
+            fileInfo.isComplete = true;
+            fileInfo.width = config_.videoWidth;
+            fileInfo.height = config_.videoHeight;
+
+            // Calculate duration
+            auto now = std::chrono::steady_clock::now();
+            auto duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - context->startTime);
+            fileInfo.durationSeconds = duration.count() / 1000.0;
+
+            std::string outputPrefix = config_.outputDir + "/" + currentOutputFilePrefix_;
+            if (!metadataManager_->appendFileToMetadata(config_.taskId, fileInfo, outputPrefix)) {
+                AG_LOG_FAST(WARN, "Failed to add mp4 file to metadata: %s",
+                            fileInfo.filename.c_str());
+            }
+        }
     }
 
     // Cleanup resources
@@ -1663,6 +1792,18 @@ std::string RecordingSink::getFileExtension() const {
 
 bool RecordingSink::createOutputDirectory() {
     return agora::common::createDirectoriesIfNotExists(config_.outputDir);
+}
+
+uint64_t RecordingSink::getFileSize(const std::string& filepath) const {
+    try {
+        std::filesystem::path path(filepath);
+        if (std::filesystem::exists(path)) {
+            return std::filesystem::file_size(path);
+        }
+    } catch (const std::filesystem::filesystem_error&) {
+        // File doesn't exist or access error
+    }
+    return 0;
 }
 
 void RecordingSink::setMaxDuration(int seconds) {
@@ -2209,6 +2350,38 @@ bool RecordingSink::switchToNewTSSegment(UserContext* context) {
     // Keep context->lastVideoPts, context->lastAudioPts, and hasTimeOrigin intact
     AG_LOG_FAST(INFO, "Maintaining timestamp continuity - lastVideoPts: %ld, lastAudioPts: %ld",
                 context->lastVideoPts, context->lastAudioPts);
+
+    // Add completed segment to metadata
+    if (metadataManager_ && !config_.taskId.empty() && tsSegmentManager_) {
+        // Get completed segment info from the previous segment that was just finalized
+        auto completedSegments = tsSegmentManager_->getCurrentSession().segments;
+        if (!completedSegments.empty()) {
+            auto& lastSegment = completedSegments.back();
+            if (lastSegment.isComplete) {
+                MetadataManager::FileInfo fileInfo;
+                fileInfo.filename = lastSegment.filename;
+                fileInfo.fullPath =
+                    tsSegmentManager_->getCurrentSession().sessionDir + "/" + lastSegment.filename;
+                fileInfo.type = MetadataManager::FileType::TS;
+                fileInfo.sizeBytes = getFileSize(fileInfo.fullPath);
+                fileInfo.createdAt = std::chrono::system_clock::time_point(
+                    std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                        lastSegment.startTime.time_since_epoch()));
+                fileInfo.completedAt = std::chrono::system_clock::now();
+                fileInfo.durationSeconds = lastSegment.duration;
+                fileInfo.isComplete = true;
+                fileInfo.segmentNumber = lastSegment.segmentNumber;
+                fileInfo.isKeyframeAligned = true;  // TS segments are always keyframe-aligned
+
+                std::string outputPrefix = config_.outputDir + "/" + currentOutputFilePrefix_;
+                if (!metadataManager_->appendFileToMetadata(config_.taskId, fileInfo,
+                                                            outputPrefix)) {
+                    AG_LOG_FAST(WARN, "Failed to add TS segment to metadata: %s",
+                                fileInfo.filename.c_str());
+                }
+            }
+        }
+    }
 
     AG_LOG_FAST(INFO, "Successfully switched to new TS segment: %s", newSegmentPath.c_str());
     return true;

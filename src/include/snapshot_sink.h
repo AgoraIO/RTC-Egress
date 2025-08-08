@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "metadata_manager.h"
 #include "snapshot_encoder.h"
 #include "video_compositor.h"
 #include "video_frame.h"
@@ -27,6 +28,9 @@ class SnapshotSink {
         VideoCompositor::Mode mode = VideoCompositor::Mode::Individual;
         VideoCompositor::Config compositorConfig;  // Video compositor configuration
         SnapshotEncoder::Config encoderConfig;     // Snapshot encoder configuration
+
+        // Metadata tracking
+        std::string taskId = "";  // Task identifier for metadata
     };
 
     SnapshotSink();
@@ -94,6 +98,10 @@ class SnapshotSink {
     // Modular components
     std::unique_ptr<VideoCompositor> compositor_;
     std::unique_ptr<SnapshotEncoder> encoder_;
+
+    // Metadata management
+    std::unique_ptr<MetadataManager> metadataManager_;
+    std::string currentOutputFilePrefix_;
 };
 
 }  // namespace rtc
