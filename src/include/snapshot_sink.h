@@ -18,13 +18,13 @@ namespace rtc {
 class SnapshotSink {
    public:
     struct Config {
-        std::string outputDir = "./snapshots";     // Directory to save snapshots
-        int width = 1280;                          // Frame width
-        int height = 720;                          // Frame height
-        int64_t intervalInMs = 20000;              // Interval between snapshots in milliseconds
-        int quality = 90;                          // JPEG quality (1-100)
-        std::vector<std::string> targetUsers;      // Empty means capture all users
-        bool enableComposition = true;             // Enable multi-user composition
+        std::string outputDir = "./snapshots";  // Directory to save snapshots
+        int width = 1280;                       // Frame width
+        int height = 720;                       // Frame height
+        int64_t intervalInMs = 20000;           // Interval between snapshots in millisecsonds
+        int quality = 90;                       // JPEG quality (1-100)
+        std::vector<std::string> targetUsers;   // Empty means capture all users
+        VideoCompositor::Mode mode = VideoCompositor::Mode::Individual;
         VideoCompositor::Config compositorConfig;  // Video compositor configuration
         SnapshotEncoder::Config encoderConfig;     // Snapshot encoder configuration
     };
@@ -56,6 +56,9 @@ class SnapshotSink {
 
     // User filtering
     bool shouldCaptureUser(const std::string& userId) const;
+
+    // Callback for composed frames from VideoCompositor
+    void onComposedFrame(const AVFrame* composedFrame);
 
    private:
     // Worker thread function

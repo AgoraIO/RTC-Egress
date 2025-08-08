@@ -37,6 +37,11 @@ class VideoCompositor {
         LayoutDetector::Config layoutDetectorConfig;
     };
 
+    enum Mode {
+        Individual,
+        Composite,
+    };
+
     // Callback for composed frames
     using ComposedVideoFrameCallback = std::function<void(const AVFrame* frame)>;
 
