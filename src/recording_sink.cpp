@@ -54,7 +54,7 @@ bool RecordingSink::initialize(const Config& config) {
     }
 
     // Initialize VideoCompositor for composite mode
-    if (config_.mode == RecordingMode::COMPOSITE) {
+    if (config_.mode == VideoCompositor::Mode::Composite) {
         videoCompositor_ = std::make_unique<VideoCompositor>();
         VideoCompositor::Config compositorConfig;
         compositorConfig.outputWidth = config_.videoWidth;
@@ -93,7 +93,7 @@ bool RecordingSink::start() {
     recordingThread_ = std::make_unique<std::thread>(&RecordingSink::recordingThread, this);
 
     AG_LOG_FAST(INFO, "Started recording in %s mode",
-                (config_.mode == RecordingMode::INDIVIDUAL ? "individual" : "composite"));
+                (config_.mode == VideoCompositor::Mode::Composite ? "composite" : "individual"));
 
     return true;
 }
@@ -539,7 +539,7 @@ bool RecordingSink::initializeEncoder(const std::string& userId) {
     std::string filename = context->filename;
 
     // Store context (mutex already held by caller)
-    if (config_.mode == RecordingMode::INDIVIDUAL) {
+    if (config_.mode == VideoCompositor::Mode::Individual) {
         userContexts_[userId] = std::move(context);
     } else {
         compositeContext_ = std::move(context);
@@ -658,7 +658,7 @@ bool RecordingSink::encodeVideoFrame(const VideoFrame& frame, const std::string&
     // std::cout << "[RecordingSink] encodeVideoFrame() - stopRequested check passed" << std::endl;
     // std::flush(std::cout);
 
-    if (config_.mode == RecordingMode::INDIVIDUAL) {
+    if (config_.mode == VideoCompositor::Mode::Individual) {
         // std::cout << "[RecordingSink] encodeVideoFrame() - using INDIVIDUAL mode" << std::endl;
         // std::flush(std::cout);
         // Individual mode - encode each user separately
@@ -713,8 +713,9 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
     // Input resolution tracking fields are added to UserContext
     if (context->swsContext && (srcFrame->width != context->lastInputWidth ||
                                 srcFrame->height != context->lastInputHeight)) {
-        AG_LOG_FAST(INFO, "Input resolution changed: %dx%d -> %dx%d, rebuilding swsContext", context->lastInputWidth,
-                    context->lastInputHeight, srcFrame->width, srcFrame->height);
+        AG_LOG_FAST(INFO, "Input resolution changed: %dx%d -> %dx%d, rebuilding swsContext",
+                    context->lastInputWidth, context->lastInputHeight, srcFrame->width,
+                    srcFrame->height);
 
         sws_freeContext(context->swsContext);
         context->swsContext = nullptr;
@@ -735,8 +736,9 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
             return false;
         }
 
-        AG_LOG_FAST(INFO, "Successfully created swsContext: %dx%d -> %dx%d", srcFrame->width, srcFrame->height,
-                    context->videoCodecContext->width, context->videoCodecContext->height);
+        AG_LOG_FAST(INFO, "Successfully created swsContext: %dx%d -> %dx%d", srcFrame->width,
+                    srcFrame->height, context->videoCodecContext->width,
+                    context->videoCodecContext->height);
 
         // Record current input resolution
         context->lastInputWidth = srcFrame->width;
@@ -891,7 +893,7 @@ bool RecordingSink::encodeAudioFrame(const AudioFrame& frame, const std::string&
     }
     encode_log_count++;
 
-    if (config_.mode == RecordingMode::INDIVIDUAL) {
+    if (config_.mode == VideoCompositor::Mode::Individual) {
         // Individual mode - encode each user separately
         std::lock_guard<std::mutex> lock(userContextsMutex_);
 
@@ -1442,7 +1444,7 @@ void RecordingSink::flushAllEncoders() {
 
 void RecordingSink::cleanupEncoder(const std::string& userId) {
     UserContext* context = nullptr;
-    bool isComposite = (userId.empty() || config_.mode == RecordingMode::COMPOSITE);
+    bool isComposite = (userId.empty() || config_.mode == VideoCompositor::Mode::Composite);
 
     if (isComposite) {
         context = compositeContext_.get();
@@ -1576,11 +1578,6 @@ void RecordingSink::setOutputFormat(OutputFormat format) {
     config_.format = format;
 }
 
-void RecordingSink::setRecordingMode(RecordingMode mode) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    config_.mode = mode;
-}
-
 bool RecordingSink::shouldRecordUser(const std::string& userId) const {
     // If no target users specified, record all users
     if (config_.targetUsers.empty()) {
@@ -1681,7 +1678,7 @@ bool RecordingSink::updateCompositeFrame(const VideoFrame& frame, const std::str
 }
 
 void RecordingSink::onComposedFrame(const AVFrame* composedFrame) {
-    if (!composedFrame || config_.mode != RecordingMode::COMPOSITE) {
+    if (!composedFrame || config_.mode != VideoCompositor::Mode::Composite) {
         return;
     }
 
@@ -1880,7 +1877,8 @@ int64_t RecordingSink::calculateVideoPTS(UserContext* context, uint64_t rtcTimes
 
     static int log_count = 0;
     if (log_count % 30 == 0) {
-        AG_LOG_FAST(INFO, "Video PTS: %ld (RTC: %lu, relative: %ldms)", pts, rtcTimestamp, relativeMs);
+        AG_LOG_FAST(INFO, "Video PTS: %ld (RTC: %lu, relative: %ldms)", pts, rtcTimestamp,
+                    relativeMs);
     }
     log_count++;
 
@@ -1906,7 +1904,8 @@ int64_t RecordingSink::calculateAudioPTS(UserContext* context, uint64_t rtcTimes
 
     static int audio_log_count = 0;
     if (audio_log_count % 50 == 0) {
-        AG_LOG_FAST(INFO, "Audio PTS: %ld (RTC: %lu, relative: %ldms)", pts, rtcTimestamp, relativeMs);
+        AG_LOG_FAST(INFO, "Audio PTS: %ld (RTC: %lu, relative: %ldms)", pts, rtcTimestamp,
+                    relativeMs);
     }
     audio_log_count++;
 
@@ -1946,7 +1945,8 @@ bool RecordingSink::detectStreamRestart(UserContext* context, bool isVideo, uint
         int64_t timeDiff = rtcTimestamp - lastTs;
         // If time difference exceeds 5 seconds, consider it a stream restart
         if (timeDiff > 5000 || timeDiff < -1000) {
-            AG_LOG_FAST(WARN, "%s stream suspected restart: time jump %ldms", isVideo ? "Video" : "Audio", timeDiff);
+            AG_LOG_FAST(WARN, "%s stream suspected restart: time jump %ldms",
+                        isVideo ? "Video" : "Audio", timeDiff);
             return true;
         }
     }

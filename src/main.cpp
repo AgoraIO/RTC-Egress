@@ -364,14 +364,14 @@ int main(int argc, char* argv[]) {
             // Determine recording mode based on user configuration
             if (userList.size() == 1) {
                 // Single user - individual recording (only record this specific user)
-                recording_config.mode = agora::rtc::RecordingSink::RecordingMode::INDIVIDUAL;
+                recording_config.mode = agora::rtc::VideoCompositor::Mode::Individual;
                 AG_LOG_FAST(INFO,
                             "[Config] Single user specified (%s) - individual recording mode (only "
                             "this user will be recorded)",
                             userList[0].c_str());
             } else {
                 // Multiple users or empty list - composite recording with dynamic layout
-                recording_config.mode = agora::rtc::RecordingSink::RecordingMode::COMPOSITE;
+                recording_config.mode = agora::rtc::VideoCompositor::Mode::Composite;
                 if (userList.empty()) {
                     AG_LOG_FAST(INFO,
                                 "[Config] No users specified - composite recording with dynamic "
@@ -524,7 +524,7 @@ int main(int argc, char* argv[]) {
                         user_snapshot_sink->onVideoFrame(frame.yBuffer, frame.uBuffer,
                                                          frame.vBuffer, frame.yStride,
                                                          frame.uStride, frame.vStride, frame.width,
-                                                         frame.height, frame.renderTimeMs);
+                                                         frame.height, frame.renderTimeMs, userId);
                     }
                 }  // Release the lock here
 

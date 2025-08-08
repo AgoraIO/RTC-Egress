@@ -53,7 +53,7 @@ bool SnapshotSink::initialize(const Config& config) {
         return false;
     }
 
-    if (config_.enableComposition) {
+    if (config_.mode == VideoCompositor::Mode::Composite) {
         compositor_ = std::make_unique<VideoCompositor>();
         config_.compositorConfig.outputWidth = config_.width;
         config_.compositorConfig.outputHeight = config_.height;
@@ -61,6 +61,12 @@ bool SnapshotSink::initialize(const Config& config) {
             AG_LOG_FAST(ERROR, "Failed to initialize VideoCompositor");
             return false;
         }
+
+        // Set callback to receive composed frames for snapshot saving
+        compositor_->setComposedVideoFrameCallback(
+            [this](const AVFrame* composedFrame) { this->onComposedFrame(composedFrame); });
+
+        AG_LOG_FAST(INFO, "VideoCompositor initialized for snapshot composition");
     }
 
     return true;
@@ -161,7 +167,7 @@ void SnapshotSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
         }
 
         // Handle frame based on configuration
-        if (config_.enableComposition && compositor_) {
+        if (config_.mode == VideoCompositor::Mode::Composite && compositor_) {
             // Add frame to compositor for multi-user composition
             compositor_->addUserFrame(videoFrame, userId);
         } else {
@@ -190,7 +196,7 @@ void SnapshotSink::onVideoFrame(const uint8_t* yBuffer, const uint8_t* uBuffer,
 }
 
 void SnapshotSink::captureThread() {
-    AG_LOG_FAST(INFO, "Capture thread started, interval: %dms", config_.intervalInMs);
+    AG_LOG_FAST(INFO, "Capture thread started, interval: %ldms", config_.intervalInMs);
     while (!stopRequested_.load()) {
         FrameData frameToSave;
         {
@@ -279,6 +285,49 @@ bool SnapshotSink::shouldCaptureUser(const std::string& userId) const {
     // Check if user is in the target list
     return std::find(config_.targetUsers.begin(), config_.targetUsers.end(), userId) !=
            config_.targetUsers.end();
+}
+
+void SnapshotSink::onComposedFrame(const AVFrame* composedFrame) {
+    if (!composedFrame || !isCapturing_.load()) {
+        return;
+    }
+
+    AG_LOG_FAST(INFO, "Received composed frame for snapshot: %dx%d", composedFrame->width,
+                composedFrame->height);
+
+    auto now = std::chrono::system_clock::now();
+    auto currentTimeMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+    std::unique_lock<std::mutex> lock(frameMutex_);
+    if ((currentTimeMs - lastSnapshotTimeMs_) < config_.intervalInMs) {
+        // Not enough time has passed since last snapshot, skip this frame
+        return;
+    }
+
+    try {
+        // Convert AVFrame to VideoFrame for saving
+        VideoFrame videoFrame;
+        if (!videoFrame.initializeFromAVFrame(composedFrame, composedFrame->pts, "composed")) {
+            AG_LOG_FAST(ERROR, "Failed to create VideoFrame from composed AVFrame");
+            return;
+        }
+
+        // Set up frame data for capture thread
+        currentFrame_.frame = std::move(videoFrame);
+        currentFrame_.timestamp = composedFrame->pts;
+        currentFrame_.valid = true;
+        currentFrame_.userId = "composed";  // Mark as composed frame
+
+        lock.unlock();
+
+        AG_LOG_FAST(INFO, "Queued composed frame for snapshot");
+        cv_.notify_one();
+
+    } catch (const std::exception& e) {
+        AG_LOG_FAST(ERROR, "Exception processing composed frame: %s", e.what());
+        return;
+    }
 }
 
 }  // namespace rtc

@@ -39,16 +39,11 @@ struct AudioFrame {
 
 class RecordingSink {
    public:
-    enum class RecordingMode {
-        INDIVIDUAL,  // Record each user separately
-        COMPOSITE    // Record mixed stream
-    };
-
     enum class OutputFormat { MP4, AVI, MKV };
 
     struct Config {
         std::string outputDir = "./recordings";
-        RecordingMode mode = RecordingMode::INDIVIDUAL;
+        VideoCompositor::Mode mode = VideoCompositor::Mode::Composite;
         OutputFormat format = OutputFormat::MP4;
 
         // Video settings
@@ -99,7 +94,6 @@ class RecordingSink {
     // Configuration
     void setMaxDuration(int seconds);
     void setOutputFormat(OutputFormat format);
-    void setRecordingMode(RecordingMode mode);
 
     // User filtering
     bool shouldRecordUser(const std::string& userId) const;
