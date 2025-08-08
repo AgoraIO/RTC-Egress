@@ -64,6 +64,7 @@ add_library(snapshot_sink SHARED
     src/rtc_client.cpp
     src/snapshot_sink.cpp
     src/recording_sink.cpp
+    src/ts_segment_manager.cpp
     src/video_frame.cpp
     src/video_compositor.cpp
     src/snapshot_encoder.cpp

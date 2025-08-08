@@ -18,6 +18,7 @@
 #include "common/ffmpeg_utils.h"
 #include "common/file_utils.h"
 #include "common/log.h"
+#include "include/ts_segment_manager.h"
 
 namespace agora {
 namespace rtc {
@@ -51,6 +52,29 @@ bool RecordingSink::initialize(const Config& config) {
     // Create output directory if it doesn't exist
     if (!createOutputDirectory()) {
         return false;
+    }
+
+    // Initialize TS segment manager for TS format
+    if (config_.format == OutputFormat::TS) {
+        tsSegmentManager_ = std::make_unique<TSSegmentManager>();
+        TSSegmentManager::Config tsConfig;
+        tsConfig.outputDir = config_.outputDir;
+        tsConfig.segmentDurationSeconds = config_.tsSegmentDurationSeconds;
+        tsConfig.maxSegmentsPerSession =
+            (config_.maxDurationSeconds + config_.tsSegmentDurationSeconds - 1) /
+            config_.tsSegmentDurationSeconds;
+        tsConfig.generatePlaylist = config_.tsGeneratePlaylist;
+        tsConfig.keepIncompleteSegments = config_.tsKeepIncompleteSegments;
+        tsConfig.videoWidth = config_.videoWidth;
+        tsConfig.videoHeight = config_.videoHeight;
+        tsConfig.videoFps = config_.videoFps;
+
+        if (!tsSegmentManager_->initialize(tsConfig)) {
+            AG_LOG_FAST(ERROR, "Failed to initialize TSSegmentManager");
+            return false;
+        }
+
+        AG_LOG_FAST(INFO, "TSSegmentManager initialized for TS recording");
     }
 
     // Initialize VideoCompositor for composite mode
@@ -89,6 +113,15 @@ bool RecordingSink::start() {
     isRecording_ = true;
     startTime_ = std::chrono::steady_clock::now();
 
+    // Start TS session if using TS format
+    if (config_.format == OutputFormat::TS && tsSegmentManager_) {
+        if (!tsSegmentManager_->startNewSession()) {
+            AG_LOG_FAST(ERROR, "Failed to start TS session");
+            isRecording_ = false;
+            return false;
+        }
+    }
+
     // Create recording thread
     recordingThread_ = std::make_unique<std::thread>(&RecordingSink::recordingThread, this);
 
@@ -124,6 +157,11 @@ void RecordingSink::stop() {
 
     if (videoCompositor_) {
         videoCompositor_->cleanup();
+    }
+
+    // End TS session if using TS format
+    if (config_.format == OutputFormat::TS && tsSegmentManager_) {
+        tsSegmentManager_->endCurrentSession();
     }
 
     if (recordingThread_ && recordingThread_->joinable()) {
@@ -318,6 +356,11 @@ void RecordingSink::recordingThread() {
             processAudioFrames();
         }
 
+        // Check for TS segment rotation
+        if (config_.format == OutputFormat::TS && tsSegmentManager_) {
+            checkAndRotateSegmentIfNeeded();
+        }
+
         // Check for timeout
         auto elapsed = std::chrono::steady_clock::now() - startTime_;
         if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >=
@@ -444,7 +487,19 @@ void RecordingSink::processAudioFrames() {
 bool RecordingSink::initializeEncoder(const std::string& userId) {
     std::unique_ptr<UserContext> context = std::make_unique<UserContext>();
     context->startTime = std::chrono::steady_clock::now();
-    context->filename = generateOutputFilename(userId);
+
+    // For TS format, use segment manager to get filename
+    if (config_.format == OutputFormat::TS && tsSegmentManager_) {
+        // Always create first segment when initializing encoder
+        if (!tsSegmentManager_->rotateToNewSegment()) {
+            AG_LOG_FAST(ERROR, "Failed to create initial TS segment");
+            return false;
+        }
+        context->filename = tsSegmentManager_->getCurrentTempSegmentPath();
+        AG_LOG_FAST(INFO, "Created initial TS segment: %s", context->filename.c_str());
+    } else {
+        context->filename = generateOutputFilename(userId);
+    }
 
     // Setup output format
     if (!setupOutputFormat(&context->formatContext, context->filename)) {
@@ -553,7 +608,14 @@ bool RecordingSink::initializeEncoder(const std::string& userId) {
 
 bool RecordingSink::setupOutputFormat(AVFormatContext** formatContext,
                                       const std::string& filename) {
-    if (avformat_alloc_output_context2(formatContext, nullptr, nullptr, filename.c_str()) < 0) {
+    const char* format_name = nullptr;
+
+    // Determine format based on extension or config
+    if (config_.format == OutputFormat::TS) {
+        format_name = "mpegts";
+    }
+
+    if (avformat_alloc_output_context2(formatContext, nullptr, format_name, filename.c_str()) < 0) {
         return false;
     }
 
@@ -860,6 +922,19 @@ bool RecordingSink::encodeIndividualFrame(const VideoFrame& frame, UserContext* 
 
         // Capture PTS value before writing (muxer may modify packet)
         int64_t original_pts = packet->pts;
+
+        // TS-specific: Detect keyframes and handle segment rotation (only for TS format)
+        if (config_.format == OutputFormat::TS) {
+            if (detectKeyframe(packet, context)) {
+                // Check if we need to rotate segments after keyframe detection
+                if (tsPendingSegmentRotation_.load() && tsSegmentManager_) {
+                    if (switchToNewTSSegment(context)) {
+                        tsPendingSegmentRotation_ = false;
+                        AG_LOG_FAST(INFO, "Successfully rotated to new TS segment on keyframe");
+                    }
+                }
+            }
+        }
 
         // Write packet - use av_interleaved_write_frame for proper timestamp ordering
         int write_ret = av_interleaved_write_frame(context->formatContext, packet);
@@ -1559,6 +1634,8 @@ std::string RecordingSink::getFileExtension() const {
             return ".avi";
         case OutputFormat::MKV:
             return ".mkv";
+        case OutputFormat::TS:
+            return ".ts";
         default:
             return ".mp4";
     }
@@ -1799,6 +1876,19 @@ void RecordingSink::onComposedFrame(const AVFrame* composedFrame) {
             AG_LOG_FAST(INFO, "AFTER rescale - PTS: %ld", packet->pts);
         }
 
+        // TS-specific: Detect keyframes and handle segment rotation (only for TS format)
+        if (config_.format == OutputFormat::TS) {
+            if (detectKeyframe(packet, context)) {
+                // Check if we need to rotate segments after keyframe detection
+                if (tsPendingSegmentRotation_.load() && tsSegmentManager_) {
+                    if (switchToNewTSSegment(context)) {
+                        tsPendingSegmentRotation_ = false;
+                        AG_LOG_FAST(INFO, "Successfully rotated to new TS segment on keyframe");
+                    }
+                }
+            }
+        }
+
         // Capture PTS value before writing (muxer may modify packet)
         int64_t original_pts = packet->pts;
 
@@ -1952,6 +2042,144 @@ bool RecordingSink::detectStreamRestart(UserContext* context, bool isVideo, uint
     }
 
     return false;
+}
+
+void RecordingSink::checkAndRotateSegmentIfNeeded() {
+    if (!tsSegmentManager_) {
+        static int null_mgr_log_count = 0;
+        if (null_mgr_log_count++ == 0) {
+            AG_LOG_FAST(WARN, "checkAndRotateSegmentIfNeeded: tsSegmentManager_ is null");
+        }
+        return;
+    }
+
+    if (config_.format != OutputFormat::TS) {
+        static int non_ts_log_count = 0;
+        if (non_ts_log_count++ == 0) {
+            AG_LOG_FAST(WARN, "checkAndRotateSegmentIfNeeded: format is not TS (format=%d)",
+                        (int)config_.format);
+        }
+        return;
+    }
+
+    auto currentTime = std::chrono::steady_clock::now();
+
+    static int check_count = 0;
+    check_count++;
+    if (check_count % 500 == 0) {  // Log every 500 checks (every 5 seconds with 10ms loop)
+        AG_LOG_FAST(INFO, "TS segment rotation check #%d, segment duration: %ds", check_count,
+                    config_.tsSegmentDurationSeconds);
+    }
+
+    // Check if segment rotation is needed (time-based check only)
+    // We'll wait for the next keyframe to actually perform the rotation
+    if (tsSegmentManager_->shouldRotateSegment(currentTime, false)) {
+        // Set pending rotation flag - actual rotation happens on next keyframe
+        if (!tsPendingSegmentRotation_.load()) {
+            tsPendingSegmentRotation_ = true;
+            AG_LOG_FAST(INFO, "TS segment rotation requested after %ds, waiting for next keyframe",
+                        config_.tsSegmentDurationSeconds);
+        }
+    }
+}
+
+bool RecordingSink::detectKeyframe(AVPacket* packet, UserContext* context) {
+    if (!packet || packet->stream_index != context->videoStream->index) {
+        return false;  // Not a video packet
+    }
+
+    // Check if this is a keyframe (I-frame)
+    bool isKeyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0;
+
+    if (isKeyframe) {
+        context->lastFrameWasKeyframe = true;
+        context->lastKeyframeTime = std::chrono::steady_clock::now();
+
+        static int keyframe_log_count = 0;
+        if (keyframe_log_count % 10 == 0) {  // Log every 10th keyframe
+            AG_LOG_FAST(INFO, "Detected keyframe #%d", keyframe_log_count);
+        }
+        keyframe_log_count++;
+    } else {
+        context->lastFrameWasKeyframe = false;
+    }
+
+    return isKeyframe;
+}
+
+bool RecordingSink::switchToNewTSSegment(UserContext* context) {
+    std::lock_guard<std::mutex> rotationLock(tsRotationMutex_);
+
+    if (!tsSegmentManager_ || !context || !context->formatContext) {
+        return false;
+    }
+
+    // 1. Finalize current segment
+    if (!tsSegmentManager_->finalizeCurrentSegment()) {
+        AG_LOG_FAST(ERROR, "Failed to finalize current TS segment");
+        return false;
+    }
+
+    // 2. Prepare new segment
+    if (!tsSegmentManager_->rotateToNewSegment()) {
+        AG_LOG_FAST(ERROR, "Failed to rotate to new TS segment");
+        return false;
+    }
+
+    // 3. Close current format context (but keep encoders)
+    if (context->formatContext) {
+        av_write_trailer(context->formatContext);
+
+        if (!(context->formatContext->oformat->flags & AVFMT_NOFILE)) {
+            avio_closep(&context->formatContext->pb);
+        }
+        avformat_free_context(context->formatContext);
+        context->formatContext = nullptr;
+    }
+
+    // 4. Create new format context for new segment
+    std::string newSegmentPath = tsSegmentManager_->getCurrentTempSegmentPath();
+    if (!setupOutputFormat(&context->formatContext, newSegmentPath)) {
+        AG_LOG_FAST(ERROR, "Failed to setup output format for new TS segment");
+        return false;
+    }
+
+    // 5. Add streams to new format context (reuse existing codec contexts)
+    if (context->videoCodecContext) {
+        context->videoStream =
+            avformat_new_stream(context->formatContext, context->videoCodecContext->codec);
+        if (context->videoStream) {
+            avcodec_parameters_from_context(context->videoStream->codecpar,
+                                            context->videoCodecContext);
+            context->videoStream->time_base = context->videoCodecContext->time_base;
+            context->videoStream->avg_frame_rate = {config_.videoFps, 1};
+            context->videoStream->r_frame_rate = {config_.videoFps, 1};
+        }
+    }
+
+    if (context->audioCodecContext) {
+        context->audioStream =
+            avformat_new_stream(context->formatContext, context->audioCodecContext->codec);
+        if (context->audioStream) {
+            avcodec_parameters_from_context(context->audioStream->codecpar,
+                                            context->audioCodecContext);
+            context->audioStream->time_base = context->audioCodecContext->time_base;
+        }
+    }
+
+    // 6. Write header for new segment
+    if (avformat_write_header(context->formatContext, nullptr) < 0) {
+        AG_LOG_FAST(ERROR, "Failed to write header for new TS segment");
+        return false;
+    }
+
+    // 7. Reset PTS counters for new segment (segments are independent)
+    context->lastVideoPts = -1;
+    context->lastAudioPts = -1;
+    context->hasTimeOrigin = false;  // Will be re-established with next frame
+
+    AG_LOG_FAST(INFO, "Successfully switched to new TS segment: %s", newSegmentPath.c_str());
+    return true;
 }
 
 }  // namespace rtc

@@ -393,6 +393,8 @@ int main(int argc, char* argv[]) {
                     recording_config.format = agora::rtc::RecordingSink::OutputFormat::AVI;
                 } else if (format == "mkv") {
                     recording_config.format = agora::rtc::RecordingSink::OutputFormat::MKV;
+                } else if (format == "ts") {
+                    recording_config.format = agora::rtc::RecordingSink::OutputFormat::TS;
                 } else {
                     recording_config.format = agora::rtc::RecordingSink::OutputFormat::MP4;
                 }
@@ -448,6 +450,22 @@ int main(int argc, char* argv[]) {
                 }
                 if (audio_config["buffer_size"]) {
                     recording_config.audioBufferSize = audio_config["buffer_size"].as<int>();
+                }
+            }
+
+            // TS-specific settings
+            if (recording_node["ts"]) {
+                const auto& ts_config = recording_node["ts"];
+                if (ts_config["segment_duration"]) {
+                    recording_config.tsSegmentDurationSeconds =
+                        ts_config["segment_duration"].as<int>();
+                }
+                if (ts_config["generate_playlist"]) {
+                    recording_config.tsGeneratePlaylist = ts_config["generate_playlist"].as<bool>();
+                }
+                if (ts_config["keep_incomplete_segments"]) {
+                    recording_config.tsKeepIncompleteSegments =
+                        ts_config["keep_incomplete_segments"].as<bool>();
                 }
             }
         }

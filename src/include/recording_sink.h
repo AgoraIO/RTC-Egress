@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "ts_segment_manager.h"
 #include "video_compositor.h"
 #include "video_frame.h"
 
@@ -39,7 +40,7 @@ struct AudioFrame {
 
 class RecordingSink {
    public:
-    enum class OutputFormat { MP4, AVI, MKV };
+    enum class OutputFormat { MP4, AVI, MKV, TS };
 
     struct Config {
         std::string outputDir = "./recordings";
@@ -70,6 +71,11 @@ class RecordingSink {
 
         // User filtering
         std::vector<std::string> targetUsers;  // Empty means record all users
+
+        // TS-specific settings
+        int tsSegmentDurationSeconds = 10;     // TS segment duration
+        bool tsGeneratePlaylist = true;        // Generate HLS playlist
+        bool tsKeepIncompleteSegments = true;  // Keep incomplete segments on crash
     };
 
     RecordingSink();
@@ -149,6 +155,10 @@ class RecordingSink {
         std::vector<int16_t> audioSampleBuffer;  // Buffer to accumulate audio samples
         uint64_t lastBufferedTimestamp =
             0;  // Track timestamp for buffered samples and PTS monotonic progression
+
+        // TS-specific keyframe tracking (only used for TS format)
+        bool lastFrameWasKeyframe = false;  // Track if last encoded frame was keyframe
+        std::chrono::steady_clock::time_point lastKeyframeTime;  // Time of last keyframe
     };
 
     // Thread functions
@@ -182,6 +192,11 @@ class RecordingSink {
     void updateStreamState(UserContext* context, bool isVideo, uint64_t rtcTimestamp);
     bool detectStreamRestart(UserContext* context, bool isVideo, uint64_t rtcTimestamp);
 
+    // TS segment management
+    void checkAndRotateSegmentIfNeeded();
+    bool switchToNewTSSegment(UserContext* context);
+    bool detectKeyframe(AVPacket* packet, UserContext* context);
+
     // Utilities
     std::string generateOutputFilename(const std::string& userId = "");
     std::string getFileExtension() const;
@@ -211,6 +226,11 @@ class RecordingSink {
     // For composite mode
     std::unique_ptr<UserContext> compositeContext_;
     std::unique_ptr<VideoCompositor> videoCompositor_;
+
+    // TS segment management
+    std::unique_ptr<TSSegmentManager> tsSegmentManager_;
+    std::atomic<bool> tsPendingSegmentRotation_{false};  // Thread-safe rotation flag
+    std::mutex tsRotationMutex_;                         // Protect segment rotation operations
 
     // Composite frame buffer - stores latest frame from each user with timestamps
     std::map<std::string, VideoFrame> compositeFrameBuffer_;
