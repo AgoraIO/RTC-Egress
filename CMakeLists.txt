@@ -16,6 +16,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 # Find required packages
 find_package(PkgConfig REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # FFmpeg packages
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
@@ -65,6 +66,7 @@ add_library(snapshot_sink SHARED
     src/snapshot_sink.cpp
     src/recording_sink.cpp
     src/ts_segment_manager.cpp
+    src/metadata_manager.cpp
     src/video_frame.cpp
     src/video_compositor.cpp
     src/snapshot_encoder.cpp
@@ -86,6 +88,8 @@ target_link_libraries(snapshot_sink PUBLIC
     ${LIB_AGORA_FDKAAC}
     PkgConfig::FFMPEG
     yaml-cpp
+    OpenSSL::SSL
+    OpenSSL::Crypto
     pthread
     dl
     rt

@@ -56,9 +56,14 @@ This is an Agora RTC egress recording system with a hybrid C++/Go architecture:
 
 - **Agora RTC SDK**: Core RTC functionality (downloaded automatically by build script)
 - **FFmpeg**: Video/audio processing (`libavcodec`, `libavformat`, `libswscale`)
-- **OpenCV**: Image processing and snapshot generation
 - **yaml-cpp**: Configuration file parsing
 - **Go libraries**: Gin (HTTP server), AWS SDK (S3 uploads), Viper (config)
+
+## Low level designs
+
+- under `designs` directory
+  - `composition_mode_design.md`: composition mode design
+  - `rtc_pts_design.md`: a/v sync, pts design
 
 ## Configuration
 

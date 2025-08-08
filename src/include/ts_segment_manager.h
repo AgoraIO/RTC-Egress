@@ -76,6 +76,11 @@ class TSSegmentManager {
     std::string generateSegmentFilename(int segmentNumber) const;
     bool createSessionDirectory();
 
+    // Access methods for metadata tracking
+    const std::vector<SegmentInfo>& getCompletedSegments() const {
+        return currentSession_.segments;
+    }
+
    private:
     Config config_;
     SessionInfo currentSession_;
