@@ -37,7 +37,7 @@ recording:
   output_dir: "./recordings"   # Where to store recordings
   users: "9032"                # Recording mode: "individual" or "composite"
   layout: "flat"               # Recording layout: "grid" or "flat" or "spotlight" or "freestyle" or "customized-layout"
-  format: "mp4"                # Output format: "mp4", "avi", "mkv"
+  format: "mp4"                # Output format: "mp4", "avi", "mkv", "ts"
   max_duration_seconds: 86400  # Maximum recording duration (1 day)
 
   # Video recording settings
@@ -60,6 +60,12 @@ recording:
     buffer_size: 100     # Audio frame buffer size
     # Note: RTC client will receive playback audio using the same sample_rate and channels
     # For lower bandwidth, you can use: sample_rate: 16000, channels: 1
+
+  # TS (Transport Stream) recording settings - only used when format: "ts"
+  ts:
+    segment_duration: 10         # Duration of each TS segment in seconds
+    generate_playlist: true      # Generate HLS playlist (m3u8 file)
+    keep_incomplete_segments: true # Keep incomplete segments on crash/interruption
 
 # Logging configuration
 log:
