@@ -1,0 +1,47 @@
+services:
+  redis:
+    image: redis:latest
+    container_name: redis-server
+    restart: unless-stopped
+    ports:
+      - "6379:6379"  # Map host port 6379 to container port 6379
+    command: |
+      redis-server 
+      --protected-mode no 
+      --bind 0.0.0.0 
+      --port 6379
+      --io-threads 4
+      --io-threads-do-reads yes
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    volumes:
+      - redis_data:/data
+      - ./logs:/var/log/redis
+    environment:
+      - REDIS_REPLICATION_MODE=master
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    sysctls:
+      - net.core.somaxconn=65535
+    ulimits:
+      memlock: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    networks:
+      - redis_network
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  redis_network:
+    driver: bridge

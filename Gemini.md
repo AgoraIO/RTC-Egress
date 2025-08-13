@@ -105,8 +105,8 @@ open http://localhost:3000
 
 ## API Endpoints
 
-- `POST /egress/v1/task/assign` - Start recording/snapshot session
-- `POST /egress/v1/task/release` - Stop recording/snapshot session
+- `POST /egress/v1/task/start` - Start recording/snapshot session
+- `POST /egress/v1/task/stop` - Stop recording/snapshot session
 - `GET /egress/v1/task/status` - Get session status
 - `GET /health` - Health check
 

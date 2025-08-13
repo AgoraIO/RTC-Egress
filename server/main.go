@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/agora-build/rtc-egress/server/egress"
+	"github.com/agora-build/rtc-egress/server/queue"
 	"github.com/agora-build/rtc-egress/server/uploader"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
@@ -41,6 +42,13 @@ type Config struct {
 			Codec   string `mapstructure:"codec"`
 		} `mapstructure:"audio"`
 	} `mapstructure:"recording"`
+	Redis struct {
+		Addr           string   `mapstructure:"addr"`
+		Password       string   `mapstructure:"password"`
+		DB             int      `mapstructure:"db"`
+		TaskTTL        int      `mapstructure:"task_ttl"`
+		WorkerPatterns []string `mapstructure:"worker_patterns"`
+	} `mapstructure:"redis"`
 	S3 struct {
 		Bucket    string `mapstructure:"bucket"`
 		Region    string `mapstructure:"region"`
@@ -51,7 +59,8 @@ type Config struct {
 }
 
 var (
-	config Config
+	config     Config
+	redisQueue *queue.RedisQueue
 )
 
 func loadConfig() error {
@@ -123,9 +132,34 @@ func loadConfig() error {
 	return nil
 }
 
+func initRedisQueue() error {
+	if config.Redis.Addr == "" {
+		log.Println("Redis not configured, using direct worker management")
+		return nil
+	}
+
+	redisQueue = queue.NewRedisQueue(
+		config.Redis.Addr,
+		config.Redis.Password,
+		config.Redis.DB,
+		config.Redis.TaskTTL,
+		config.Redis.WorkerPatterns,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := redisQueue.Ping(ctx); err != nil {
+		return fmt.Errorf("failed to connect to Redis: %v", err)
+	}
+
+	log.Printf("Connected to Redis at %s", config.Redis.Addr)
+	return nil
+}
+
 func startWorkerManager() {
 	go func() {
-		egress.ManagerMain()
+		egress.ManagerMainWithRedis(redisQueue)
 	}()
 }
 
@@ -229,6 +263,11 @@ func main() {
 	// Load configuration
 	if err := loadConfig(); err != nil {
 		log.Fatalf("Error loading config: %v", err)
+	}
+
+	// Initialize Redis queue if configured
+	if err := initRedisQueue(); err != nil {
+		log.Fatalf("Error initializing Redis: %v", err)
 	}
 
 	// Start worker manager in background in a separate goroutine
