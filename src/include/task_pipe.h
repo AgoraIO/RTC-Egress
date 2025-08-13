@@ -40,8 +40,7 @@ class TaskPipe {
     struct ChannelState {
         int ref_count = 0;
         bool is_connected = false;
-        bool is_snapshot_active = false;
-        bool is_recording_active = false;
+        std::unordered_map<std::string, std::string> active_tasks;  // task_id -> task_type
         int64_t snapshot_interval = 0;
     };
 
@@ -58,6 +57,13 @@ class TaskPipe {
 
     // Thread function
     void thread_func();
+
+    // Send completion message back to Go manager
+    void sendCompletionMessage(const std::string& task_id, const std::string& status,
+                               const std::string& error = "", const std::string& message = "");
+
+    // Helper to check if any tasks of a specific type are active
+    bool hasActiveTasksOfType(const std::string& task_type) const;
 
     // Member variables
     std::unordered_map<std::string, CommandHandler> command_handlers_;

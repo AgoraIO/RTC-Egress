@@ -19,6 +19,14 @@ type UDSMessage struct {
 	IntervalInMs       int      `json:"interval_in_ms"`     // Interval in milliseconds
 }
 
+// UDSCompletionMessage defines the completion response from C++ worker to Go manager
+type UDSCompletionMessage struct {
+	TaskID  string `json:"task_id"` // Task ID that completed
+	Status  string `json:"status"`  // "success" or "failed"
+	Error   string `json:"error"`   // Error message if status is "failed"
+	Message string `json:"message"` // Additional completion message
+}
+
 // FlattenPayloadToUDSMessage converts a WorkerCommand with nested payload to a flattened UDSMessage
 // that matches the C++ UDSMessage structure exactly
 func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]interface{}) (*UDSMessage, error) {
@@ -135,9 +143,9 @@ func ValidateUDSMessage(msg *UDSMessage) error {
 	}
 
 	// Validate action
-	validActions := map[string]bool{"start": true, "release": true, "status": true}
+	validActions := map[string]bool{"start": true, "stop": true, "status": true}
 	if !validActions[msg.Action] {
-		return fmt.Errorf("action %s is not supported, only start, release, and status are supported", msg.Action)
+		return fmt.Errorf("action %s is not supported, only start, stop, and status are supported", msg.Action)
 	}
 
 	// Validate layout
@@ -218,9 +226,9 @@ func validateTaskRequest(taskReq *TaskRequest) error {
 		return fmt.Errorf("%s unsupported, only snapshot, record, rtmp, and whip are supported", taskReq.Cmd)
 	}
 	// Validate action
-	validActions := map[string]bool{"start": true, "release": true, "status": true}
+	validActions := map[string]bool{"start": true, "stop": true, "status": true}
 	if !validActions[taskReq.Action] {
-		return fmt.Errorf("action %s not supported, only start, release, and status are supported", taskReq.Action)
+		return fmt.Errorf("action %s not supported, only start, stop, and status are supported", taskReq.Action)
 	}
 	// Validate layout (optional, default to 'flat' if missing or empty)
 	layoutVal, ok := payload["layout"]

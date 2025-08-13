@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/agora-build/rtc-egress/server/queue"
 	"github.com/gin-gonic/gin"
 )
 
@@ -48,6 +50,7 @@ type Worker struct {
 	Conn       net.Conn
 	Status     WorkerStatus
 	Mutex      sync.Mutex
+	TaskID     string // Current task ID being processed
 }
 
 type TaskRequest struct {
@@ -72,22 +75,29 @@ type WorkerManager struct {
 	NumWorkers     int
 	BinPath        string
 	Mutex          sync.Mutex
-	ChannelWorkers map[string]int             // Maps channel name to worker ID
-	WorkerChannels map[int]string             // Maps worker ID to channel name
-	ChannelTasks   map[string]map[string]bool // Maps channel -> task type -> true
+	ChannelWorkers map[string]int                 // Maps channel name to worker ID
+	WorkerChannels map[int]string                 // Maps worker ID to channel name
+	ChannelTasks   map[string]map[string][]string // Maps channel -> task type -> []task_ids
+	RedisQueue     *queue.RedisQueue              // Redis queue for task management
+	WorkerID       string                         // Unique worker manager ID
+	ActiveTasks    map[string]string              // Maps task_id -> worker_id for lease renewal
+	TasksMutex     sync.RWMutex                   // Protects ActiveTasks map
 }
 
 // Global worker manager instance for cleanup
 var globalWorkerManager *WorkerManager
 
-func NewWorkerManager(binPath string, num int) *WorkerManager {
+func NewWorkerManager(binPath string, num int, redisQueue *queue.RedisQueue, workerID string) *WorkerManager {
 	return &WorkerManager{
 		Workers:        make([]*Worker, num),
 		NumWorkers:     num,
 		BinPath:        binPath,
 		ChannelWorkers: make(map[string]int),
 		WorkerChannels: make(map[int]string),
-		ChannelTasks:   make(map[string]map[string]bool),
+		ChannelTasks:   make(map[string]map[string][]string),
+		RedisQueue:     redisQueue,
+		WorkerID:       workerID,
+		ActiveTasks:    make(map[string]string),
 	}
 }
 
@@ -97,6 +107,16 @@ func (wm *WorkerManager) StartAll() {
 	}
 	// Start monitoring goroutine
 	go wm.monitorWorkers()
+
+	// Start Redis task subscriber if Redis is available
+	if wm.RedisQueue != nil {
+		go wm.startRedisSubscriber()
+		// Start cleanup process for automatic failover
+		ctx := context.Background()
+		wm.RedisQueue.StartCleanupProcess(ctx)
+		// Start lease renewal process
+		go wm.startLeaseRenewal()
+	}
 }
 
 func (wm *WorkerManager) startWorker(i int) {
@@ -198,6 +218,10 @@ func (wm *WorkerManager) startWorker(i int) {
 			Pid:   cmd.Process.Pid,
 		},
 	}
+
+	// Start completion message listener for this worker
+	go wm.listenForCompletionMessages(wm.Workers[i])
+
 	log.Printf("Started worker %d (pid %d)", i, cmd.Process.Pid)
 }
 
@@ -210,7 +234,11 @@ func (wm *WorkerManager) monitorWorkers() {
 				continue
 			}
 			if err := w.Cmd.Process.Signal(syscall.Signal(0)); err != nil {
-				log.Printf("Worker %d (pid %d) is dead, relaunching", i, w.Cmd.Process.Pid)
+				log.Printf("Worker %d (pid %d) appears dead, will check again in 5s", i, w.Cmd.Process.Pid)
+
+				// Schedule delayed recovery check
+				go wm.scheduleWorkerRecovery(i, w)
+
 				if w.Conn != nil {
 					w.Conn.Close()
 				}
@@ -279,38 +307,445 @@ func CleanupWorkers() {
 	}
 }
 
-// findWorkerForChannel finds the appropriate worker for a channel and task:
-// 1. If channel already has a worker with tasks, check for duplicate task
-// 2. If channel already has a worker, reuse it for different task
-// 3. If no existing channel assignment, find a free worker
+// listenForCompletionMessages listens for completion messages from C++ worker
+func (wm *WorkerManager) listenForCompletionMessages(worker *Worker) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Completion listener for worker %d panicked: %v", worker.ID, r)
+		}
+	}()
+
+	for {
+		if worker.Conn == nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		// Set read timeout to avoid blocking forever
+		worker.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+		// Read completion message from C++ worker
+		buffer := make([]byte, 4096)
+		n, err := worker.Conn.Read(buffer)
+		if err != nil {
+			// Check if it's a timeout - not necessarily an error
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			log.Printf("Error reading from worker %d: %v", worker.ID, err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		if n > 0 {
+			// Try to parse as completion message
+			var completion UDSCompletionMessage
+			if err := json.Unmarshal(buffer[:n], &completion); err != nil {
+				log.Printf("Failed to parse completion message from worker %d: %v", worker.ID, err)
+				continue
+			}
+
+			// Handle the completion message
+			wm.handleTaskCompletion(worker, &completion)
+		}
+	}
+}
+
+// handleTaskCompletion processes task completion from C++ worker
+func (wm *WorkerManager) handleTaskCompletion(worker *Worker, completion *UDSCompletionMessage) {
+	worker.Mutex.Lock()
+	defer worker.Mutex.Unlock()
+
+	log.Printf("Worker %d completed task %s with status: %s", worker.ID, completion.TaskID, completion.Status)
+
+	// Validate that this worker was actually processing this task
+	if worker.TaskID != completion.TaskID {
+		log.Printf("Warning: Worker %d reported completion for task %s but was processing task %s",
+			worker.ID, completion.TaskID, worker.TaskID)
+		return
+	}
+
+	// Update Redis task status
+	if wm.RedisQueue != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		status := queue.TaskStateSuccess
+		errorMsg := ""
+		if completion.Status != "success" {
+			status = queue.TaskStateFailed
+			errorMsg = completion.Error
+			if errorMsg == "" {
+				errorMsg = completion.Message
+			}
+		}
+
+		if err := wm.RedisQueue.UpdateTaskResult(ctx, completion.TaskID, status, errorMsg); err != nil {
+			log.Printf("Failed to update Redis status for task %s: %v", completion.TaskID, err)
+		} else {
+			log.Printf("Updated Redis status for task %s: %s", completion.TaskID, status)
+		}
+	}
+
+	// Update worker status - mark as idle and clear task ID
+	worker.Status.State = WORKER_IDLE
+	worker.Status.TaskID = ""
+	worker.TaskID = ""
+
+	// Remove from active tasks tracking for lease renewal
+	wm.TasksMutex.Lock()
+	delete(wm.ActiveTasks, completion.TaskID)
+	wm.TasksMutex.Unlock()
+
+	// Clean up channel mappings - find and remove this specific task
+	for channel, workerID := range wm.ChannelWorkers {
+		if workerID == worker.ID {
+			// Find the task type for this task ID and remove it
+			wm.Mutex.Lock()
+			if channelTasks, ok := wm.ChannelTasks[channel]; ok {
+				for taskType, taskIDs := range channelTasks {
+					for _, taskID := range taskIDs {
+						if taskID == completion.TaskID {
+							wm.Mutex.Unlock()
+							wm.removeTaskFromChannel(channel, taskType, completion.TaskID)
+							return
+						}
+					}
+				}
+			}
+			wm.Mutex.Unlock()
+			break
+		}
+	}
+}
+
+// startLeaseRenewal periodically renews leases for active tasks
+func (wm *WorkerManager) startLeaseRenewal() {
+	ticker := time.NewTicker(queue.LeaseRenewalInterval)
+	defer ticker.Stop()
+
+	log.Printf("Started lease renewal process for worker %s", wm.WorkerID)
+
+	for {
+		select {
+		case <-ticker.C:
+			wm.renewAllLeases()
+		}
+	}
+}
+
+// renewAllLeases renews leases for all active tasks
+func (wm *WorkerManager) renewAllLeases() {
+	wm.TasksMutex.RLock()
+	activeTasks := make(map[string]string)
+	for taskID, workerID := range wm.ActiveTasks {
+		activeTasks[taskID] = workerID
+	}
+	wm.TasksMutex.RUnlock()
+
+	if len(activeTasks) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	renewedCount := 0
+	for taskID, workerID := range activeTasks {
+		if err := wm.RedisQueue.RenewLease(ctx, taskID, workerID); err != nil {
+			log.Printf("Failed to renew lease for task %s: %v", taskID, err)
+			// Remove from active tasks if lease renewal fails
+			wm.TasksMutex.Lock()
+			delete(wm.ActiveTasks, taskID)
+			wm.TasksMutex.Unlock()
+		} else {
+			renewedCount++
+		}
+	}
+
+	if renewedCount > 0 {
+		log.Printf("Renewed leases for %d tasks", renewedCount)
+	}
+}
+
+// scheduleWorkerRecovery waits 5 seconds then recovers tasks from dead worker
+func (wm *WorkerManager) scheduleWorkerRecovery(workerID int, deadWorker *Worker) {
+	// Wait 5 seconds to confirm worker is really dead
+	time.Sleep(5 * time.Second)
+
+	// Double-check the worker is still dead and hasn't been replaced
+	wm.Mutex.Lock()
+	currentWorker := wm.Workers[workerID]
+	stillDead := (currentWorker == nil ||
+		currentWorker.Cmd == nil ||
+		currentWorker.Cmd.Process == nil ||
+		currentWorker.Cmd.Process.Pid != deadWorker.Cmd.Process.Pid)
+	wm.Mutex.Unlock()
+
+	if stillDead {
+		log.Printf("Confirmed worker %d (pid %d) is dead after 5s, recovering tasks",
+			workerID, deadWorker.Cmd.Process.Pid)
+		wm.recoverTasksFromDeadWorker(deadWorker)
+	} else {
+		log.Printf("Worker %d recovered on its own, no task recovery needed", workerID)
+	}
+}
+
+// recoverTasksFromDeadWorker moves tasks from dead worker back to Redis main queues
+func (wm *WorkerManager) recoverTasksFromDeadWorker(deadWorker *Worker) {
+	if wm.RedisQueue == nil {
+		log.Printf("No Redis queue configured, cannot recover tasks from worker %d", deadWorker.ID)
+		return
+	}
+
+	// Find all tasks assigned to this worker
+	var tasksToRecover []string
+	wm.TasksMutex.Lock()
+	for taskID, workerManagerID := range wm.ActiveTasks {
+		if workerManagerID == wm.WorkerID {
+			// This task belongs to our manager, check if it was on the dead worker
+			wm.Mutex.Lock()
+			for channel, workerID := range wm.ChannelWorkers {
+				if workerID == deadWorker.ID {
+					// Check if this task is on this channel
+					if channelTasks, ok := wm.ChannelTasks[channel]; ok {
+						for _, taskIDs := range channelTasks {
+							for _, id := range taskIDs {
+								if id == taskID {
+									tasksToRecover = append(tasksToRecover, taskID)
+								}
+							}
+						}
+					}
+				}
+			}
+			wm.Mutex.Unlock()
+		}
+	}
+
+	// Remove recovered tasks from tracking
+	for _, taskID := range tasksToRecover {
+		delete(wm.ActiveTasks, taskID)
+	}
+	wm.TasksMutex.Unlock()
+
+	if len(tasksToRecover) == 0 {
+		log.Printf("No tasks to recover from worker %d", deadWorker.ID)
+		return
+	}
+
+	// Move tasks back to main queues for immediate re-assignment
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	recoveredCount := 0
+	for _, taskID := range tasksToRecover {
+		if err := wm.moveTaskBackToMainQueue(ctx, taskID); err != nil {
+			log.Printf("Failed to recover task %s from dead worker %d: %v", taskID, deadWorker.ID, err)
+		} else {
+			recoveredCount++
+		}
+	}
+
+	log.Printf("Recovered %d/%d tasks from dead worker %d", recoveredCount, len(tasksToRecover), deadWorker.ID)
+}
+
+// moveTaskBackToMainQueue moves a task from processing back to main queue
+func (wm *WorkerManager) moveTaskBackToMainQueue(ctx context.Context, taskID string) error {
+	// Get task details
+	task, err := wm.RedisQueue.GetTaskStatus(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("failed to get task status: %v", err)
+	}
+
+	// Reset task state
+	task.State = queue.TaskStatePending
+	task.WorkerID = ""
+	task.LeaseExpiry = nil
+	task.ProcessedAt = nil
+	task.RetryCount++
+
+	// Update task and move back to main queue
+	originalQueue := wm.RedisQueue.BuildQueueKey(task.Type, task.Channel)
+	processingQueue := wm.RedisQueue.BuildProcessingQueueKey(wm.WorkerID)
+	taskKey := wm.RedisQueue.BuildTaskKey(taskID)
+	leaseKey := wm.RedisQueue.BuildLeaseKey(taskID)
+
+	taskData, err := json.Marshal(task)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task: %v", err)
+	}
+
+	// Atomic operation: update task + move to main queue + cleanup
+	pipe := wm.RedisQueue.Client().TxPipeline()
+	pipe.Set(ctx, taskKey, taskData, wm.RedisQueue.TTL())
+	pipe.LPush(ctx, originalQueue, taskID)
+	pipe.LRem(ctx, processingQueue, 1, taskID)
+	pipe.Del(ctx, leaseKey)
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to move task back to main queue: %v", err)
+	}
+
+	log.Printf("Moved task %s back to queue %s (retry %d)", taskID, originalQueue, task.RetryCount)
+	return nil
+}
+
+// startRedisSubscriber continuously polls Redis for tasks and processes them
+func (wm *WorkerManager) startRedisSubscriber() {
+	log.Printf("Starting Redis task subscriber for worker %s", wm.WorkerID)
+
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		// Use configured worker patterns or default patterns
+		patterns := []string{"snapshot:*", "record:*"}
+		if wm.RedisQueue != nil {
+			// Get patterns from Redis queue configuration
+			patterns = []string{"snapshot:*", "record:*", "web:record:*"}
+		}
+
+		task, err := wm.fetchTaskFromRedis(ctx, patterns)
+		cancel()
+
+		if err != nil {
+			log.Printf("Error fetching task from Redis: %v", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		if task != nil {
+			wm.processRedisTask(task)
+		} else {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// fetchTaskFromRedis polls Redis queues for available tasks
+func (wm *WorkerManager) fetchTaskFromRedis(ctx context.Context, patterns []string) (*queue.Task, error) {
+	if wm.RedisQueue == nil {
+		return nil, nil
+	}
+
+	// Get matching queue keys
+	var queues []string
+	for _, pattern := range patterns {
+		queuePattern := fmt.Sprintf("egress:%s", pattern)
+		keys, err := wm.RedisQueue.Client().Keys(ctx, queuePattern).Result()
+		if err != nil {
+			continue
+		}
+		queues = append(queues, keys...)
+	}
+
+	if len(queues) == 0 {
+		return nil, nil
+	}
+
+	// Try to pop a task from any available queue
+	result, err := wm.RedisQueue.Client().BRPop(ctx, 1*time.Second, queues...).Result()
+	if err != nil {
+		if err.Error() == "redis: nil" { // No tasks available
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if len(result) < 2 {
+		return nil, fmt.Errorf("unexpected result format")
+	}
+
+	taskID := result[1]
+	return wm.RedisQueue.GetTaskStatus(ctx, taskID)
+}
+
+// processRedisTask converts Redis task to existing TaskRequest and processes it
+func (wm *WorkerManager) processRedisTask(task *queue.Task) {
+	log.Printf("Processing Redis task %s (type: %s, channel: %s)", task.ID, task.Type, task.Channel)
+
+	// Convert Redis task to existing TaskRequest format
+	taskReq := TaskRequest{
+		RequestID: task.RequestID,
+		Cmd:       task.Type,
+		Action:    task.Action,
+		TaskID:    task.ID,
+		Payload:   task.Payload,
+	}
+
+	// Use existing assignment logic
+	response, err := wm.AssignTask(taskReq)
+
+	// Update task status in Redis
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err != nil {
+		log.Printf("Failed to process Redis task %s: %v", task.ID, err)
+		wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateFailed, err.Error())
+	} else {
+		log.Printf("Successfully assigned Redis task %s: %+v", task.ID, response)
+		// Task is now being processed - completion will be handled by the completion listener
+		wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateProcessing, "")
+
+		// Track task for lease renewal
+		wm.TasksMutex.Lock()
+		wm.ActiveTasks[task.ID] = wm.WorkerID
+		wm.TasksMutex.Unlock()
+	}
+}
+
+// findWorkerForChannel finds worker for channel (reuse existing or find free)
 func (wm *WorkerManager) findWorkerForChannel(channel, taskType string) (*Worker, error, bool) {
 	// Check if channel already has a worker assigned
 	if workerID, exists := wm.ChannelWorkers[channel]; exists {
 		worker := wm.Workers[workerID]
-		if worker == nil || worker.Status.State == WORKER_NOT_AVAILABLE {
-			// Worker is dead, clean up mapping
-			delete(wm.ChannelWorkers, channel)
-			delete(wm.WorkerChannels, workerID)
-			delete(wm.ChannelTasks, channel)
-		} else {
-			// Check for duplicate task on this channel
-			if channelTasks, ok := wm.ChannelTasks[channel]; ok {
-				if _, taskExists := channelTasks[taskType]; taskExists {
-					return nil, fmt.Errorf("task %s already running for channel %s on worker %d", taskType, channel, workerID), true
+		if worker != nil && worker.Status.State != WORKER_NOT_AVAILABLE {
+			return worker, nil, false // Reuse existing worker
+		}
+		// Worker is dead, clean up
+		delete(wm.ChannelWorkers, channel)
+		delete(wm.WorkerChannels, workerID)
+		delete(wm.ChannelTasks, channel)
+	}
+
+	// Find free worker
+	worker, err := wm.findFreeWorker()
+	return worker, err, false
+}
+
+// removeTaskFromChannel removes a specific task from channel tracking
+func (wm *WorkerManager) removeTaskFromChannel(channel, taskType, taskId string) {
+	wm.Mutex.Lock()
+	defer wm.Mutex.Unlock()
+
+	if channelTasks, ok := wm.ChannelTasks[channel]; ok {
+		if taskIDs, typeExists := channelTasks[taskType]; typeExists {
+			// Remove specific task ID
+			for i, id := range taskIDs {
+				if id == taskId {
+					wm.ChannelTasks[channel][taskType] = append(taskIDs[:i], taskIDs[i+1:]...)
+					break
 				}
 			}
-			// Return existing worker for different task on same channel
-			return worker, nil, false
+			// Clean up empty task type
+			if len(wm.ChannelTasks[channel][taskType]) == 0 {
+				delete(wm.ChannelTasks[channel], taskType)
+			}
+		}
+		// Clean up empty channel
+		if len(channelTasks) == 0 {
+			delete(wm.ChannelTasks, channel)
+			delete(wm.ChannelWorkers, channel)
+			for workerID, ch := range wm.WorkerChannels {
+				if ch == channel {
+					delete(wm.WorkerChannels, workerID)
+					break
+				}
+			}
 		}
 	}
-
-	// No existing assignment, find a free worker
-	worker, err := wm.findFreeWorker()
-	if err != nil {
-		return nil, err, false
-	}
-
-	return worker, nil, false
 }
 
 // Helper to generate 11 random digits as a string
@@ -350,104 +785,90 @@ func NewWorkerCommand(cmd string, action string, payload map[string]interface{})
 }
 
 func (wm *WorkerManager) AssignTask(taskReq TaskRequest) (*TaskResponse, error) {
-	log.Printf("AssignTask payload: %+v", taskReq.Payload)
-
-	wm.Mutex.Lock()
-	defer wm.Mutex.Unlock()
-
-	// Validate and flatten the task request first to get channel info
+	// 1. Validate and get channel info
 	udsMsg, err := ValidateAndFlattenTaskRequest(&taskReq)
 	if err != nil {
 		return &TaskResponse{
 			RequestID: taskReq.RequestID,
-			TaskID:    "",
 			Status:    "failed",
 			Error:     err.Error(),
 		}, err
 	}
 
-	// Extract channel and task type for intelligent assignment
 	channel := udsMsg.Channel
 	taskType := taskReq.Cmd
-	requestId := taskReq.RequestID
 
-	// Find the appropriate worker based on channel assignment rules
-	worker, err, isDuplicate := wm.findWorkerForChannel(channel, taskType)
-	if isDuplicate {
-		// Return specific error for duplicate tasks
-		return &TaskResponse{
-			RequestID: requestId,
-			TaskID:    "",
-			Status:    "failed",
-			Error:     err.Error(),
-		}, err
-	}
+	wm.Mutex.Lock()
+	// 2. Find worker for this channel (reuse if exists, find free if new)
+	worker, err, _ := wm.findWorkerForChannel(channel, taskType)
 	if err != nil {
+		wm.Mutex.Unlock()
 		return &TaskResponse{
-			RequestID: requestId,
-			TaskID:    "",
+			RequestID: taskReq.RequestID,
 			Status:    "failed",
 			Error:     err.Error(),
 		}, err
 	}
 
-	workerID := worker.ID
+	// 3. Generate task ID
+	taskId := fmt.Sprintf("%s%d", randomDigits(11), worker.ID)
+
+	// 4. Update channel mappings (before sending to avoid race conditions)
+	wm.ChannelWorkers[channel] = worker.ID
+	wm.WorkerChannels[worker.ID] = channel
+	if wm.ChannelTasks[channel] == nil {
+		wm.ChannelTasks[channel] = make(map[string][]string)
+	}
+	wm.ChannelTasks[channel][taskType] = append(wm.ChannelTasks[channel][taskType], taskId)
+	wm.Mutex.Unlock()
+
+	// 5. Send task to worker
 	worker.Mutex.Lock()
-	defer worker.Mutex.Unlock()
-
-	// Generate taskId: 11 random digits + workerId (12 digits total)
-	randomPart := randomDigits(11)
-	taskId := fmt.Sprintf("%s%d", randomPart, workerID)
-
-	// Send the flattened UDSMessage directly to worker
 	err = wm.sendUDSMessageToWorker(worker, taskId, udsMsg)
 	if err != nil {
+		worker.Mutex.Unlock()
+		// Clean up on failure
+		wm.removeTaskFromChannel(channel, taskType, taskId)
 		return &TaskResponse{
-			RequestID: requestId,
+			RequestID: taskReq.RequestID,
 			TaskID:    taskId,
 			Status:    "failed",
 			Error:     err.Error(),
 		}, err
 	}
 
-	// Update worker status
+	// 6. Update worker state
 	worker.Status.State = WORKER_RUNNING
 	worker.Status.TaskID = taskId
+	worker.TaskID = taskId
+	worker.Mutex.Unlock()
 
-	// Update channel and task mappings
-	wm.ChannelWorkers[channel] = workerID
-	wm.WorkerChannels[workerID] = channel
-	if wm.ChannelTasks[channel] == nil {
-		wm.ChannelTasks[channel] = make(map[string]bool)
-	}
-	wm.ChannelTasks[channel][taskType] = true
-
-	log.Printf("Assigned task %s (channel: %s, type: %s) to worker %d", taskId, channel, taskType, workerID)
-
+	log.Printf("Assigned task %s (%s:%s) to worker %d", taskId, channel, taskType, worker.ID)
 	return &TaskResponse{
-		RequestID: requestId,
+		RequestID: taskReq.RequestID,
 		TaskID:    taskId,
 		Status:    "success",
 	}, nil
 }
 
 func (wm *WorkerManager) ReleaseWorker(workerID int, taskReq TaskRequest) (*TaskResponse, error) {
+	// 1. Find and validate worker
 	wm.Mutex.Lock()
 	worker := wm.Workers[workerID]
 	wm.Mutex.Unlock()
 
-	if worker == nil {
-		err := fmt.Errorf("worker %d not found", workerID)
+	if worker == nil || worker.Status.TaskID != taskReq.TaskID {
 		return &TaskResponse{
 			RequestID: taskReq.RequestID,
 			TaskID:    taskReq.TaskID,
 			Status:    "failed",
-			Error:     err.Error(),
-		}, err
+			Error:     fmt.Sprintf("task %s not found on worker %d", taskReq.TaskID, workerID),
+		}, nil
 	}
 
-	if worker.Status.TaskID != taskReq.TaskID {
-		err := fmt.Errorf("taskId %s not found on worker %d", taskReq.TaskID, workerID)
+	// 2. Validate and send stop command
+	udsMsg, err := ValidateAndFlattenTaskRequest(&taskReq)
+	if err != nil {
 		return &TaskResponse{
 			RequestID: taskReq.RequestID,
 			TaskID:    taskReq.TaskID,
@@ -457,24 +878,9 @@ func (wm *WorkerManager) ReleaseWorker(workerID int, taskReq TaskRequest) (*Task
 	}
 
 	worker.Mutex.Lock()
-	defer worker.Mutex.Unlock()
-
-	// Validate and flatten the task request
-	udsMsg, err := ValidateAndFlattenTaskRequest(&taskReq)
-	if err != nil {
-		err := fmt.Errorf("failed to validate and flatten task request: %v", err)
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			TaskID:    taskReq.TaskID,
-			Status:    "failed",
-			Error:     err.Error(),
-		}, err
-	}
-
-	// Send the flattened UDSMessage to worker
 	err = wm.sendUDSMessageToWorker(worker, taskReq.TaskID, udsMsg)
 	if err != nil {
-		err := fmt.Errorf("failed to send stop command to worker %d: %v", workerID, err)
+		worker.Mutex.Unlock()
 		return &TaskResponse{
 			RequestID: taskReq.RequestID,
 			TaskID:    taskReq.TaskID,
@@ -483,28 +889,14 @@ func (wm *WorkerManager) ReleaseWorker(workerID int, taskReq TaskRequest) (*Task
 		}, err
 	}
 
-	// Clean up channel and task mappings
-	wm.Mutex.Lock()
-	channel := udsMsg.Channel
-	taskType := taskReq.Cmd
-
-	// Remove this specific task type from the channel
-	if channelTasks, ok := wm.ChannelTasks[channel]; ok {
-		delete(channelTasks, taskType)
-		// If no more task types for this channel, clean up completely
-		if len(channelTasks) == 0 {
-			delete(wm.ChannelTasks, channel)
-			delete(wm.ChannelWorkers, channel)
-			delete(wm.WorkerChannels, workerID)
-			worker.Status.State = WORKER_IDLE
-		}
-	}
-
-	wm.Mutex.Unlock()
-
+	// 3. Update worker state
 	worker.Status.TaskID = ""
-	log.Printf("Released task %s (channel: %s, type: %s) from worker %d", taskReq.TaskID, channel, taskType, workerID)
+	worker.Mutex.Unlock()
 
+	// 4. Clean up channel tracking
+	wm.removeTaskFromChannel(udsMsg.Channel, taskReq.Cmd, taskReq.TaskID)
+
+	log.Printf("Released task %s (%s:%s) from worker %d", taskReq.TaskID, udsMsg.Channel, taskReq.Cmd, workerID)
 	return &TaskResponse{
 		RequestID: taskReq.RequestID,
 		TaskID:    taskReq.TaskID,
@@ -562,8 +954,17 @@ func (wm *WorkerManager) sendUDSMessageToWorker(worker *Worker, taskID string, u
 		return fmt.Errorf("worker not running")
 	}
 
-	// Send flattened UDSMessage to worker
-	data, err := json.Marshal(udsMsg)
+	// Create a wrapper message that includes the task ID for the C++ worker
+	messageWithTaskID := struct {
+		TaskID string `json:"task_id"`
+		*UDSMessage
+	}{
+		TaskID:     taskID,
+		UDSMessage: udsMsg,
+	}
+
+	// Send the message with task ID to worker
+	data, err := json.Marshal(messageWithTaskID)
 	if err != nil {
 		return fmt.Errorf("failed to marshal UDSMessage for worker %v: %v", worker, err)
 	}
@@ -578,6 +979,10 @@ func (wm *WorkerManager) sendUDSMessageToWorker(worker *Worker, taskID string, u
 }
 
 func ManagerMain() {
+	ManagerMainWithRedis(nil)
+}
+
+func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
 	binPath := "./bin/eg_worker" // Adjust if needed
 	egressConfigPath = ""
 	for i, arg := range os.Args {
@@ -588,77 +993,151 @@ func ManagerMain() {
 	if egressConfigPath == "" {
 		log.Fatal("--config must be provided for egress processes")
 	}
-	wm := NewWorkerManager(binPath, 4)
+
+	// Generate unique worker ID
+	workerID := fmt.Sprintf("worker-%d", time.Now().UnixNano())
+
+	wm := NewWorkerManager(binPath, 4, redisQueue, workerID)
 	globalWorkerManager = wm // Store for cleanup
 	wm.StartAll()
 
 	r := gin.Default()
 
-	// New API endpoint for automatic task assignment
-	r.POST("/egress/v1/task/assign", func(c *gin.Context) {
+	// New API endpoint for automatic task start via Redis
+	r.POST("/egress/v1/task/start", func(c *gin.Context) {
 		var taskReq TaskRequest
 		if err := c.ShouldBindJSON(&taskReq); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "request_id": taskReq.RequestID})
 			return
 		}
-		taskReq.Action = "start"
-		// Validate and flatten task request using the unified function
-		_, err := ValidateAndFlattenTaskRequest(&taskReq)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "request_id": taskReq.RequestID})
+
+		// Redis is required for task management
+		if wm.RedisQueue == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":      "Redis queue not configured",
+				"request_id": taskReq.RequestID,
+			})
 			return
 		}
-		response, err := wm.AssignTask(taskReq)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Extract channel from payload
+		channel := "default"
+		if taskReq.Payload != nil {
+			if ch, ok := taskReq.Payload["channel"].(string); ok && ch != "" {
+				channel = ch
+			}
+		}
+
+		task, err := wm.RedisQueue.PublishTask(ctx, taskReq.Cmd, "start", channel, taskReq.RequestID, taskReq.Payload)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, response)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":      err.Error(),
+				"request_id": taskReq.RequestID,
+			})
 			return
 		}
-		c.JSON(http.StatusOK, response)
+
+		c.JSON(http.StatusOK, gin.H{
+			"request_id": taskReq.RequestID,
+			"task_id":    task.ID,
+			"status":     "queued",
+		})
 	})
 
-	// API endpoint to release a worker from a task
-	r.POST("/egress/v1/task/release", func(c *gin.Context) {
+	// API endpoint to stop a worker from a task
+	r.POST("/egress/v1/task/stop", func(c *gin.Context) {
 		var taskReq TaskRequest
 		if err := c.ShouldBindJSON(&taskReq); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		taskReq.Action = "release"
-		workerID, err := parseWorkerIdFromTaskId(taskReq.TaskID, wm.NumWorkers)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+
+		// Redis is required for task management
+		if wm.RedisQueue == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":      "Redis queue not configured",
+				"request_id": taskReq.RequestID,
+			})
 			return
 		}
-		response, err := wm.ReleaseWorker(workerID, taskReq)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Extract channel from payload
+		channel := "default"
+		if taskReq.Payload != nil {
+			if ch, ok := taskReq.Payload["channel"].(string); ok && ch != "" {
+				channel = ch
+			}
+		}
+
+		task, err := wm.RedisQueue.PublishTask(ctx, taskReq.Cmd, "stop", channel, taskReq.RequestID, taskReq.Payload)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, response)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":      err.Error(),
+				"request_id": taskReq.RequestID,
+			})
 			return
 		}
-		c.JSON(http.StatusOK, response)
+
+		c.JSON(http.StatusOK, gin.H{
+			"request_id": taskReq.RequestID,
+			"task_id":    task.ID,
+			"status":     "queued",
+		})
 	})
 
-	// Legacy API endpoint for direct worker commands (still available)
+	// API endpoint for task status (checks Redis first, then worker status)
 	r.POST("/egress/v1/task/status", func(c *gin.Context) {
-		var taskReq TaskRequest
-		if err := c.ShouldBindJSON(&taskReq); err != nil {
+		var req struct {
+			RequestID string `json:"request_id"`
+			TaskID    string `json:"task_id"`
+		}
+
+		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		taskReq.Action = "status"
-		workerID, err := parseWorkerIdFromTaskId(taskReq.TaskID, wm.NumWorkers)
+		if req.TaskID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "task_id is required"})
+			return
+		}
 
+		// Redis is required for task management
+		if wm.RedisQueue == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":      "Redis queue not configured",
+				"request_id": req.RequestID,
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		task, err := wm.RedisQueue.GetTaskStatus(ctx, req.TaskID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		workerStatus := &WorkerStatus{}
-		if err := wm.GetWorkerStatus(workerStatus, workerID, taskReq); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":      err.Error(),
+				"request_id": req.RequestID,
+			})
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"status": workerStatus})
+		c.JSON(http.StatusOK, gin.H{
+			"request_id": req.RequestID,
+			"task_id":    task.ID,
+			"state":      task.State,
+			"action":     task.Action,
+			"created_at": task.CreatedAt,
+			"error":      task.Error,
+			"worker_id":  task.WorkerID,
+		})
 	})
 
 	log.Println("Manager API server running on :8090")

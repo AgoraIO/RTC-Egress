@@ -6,6 +6,7 @@
 
 // UDSMessage defines the protocol for communication between Go (egress) and C++ (eg_worker)
 struct UDSMessage {
+    std::string task_id;             // Task ID for tracking completion
     std::string cmd;                 // "snapshot", "record", "rtmp", or "whip"
     std::string action;              // "start", "release", "status"
     std::string layout;              // "grid", "flat", "spotlight", or "freestyle"
@@ -17,8 +18,17 @@ struct UDSMessage {
     int interval_in_ms = 0;          // Interval in milliseconds
 };
 
+// UDSCompletionMessage defines the completion response from C++ worker to Go manager
+struct UDSCompletionMessage {
+    std::string task_id;  // Task ID that completed
+    std::string status;   // "success" or "failed"
+    std::string error;    // Error message if status is "failed"
+    std::string message;  // Additional completion message
+};
+
 inline void to_json(nlohmann::json& j, const UDSMessage& m) {
-    j = nlohmann::json{{"cmd", m.cmd},
+    j = nlohmann::json{{"task_id", m.task_id},
+                       {"cmd", m.cmd},
                        {"action", m.action},
                        {"layout", m.layout},
                        {"freestyleCanvasUrl", m.freestyleCanvasUrl},
@@ -29,7 +39,13 @@ inline void to_json(nlohmann::json& j, const UDSMessage& m) {
                        {"interval_in_ms", m.interval_in_ms}};
 }
 
+inline void to_json(nlohmann::json& j, const UDSCompletionMessage& m) {
+    j = nlohmann::json{
+        {"task_id", m.task_id}, {"status", m.status}, {"error", m.error}, {"message", m.message}};
+}
+
 inline void from_json(const nlohmann::json& j, UDSMessage& m) {
+    if (j.contains("task_id")) j.at("task_id").get_to(m.task_id);
     j.at("cmd").get_to(m.cmd);
     if (j.contains("action"))
         j.at("action").get_to(m.action);
@@ -42,4 +58,11 @@ inline void from_json(const nlohmann::json& j, UDSMessage& m) {
     j.at("access_token").get_to(m.access_token);
     if (j.contains("workerUid")) j.at("workerUid").get_to(m.workerUid);
     if (j.contains("interval_in_ms")) j.at("interval_in_ms").get_to(m.interval_in_ms);
+}
+
+inline void from_json(const nlohmann::json& j, UDSCompletionMessage& m) {
+    j.at("task_id").get_to(m.task_id);
+    j.at("status").get_to(m.status);
+    if (j.contains("error")) j.at("error").get_to(m.error);
+    if (j.contains("message")) j.at("message").get_to(m.message);
 }

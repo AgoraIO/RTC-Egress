@@ -13,6 +13,16 @@ health_port: 8182  # Health check endpoint
 api_port: 8080     # API server port
 canvas_template_port: 3000 # Web interface port
 
+# Redis Configuration
+redis:
+  addr: "localhost:6379"     # Redis server address
+  password: ""               # Redis password (leave empty if no password)
+  db: 0                      # Redis database number
+  task_ttl: 172800           # Task TTL in seconds (48 hours)
+  worker_patterns:           # Worker subscription patterns
+    - "egress:snapshot:*"    # Example: workers can subscribe to specific patterns
+    - "egress:record:*"      # Example: different workers for different tasks
+
 # S3 Configuration (optional)
 s3:
   bucket: "your-s3-bucket"

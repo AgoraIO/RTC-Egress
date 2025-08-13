@@ -100,22 +100,8 @@ void TaskPipe::start(agora::rtc::RtcClient& rtc_client, agora::rtc::SnapshotSink
     rtc_client_->setVideoFrameCallback([this](const agora::media::base::VideoFrame& frame,
                                               const std::string& userId) {
         // Check which tasks are active
-        bool has_active_snapshot = false;
-        bool has_active_recording = false;
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            for (const auto& [channel, state] : channel_states_) {
-                if (state.is_snapshot_active) {
-                    has_active_snapshot = true;
-                }
-                if (state.is_recording_active) {
-                    has_active_recording = true;
-                }
-                if (has_active_snapshot && has_active_recording) {
-                    break;  // Found both, no need to continue
-                }
-            }
-        }
+        bool has_active_snapshot = hasActiveTasksOfType("snapshot");
+        bool has_active_recording = hasActiveTasksOfType("record");
 
         // Only forward to snapshot sink if snapshots are active
         if (has_active_snapshot && snapshot_sink_) {
@@ -136,16 +122,7 @@ void TaskPipe::start(agora::rtc::RtcClient& rtc_client, agora::rtc::SnapshotSink
         [this](const agora::media::IAudioFrameObserverBase::AudioFrame& frame,
                const std::string& userId) {
             // Only forward audio frames if there are active recording tasks
-            bool has_active_recording = false;
-            {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                for (const auto& [channel, state] : channel_states_) {
-                    if (state.is_recording_active) {
-                        has_active_recording = true;
-                        break;
-                    }
-                }
-            }
+            bool has_active_recording = hasActiveTasksOfType("record");
 
             if (has_active_recording && recording_sink_) {
                 recording_sink_->onAudioFrame(reinterpret_cast<const uint8_t*>(frame.buffer),
@@ -182,10 +159,18 @@ void TaskPipe::stop() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     for (auto& [channel, state] : channel_states_) {
         if (state.is_connected) {
-            if (snapshot_sink_ && state.is_snapshot_active) {
+            // Check if any snapshot tasks are active
+            bool has_snapshot_tasks = false;
+            bool has_recording_tasks = false;
+            for (const auto& [task_id, task_type] : state.active_tasks) {
+                if (task_type == "snapshot") has_snapshot_tasks = true;
+                if (task_type == "record") has_recording_tasks = true;
+            }
+
+            if (snapshot_sink_ && has_snapshot_tasks) {
                 snapshot_sink_->stop();
             }
-            if (recording_sink_ && state.is_recording_active) {
+            if (recording_sink_ && has_recording_tasks) {
                 recording_sink_->stop();
             }
             rtc_client_->disconnect();
@@ -227,7 +212,7 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             auto& state = channel_states_[msg.channel];
-            state.is_snapshot_active = true;
+            state.active_tasks[msg.task_id] = "snapshot";
             if (msg.interval_in_ms > 0) {
                 state.snapshot_interval = msg.interval_in_ms;
                 snapshot_sink_->setIntervalInMs(msg.interval_in_ms);
@@ -245,33 +230,63 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
         }
 
         logInfo("Started snapshot for channel: " + msg.channel, instance_id_);
-    } else if (action == "release") {
+    } else if (action == "stop") {
         // Stop the specific snapshot task but keep channel if other tasks exist
+        std::string completed_task_id;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             auto it = channel_states_.find(msg.channel);
             if (it != channel_states_.end()) {
                 auto& state = it->second;
-                if (state.is_snapshot_active) {
-                    logInfo("Stopping snapshot for channel: " + msg.channel, instance_id_);
-                    if (snapshot_sink_ && snapshot_sink_->isCapturing()) {
-                        snapshot_sink_->stop();
+                // Find and remove a snapshot task (use msg.task_id if available, otherwise first
+                // found)
+                std::string task_to_remove = msg.task_id;
+                if (task_to_remove.empty()) {
+                    // Find first snapshot task if no specific task_id provided
+                    for (const auto& [task_id, task_type] : state.active_tasks) {
+                        if (task_type == "snapshot") {
+                            task_to_remove = task_id;
+                            break;
+                        }
                     }
-                    state.is_snapshot_active = false;
+                }
+
+                if (!task_to_remove.empty() && state.active_tasks.count(task_to_remove)) {
+                    state.active_tasks.erase(task_to_remove);
+                    completed_task_id = task_to_remove;
+
+                    // Stop snapshot sink if no more snapshot tasks are active
+                    if (!hasActiveTasksOfType("snapshot")) {
+                        logInfo("Stopping snapshot for channel: " + msg.channel, instance_id_);
+                        if (snapshot_sink_ && snapshot_sink_->isCapturing()) {
+                            snapshot_sink_->stop();
+                        }
+                    }
                 }
             }
         }
+
+        // Send completion message
+        if (!completed_task_id.empty()) {
+            sendCompletionMessage(completed_task_id, "success", "",
+                                  "Snapshot task completed successfully");
+        }
         // Use ref counting to determine if we should disconnect from channel
         releaseConnection(msg.channel);
-        logInfo("Released snapshot for channel: " + msg.channel, instance_id_);
+        logInfo("Stopped snapshot for channel: " + msg.channel, instance_id_);
     } else if (action == "status") {
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto it = channel_states_.find(msg.channel);
         if (it != channel_states_.end()) {
             const auto& state = it->second;
+            // Count snapshot tasks
+            int snapshot_count = 0;
+            for (const auto& [task_id, task_type] : state.active_tasks) {
+                if (task_type == "snapshot") snapshot_count++;
+            }
             logInfo("Status - Channel: " + msg.channel +
                         ", Refs: " + std::to_string(state.ref_count) +
-                        ", Snapshots: " + (state.is_snapshot_active ? "active" : "inactive") +
+                        ", Snapshots: " + std::to_string(snapshot_count) + " active" +
                         ", Interval: " + std::to_string(state.snapshot_interval) + "ms",
                     instance_id_);
         } else {
@@ -298,73 +313,100 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto& state = channel_states_[msg.channel];
 
-        if (state.is_recording_active) {
-            logInfo("Recording is already active for channel: " + msg.channel, instance_id_);
-            return;
+        // Check if recording is already active (we allow multiple recording tasks)
+        bool recording_active = false;
+        for (const auto& [task_id, task_type] : state.active_tasks) {
+            if (task_type == "record") {
+                recording_active = true;
+                break;
+            }
         }
 
-        // Start recording with pre-configured settings
-        if (recording_sink_) {
+        // Add this recording task
+        state.active_tasks[msg.task_id] = "record";
+
+        // Start recording sink if not already running
+        if (!recording_active && recording_sink_) {
             if (recording_sink_->initialize(recording_config_) && recording_sink_->start()) {
-                state.is_recording_active = true;
                 logInfo("Started recording for channel: " + msg.channel + " to " +
                             recording_config_.outputDir,
                         instance_id_);
             } else {
                 logError("Failed to start recording for channel: " + msg.channel, instance_id_);
+                state.active_tasks.erase(msg.task_id);
                 releaseConnection(msg.channel);
+                sendCompletionMessage(msg.task_id, "failed", "Failed to start recording sink");
+                return;
             }
+        } else {
+            logInfo("Recording already active for channel: " + msg.channel +
+                        ", added task: " + msg.task_id,
+                    instance_id_);
         }
     } else if (action == "stop") {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        auto it = channel_states_.find(msg.channel);
-        if (it == channel_states_.end()) {
-            logError("No active recording found for channel: " + msg.channel, instance_id_);
-            return;
-        }
-
-        auto& state = it->second;
-        if (!state.is_recording_active) {
-            logInfo("No active recording to stop for channel: " + msg.channel, instance_id_);
-            return;
-        }
-
-        // Stop recording
-        if (recording_sink_) {
-            recording_sink_->stop();
-        }
-
-        state.is_recording_active = false;
-        logInfo("Stopped recording for channel: " + msg.channel, instance_id_);
-
-        // Release the connection if no other tasks are using it
-        releaseConnection(msg.channel);
-    } else if (action == "release") {
-        // Stop the specific recording task but keep channel if other tasks exist
+        std::string completed_task_id;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             auto it = channel_states_.find(msg.channel);
-            if (it != channel_states_.end()) {
-                auto& state = it->second;
-                if (state.is_recording_active) {
+            if (it == channel_states_.end()) {
+                logError("No active recording found for channel: " + msg.channel, instance_id_);
+                return;
+            }
+
+            auto& state = it->second;
+            // Find and remove a recording task (use msg.task_id if available, otherwise first
+            // found)
+            std::string task_to_remove = msg.task_id;
+            if (task_to_remove.empty()) {
+                // Find first recording task if no specific task_id provided
+                for (const auto& [task_id, task_type] : state.active_tasks) {
+                    if (task_type == "record") {
+                        task_to_remove = task_id;
+                        break;
+                    }
+                }
+            }
+
+            if (!task_to_remove.empty() && state.active_tasks.count(task_to_remove)) {
+                state.active_tasks.erase(task_to_remove);
+                completed_task_id = task_to_remove;
+
+                // Stop recording sink if no more recording tasks are active
+                if (!hasActiveTasksOfType("record")) {
                     logInfo("Stopping recording for channel: " + msg.channel, instance_id_);
                     if (recording_sink_) {
                         recording_sink_->stop();
                     }
-                    state.is_recording_active = false;
                 }
+            } else {
+                logInfo("No matching recording task to stop for channel: " + msg.channel,
+                        instance_id_);
+                return;
             }
         }
-        // Use ref counting to determine if we should disconnect from channel
+
+        // Send completion message
+        if (!completed_task_id.empty()) {
+            sendCompletionMessage(completed_task_id, "success", "",
+                                  "Recording task completed successfully");
+        }
+
+        logInfo("Stopped recording for channel: " + msg.channel, instance_id_);
+
+        // Release the connection if no other tasks are using it
         releaseConnection(msg.channel);
-        logInfo("Released recording for channel: " + msg.channel, instance_id_);
     } else if (action == "status") {
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto it = channel_states_.find(msg.channel);
         if (it != channel_states_.end()) {
             const auto& state = it->second;
+            // Count recording tasks
+            int recording_count = 0;
+            for (const auto& [task_id, task_type] : state.active_tasks) {
+                if (task_type == "record") recording_count++;
+            }
             logInfo("Recording Status - Channel: " + msg.channel +
-                        ", Active: " + (state.is_recording_active ? "yes" : "no"),
+                        ", Active: " + std::to_string(recording_count) + " tasks",
                     instance_id_);
         } else {
             logInfo("No recording active for channel: " + msg.channel, instance_id_);
@@ -450,19 +492,28 @@ void TaskPipe::cleanupConnection(const std::string& channel) {
 
     auto& state = it->second;
 
+    // Check if any snapshot or recording tasks are active
+    bool has_snapshot_tasks = false;
+    bool has_recording_tasks = false;
+    for (const auto& [task_id, task_type] : state.active_tasks) {
+        if (task_type == "snapshot") has_snapshot_tasks = true;
+        if (task_type == "record") has_recording_tasks = true;
+    }
+
     // Stop any active snapshot
-    if (state.is_snapshot_active && snapshot_sink_ && snapshot_sink_->isCapturing()) {
+    if (has_snapshot_tasks && snapshot_sink_ && snapshot_sink_->isCapturing()) {
         logInfo("Stopping snapshot for channel: " + channel, instance_id_);
         snapshot_sink_->stop();
-        state.is_snapshot_active = false;
     }
 
     // Stop any active recording
-    if (state.is_recording_active && recording_sink_) {
+    if (has_recording_tasks && recording_sink_) {
         logInfo("Stopping recording for channel: " + channel, instance_id_);
         recording_sink_->stop();
-        state.is_recording_active = false;
     }
+
+    // Clear all active tasks for this channel
+    state.active_tasks.clear();
 
     // Disconnect from the channel if we're still connected
     if (rtc_client_ && state.is_connected) {
@@ -576,12 +627,8 @@ void TaskPipe::thread_func() {
                         // Parse the message
                         nlohmann::json json = nlohmann::json::parse(line);
 
-                        UDSMessage msg;
-                        msg.cmd = json.value("cmd", "");
-                        msg.action = json.value("action", "");
-                        msg.channel = json.value("channel", "");
-                        msg.access_token = json.value("access_token", "");
-                        msg.interval_in_ms = json.value("interval_in_ms", 0);
+                        // Use the from_json function to parse the message
+                        UDSMessage msg = json.get<UDSMessage>();
 
                         // Handle the command
                         auto it = command_handlers_.find(msg.cmd);
@@ -614,6 +661,52 @@ void TaskPipe::thread_func() {
     }
 
     logInfo("Task pipe thread exiting", instance_id_);
+}
+
+bool TaskPipe::hasActiveTasksOfType(const std::string& task_type) const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    for (const auto& [channel, state] : channel_states_) {
+        for (const auto& [task_id, type] : state.active_tasks) {
+            if (type == task_type) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void TaskPipe::sendCompletionMessage(const std::string& task_id, const std::string& status,
+                                     const std::string& error, const std::string& message) {
+    if (sockfd_ < 0) {
+        logError("Cannot send completion message: socket not connected", instance_id_);
+        return;
+    }
+
+    UDSCompletionMessage completion;
+    completion.task_id = task_id;
+    completion.status = status;
+    completion.error = error;
+    completion.message = message;
+
+    try {
+        nlohmann::json json;
+        to_json(json, completion);
+        std::string data = json.dump() + "\n";
+
+        ssize_t written = write(sockfd_, data.c_str(), data.length());
+        if (written != static_cast<ssize_t>(data.length())) {
+            logError("Failed to send completion message for task " + task_id + ": " +
+                         std::string(strerror(errno)),
+                     instance_id_);
+        } else {
+            logInfo("Sent completion message for task " + task_id + " with status: " + status,
+                    instance_id_);
+        }
+    } catch (const std::exception& e) {
+        logError("Failed to serialize completion message for task " + task_id + ": " +
+                     std::string(e.what()),
+                 instance_id_);
+    }
 }
 
 }  // namespace egress
