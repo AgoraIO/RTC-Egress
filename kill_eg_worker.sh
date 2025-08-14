@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Search for processes matching the exact './bin/eg_worker' command
+# Search for processes matching either './bin/eg_worker' or './bin/egress' command
 # Includes arguments like --config
-matches=$(ps -eo pid,command | grep './bin/eg_worker' | grep -v grep)
+matches=$(ps -eo pid,command | grep -E '\./bin/(eg_worker|egress)' | grep -v grep)
 
 if [ -z "$matches" ]; then
-  echo "❌ No eg_worker process found."
+  echo "❌ No eg_worker or egress process found."
   exit 0
 fi
 
@@ -30,4 +30,3 @@ echo "$matches" | awk '{print $1}' | while read pid; do
 done
 
 echo "✅ Done."
-

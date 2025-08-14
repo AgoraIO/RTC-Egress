@@ -11,16 +11,26 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/agora-build/rtc-egress/server/health"
 	"github.com/agora-build/rtc-egress/server/queue"
+	"github.com/agora-build/rtc-egress/server/utils"
 	"github.com/gin-gonic/gin"
 )
 
 var egressConfigPath string
 var requestIdRegexp = regexp.MustCompile(`^[0-9a-zA-Z]{1,32}$`)
+
+// parseRegionFromIP extracts region from IP address (fake implementation for now)
+func parseRegionFromIP(ip string) string {
+	// TODO: Implement real IP-to-region mapping
+	// For now, return empty region (global)
+	return ""
+}
 
 // Worker states
 const (
@@ -75,20 +85,21 @@ type WorkerManager struct {
 	NumWorkers     int
 	BinPath        string
 	Mutex          sync.Mutex
-	ChannelWorkers map[string]int                 // Maps channel name to worker ID
+	ChannelWorkers map[string]int                 // Maps channel name to worker ID (0,1,2,3)
 	WorkerChannels map[int]string                 // Maps worker ID to channel name
 	ChannelTasks   map[string]map[string][]string // Maps channel -> task type -> []task_ids
 	RedisQueue     *queue.RedisQueue              // Redis queue for task management
-	WorkerID       string                         // Unique worker manager ID
-	ActiveTasks    map[string]string              // Maps task_id -> worker_id for lease renewal
+	PodID          string                         // Unique pod identifier
+	ActiveTasks    map[string]string              // Maps task_id -> pod_id for lease renewal
 	TasksMutex     sync.RWMutex                   // Protects ActiveTasks map
+	HealthManager  *health.HealthManager          // Health monitoring (optional)
 }
 
 // Global worker manager instance for cleanup
 var globalWorkerManager *WorkerManager
 
-func NewWorkerManager(binPath string, num int, redisQueue *queue.RedisQueue, workerID string) *WorkerManager {
-	return &WorkerManager{
+func NewWorkerManagerWithHealth(binPath string, num int, redisQueue *queue.RedisQueue, podID string, healthManager *health.HealthManager) *WorkerManager {
+	wm := &WorkerManager{
 		Workers:        make([]*Worker, num),
 		NumWorkers:     num,
 		BinPath:        binPath,
@@ -96,9 +107,17 @@ func NewWorkerManager(binPath string, num int, redisQueue *queue.RedisQueue, wor
 		WorkerChannels: make(map[int]string),
 		ChannelTasks:   make(map[string]map[string][]string),
 		RedisQueue:     redisQueue,
-		WorkerID:       workerID,
+		PodID:          podID,
 		ActiveTasks:    make(map[string]string),
+		HealthManager:  healthManager,
 	}
+
+	// Start health heartbeat if HealthManager is available
+	if healthManager != nil {
+		healthManager.StartHeartbeat(num, wm.getActiveTaskCount)
+	}
+
+	return wm
 }
 
 func (wm *WorkerManager) StartAll() {
@@ -338,15 +357,26 @@ func (wm *WorkerManager) listenForCompletionMessages(worker *Worker) {
 		}
 
 		if n > 0 {
-			// Try to parse as completion message
-			var completion UDSCompletionMessage
-			if err := json.Unmarshal(buffer[:n], &completion); err != nil {
-				log.Printf("Failed to parse completion message from worker %d: %v", worker.ID, err)
-				continue
-			}
+			// Handle multiple JSON messages separated by newlines
+			data := string(buffer[:n])
+			lines := strings.Split(strings.TrimSpace(data), "\n")
 
-			// Handle the completion message
-			wm.handleTaskCompletion(worker, &completion)
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+
+				// Try to parse each line as a completion message
+				var completion UDSCompletionMessage
+				if err := json.Unmarshal([]byte(line), &completion); err != nil {
+					log.Printf("Failed to parse completion message from worker %d: %v (line: %s)", worker.ID, err, line)
+					continue
+				}
+
+				// Handle the completion message
+				wm.handleTaskCompletion(worker, &completion)
+			}
 		}
 	}
 }
@@ -365,7 +395,36 @@ func (wm *WorkerManager) handleTaskCompletion(worker *Worker, completion *UDSCom
 		return
 	}
 
-	// Update Redis task status
+	// Check for unrecoverable errors and auto-stop FAILED tasks
+	if completion.Status != "success" {
+		errorMsg := completion.Error
+		if errorMsg == "" {
+			errorMsg = completion.Message
+		}
+
+		// Detect unrecoverable errors that should mark task as FAILED
+		isUnrecoverable := wm.isUnrecoverableError(errorMsg)
+
+		if isUnrecoverable {
+			// Get task from Redis to pass to failTask
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			task, err := wm.RedisQueue.GetTaskStatus(ctx, completion.TaskID)
+			if err != nil {
+				log.Printf("Failed to get task for FAILED handling: %v", err)
+			} else {
+				log.Printf("Detected unrecoverable error for task %s: %s", completion.TaskID, errorMsg)
+				// Auto-stop the FAILED task
+				if err := wm.failTask(task, errorMsg); err != nil {
+					log.Printf("Failed to auto-stop FAILED task %s: %v", completion.TaskID, err)
+				}
+				return // Exit early as failTask handles Redis update and cleanup
+			}
+		}
+	}
+
+	// Update Redis task status (normal success/failed processing)
 	if wm.RedisQueue != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -424,13 +483,10 @@ func (wm *WorkerManager) startLeaseRenewal() {
 	ticker := time.NewTicker(queue.LeaseRenewalInterval)
 	defer ticker.Stop()
 
-	log.Printf("Started lease renewal process for worker %s", wm.WorkerID)
+	log.Printf("Started lease renewal process for pod %s", wm.PodID)
 
-	for {
-		select {
-		case <-ticker.C:
-			wm.renewAllLeases()
-		}
+	for range ticker.C {
+		wm.renewAllLeases()
 	}
 }
 
@@ -502,7 +558,7 @@ func (wm *WorkerManager) recoverTasksFromDeadWorker(deadWorker *Worker) {
 	var tasksToRecover []string
 	wm.TasksMutex.Lock()
 	for taskID, workerManagerID := range wm.ActiveTasks {
-		if workerManagerID == wm.WorkerID {
+		if workerManagerID == wm.PodID {
 			// This task belongs to our manager, check if it was on the dead worker
 			wm.Mutex.Lock()
 			for channel, workerID := range wm.ChannelWorkers {
@@ -560,14 +616,14 @@ func (wm *WorkerManager) moveTaskBackToMainQueue(ctx context.Context, taskID str
 
 	// Reset task state
 	task.State = queue.TaskStatePending
-	task.WorkerID = ""
+	task.WorkerID = 0 // Reset worker ID to 0
 	task.LeaseExpiry = nil
 	task.ProcessedAt = nil
 	task.RetryCount++
 
 	// Update task and move back to main queue
 	originalQueue := wm.RedisQueue.BuildQueueKey(task.Type, task.Channel)
-	processingQueue := wm.RedisQueue.BuildProcessingQueueKey(wm.WorkerID)
+	processingQueue := wm.RedisQueue.BuildProcessingQueueKey(wm.PodID)
 	taskKey := wm.RedisQueue.BuildTaskKey(taskID)
 	leaseKey := wm.RedisQueue.BuildLeaseKey(taskID)
 
@@ -594,16 +650,16 @@ func (wm *WorkerManager) moveTaskBackToMainQueue(ctx context.Context, taskID str
 
 // startRedisSubscriber continuously polls Redis for tasks and processes them
 func (wm *WorkerManager) startRedisSubscriber() {
-	log.Printf("Starting Redis task subscriber for worker %s", wm.WorkerID)
+	log.Printf("Starting Redis task subscriber for pod %s", wm.PodID)
 
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
-		// Use configured worker patterns or default patterns
-		patterns := []string{"snapshot:*", "record:*"}
+		// Use regional queue patterns that match our new structure
+		patterns := []string{"egress:snapshot:channel:*", "egress:record:channel:*"}
 		if wm.RedisQueue != nil {
-			// Get patterns from Redis queue configuration
-			patterns = []string{"snapshot:*", "record:*", "web:record:*"}
+			// Include web:record pattern for compatibility
+			patterns = []string{"egress:snapshot:channel:*", "egress:record:channel:*", "egress:web:record:channel:*"}
 		}
 
 		task, err := wm.fetchTaskFromRedis(ctx, patterns)
@@ -623,59 +679,167 @@ func (wm *WorkerManager) startRedisSubscriber() {
 	}
 }
 
-// fetchTaskFromRedis polls Redis queues for available tasks
+// fetchTaskFromRedis polls Redis queues for available tasks using regional priority
 func (wm *WorkerManager) fetchTaskFromRedis(ctx context.Context, patterns []string) (*queue.Task, error) {
 	if wm.RedisQueue == nil {
 		return nil, nil
 	}
 
-	// Get matching queue keys
-	var queues []string
-	for _, pattern := range patterns {
-		queuePattern := fmt.Sprintf("egress:%s", pattern)
-		keys, err := wm.RedisQueue.Client().Keys(ctx, queuePattern).Result()
-		if err != nil {
-			continue
-		}
-		queues = append(queues, keys...)
-	}
-
+	// Get prioritized queues (regional first, then global)
+	queues := wm.getPrioritizedQueues(ctx, patterns)
 	if len(queues) == 0 {
 		return nil, nil
 	}
 
-	// Try to pop a task from any available queue
-	result, err := wm.RedisQueue.Client().BRPop(ctx, 1*time.Second, queues...).Result()
-	if err != nil {
-		if err.Error() == "redis: nil" { // No tasks available
-			return nil, nil
+	processingQueue := wm.RedisQueue.BuildProcessingQueueKey(wm.PodID)
+
+	// Try BRPOPLPUSH for each queue in priority order
+	for _, queue := range queues {
+		taskID, err := wm.RedisQueue.Client().BRPopLPush(ctx, queue, processingQueue, 1*time.Second).Result()
+		if err != nil {
+			if err.Error() == "redis: nil" {
+				continue // Try next queue
+			}
+			return nil, fmt.Errorf("failed to pop from queue %s: %v", queue, err)
 		}
-		return nil, err
+
+		// Successfully got a task, get its details
+		task, err := wm.RedisQueue.GetTaskStatus(ctx, taskID)
+		if err != nil {
+			// If we can't get task details, push it back to the original queue
+			wm.RedisQueue.Client().LRem(ctx, processingQueue, 1, taskID)
+			wm.RedisQueue.Client().LPush(ctx, queue, taskID)
+			return nil, fmt.Errorf("failed to get task %s: %v", taskID, err)
+		}
+
+		// Update task state to processing
+		task.State = "PROCESSING"
+		task.WorkerID = 0 // Will be set when assigned to actual worker
+		wm.RedisQueue.UpdateTaskResult(ctx, taskID, "PROCESSING", "")
+
+		log.Printf("Pod %s fetched task %s from queue %s", wm.PodID, taskID, queue)
+		return task, nil
 	}
 
-	if len(result) < 2 {
-		return nil, fmt.Errorf("unexpected result format")
-	}
-
-	taskID := result[1]
-	return wm.RedisQueue.GetTaskStatus(ctx, taskID)
+	return nil, nil // No tasks available
 }
 
-// processRedisTask converts Redis task to existing TaskRequest and processes it
+// getPrioritizedQueues returns queues with regional priority
+func (wm *WorkerManager) getPrioritizedQueues(ctx context.Context, patterns []string) []string {
+	if wm.RedisQueue == nil {
+		return nil
+	}
+
+	var regionalQueues []string
+	var globalQueues []string
+
+	// Get Redis client and pod region
+	client := wm.RedisQueue.Client()
+	podRegion := wm.getRedisQueueRegion()
+
+	for _, basePattern := range patterns {
+		// Extract task type from pattern like "egress:record:channel:*"
+		parts := strings.Split(basePattern, ":")
+		if len(parts) < 3 {
+			continue
+		}
+		taskType := parts[1] // "record", "snapshot", etc.
+
+		// If pod has a region, prioritize regional queues first
+		if podRegion != "" {
+			regionalPattern := fmt.Sprintf("egress:%s:%s:channel:*", podRegion, taskType)
+			keys, err := client.Keys(ctx, regionalPattern).Result()
+			if err != nil {
+				log.Printf("Error getting regional keys for pattern %s: %v", regionalPattern, err)
+			} else {
+				regionalQueues = append(regionalQueues, keys...)
+			}
+		}
+
+		// Always check global/no-region queues as fallback
+		globalPattern := fmt.Sprintf("egress:%s:channel:*", taskType)
+		keys, err := client.Keys(ctx, globalPattern).Result()
+		if err != nil {
+			log.Printf("Error getting global keys for pattern %s: %v", globalPattern, err)
+		} else {
+			globalQueues = append(globalQueues, keys...)
+		}
+
+		// Also check other regions if pod has no specific region
+		if podRegion == "" {
+			otherRegionalPattern := fmt.Sprintf("egress:*:%s:channel:*", taskType)
+			keys, err := client.Keys(ctx, otherRegionalPattern).Result()
+			if err != nil {
+				log.Printf("Error getting other regional keys for pattern %s: %v", otherRegionalPattern, err)
+			} else {
+				// Filter out the basic pattern we already got
+				for _, key := range keys {
+					if !strings.HasPrefix(key, fmt.Sprintf("egress:%s:channel:", taskType)) {
+						regionalQueues = append(regionalQueues, key)
+					}
+				}
+			}
+		}
+	}
+
+	// Combine with priority: regional first, then global
+	var result []string
+	uniqueQueues := make(map[string]bool)
+
+	// Add regional queues first (higher priority)
+	for _, queue := range regionalQueues {
+		if !uniqueQueues[queue] {
+			uniqueQueues[queue] = true
+			result = append(result, queue)
+		}
+	}
+
+	// Add global queues second (lower priority)
+	for _, queue := range globalQueues {
+		if !uniqueQueues[queue] {
+			uniqueQueues[queue] = true
+			result = append(result, queue)
+		}
+	}
+
+	return result
+}
+
+// getRedisQueueRegion returns the region for this pod from RedisQueue config
+func (wm *WorkerManager) getRedisQueueRegion() string {
+	if wm.RedisQueue == nil {
+		return ""
+	}
+	return wm.RedisQueue.GetRegion()
+}
+
+// processRedisTask processes Redis task directly using queue.Task
 func (wm *WorkerManager) processRedisTask(task *queue.Task) {
 	log.Printf("Processing Redis task %s (type: %s, channel: %s)", task.ID, task.Type, task.Channel)
 
-	// Convert Redis task to existing TaskRequest format
-	taskReq := TaskRequest{
-		RequestID: task.RequestID,
-		Cmd:       task.Type,
-		Action:    task.Action,
-		TaskID:    task.ID,
-		Payload:   task.Payload,
+	// Validate Redis task before processing
+	if err := ValidateRedisTask(task); err != nil {
+		log.Printf("Pod %s - Redis task %s validation failed: %v", wm.PodID, task.ID, err)
+		// Update task status to failed
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateFailed, fmt.Sprintf("Validation failed: %v", err))
+		cancel()
+		return
 	}
 
-	// Use existing assignment logic
-	response, err := wm.AssignTask(taskReq)
+	// Use direct queue.Task processing methods
+	var err error
+
+	switch task.Action {
+	case "start":
+		err = wm.startTask(task)
+	case "stop":
+		err = wm.stopTask(task)
+	case "status":
+		err = wm.getTaskStatus(task)
+	default:
+		err = fmt.Errorf("unknown action: %s", task.Action)
+	}
 
 	// Update task status in Redis
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -685,15 +849,295 @@ func (wm *WorkerManager) processRedisTask(task *queue.Task) {
 		log.Printf("Failed to process Redis task %s: %v", task.ID, err)
 		wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateFailed, err.Error())
 	} else {
-		log.Printf("Successfully assigned Redis task %s: %+v", task.ID, response)
+		log.Printf("Successfully processed Redis task %s", task.ID)
 		// Task is now being processed - completion will be handled by the completion listener
 		wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateProcessing, "")
 
 		// Track task for lease renewal
 		wm.TasksMutex.Lock()
-		wm.ActiveTasks[task.ID] = wm.WorkerID
+		wm.ActiveTasks[task.ID] = wm.PodID
 		wm.TasksMutex.Unlock()
 	}
+}
+
+// startTask starts a task from Redis queue directly
+func (wm *WorkerManager) startTask(task *queue.Task) error {
+	// Create UDS message directly from task
+	udsMsg := &UDSMessage{
+		TaskID:  task.ID,
+		Cmd:     task.Type,
+		Action:  task.Action,
+		Channel: task.Channel,
+		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
+	}
+
+	// Extract fields from task payload
+	if task.Payload != nil {
+		if layout, ok := task.Payload["layout"].(string); ok {
+			udsMsg.Layout = layout
+		}
+		if uid, ok := task.Payload["uid"].([]interface{}); ok {
+			for _, u := range uid {
+				if s, ok := u.(string); ok {
+					udsMsg.Uid = append(udsMsg.Uid, s)
+				}
+			}
+		}
+		if accessToken, ok := task.Payload["access_token"].(string); ok {
+			udsMsg.AccessToken = accessToken
+		}
+		if workerUid, ok := task.Payload["workerUid"].(float64); ok {
+			udsMsg.WorkerUid = int(workerUid)
+		}
+		if interval, ok := task.Payload["interval_in_ms"].(float64); ok {
+			udsMsg.IntervalInMs = int(interval)
+		}
+	}
+
+	channel := task.Channel
+	taskType := task.Type
+
+	wm.Mutex.Lock()
+	defer wm.Mutex.Unlock()
+
+	// Find worker for this channel (reuse if exists, find free if new)
+	worker, err, _ := wm.findWorkerForChannel(channel, taskType)
+	if err != nil {
+		return err
+	}
+
+	// Update channel mappings
+	wm.ChannelWorkers[channel] = worker.ID
+	wm.WorkerChannels[worker.ID] = channel
+	if wm.ChannelTasks[channel] == nil {
+		wm.ChannelTasks[channel] = make(map[string][]string)
+	}
+	wm.ChannelTasks[channel][taskType] = append(wm.ChannelTasks[channel][taskType], task.ID)
+
+	// Send task to worker
+	worker.Mutex.Lock()
+	err = wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
+	if err != nil {
+		worker.Mutex.Unlock()
+		// Clean up on failure
+		wm.removeTaskFromChannel(channel, taskType, task.ID)
+		return fmt.Errorf("failed to send task to worker: %v", err)
+	}
+
+	// Update worker state
+	worker.Status.State = WORKER_RUNNING
+	worker.Status.TaskID = task.ID
+	worker.TaskID = task.ID
+	worker.Mutex.Unlock()
+
+	log.Printf("Pod %s assigned task %s (%s:%s) to worker %d", wm.PodID, task.ID, channel, taskType, worker.ID)
+
+	// Update worker ID in Redis for this task
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	wm.RedisQueue.UpdateTaskWorker(ctx, task.ID, worker.ID)
+
+	return nil
+}
+
+// stopTask stops a task from Redis queue directly
+func (wm *WorkerManager) stopTask(task *queue.Task) error {
+	udsMsg := &UDSMessage{
+		TaskID:  task.ID,
+		Cmd:     task.Type,
+		Action:  task.Action,
+		Channel: task.Channel,
+		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
+	}
+
+	// Find worker for this task
+	workerID := task.WorkerID
+	if workerID < 0 || workerID >= len(wm.Workers) {
+		return fmt.Errorf("invalid worker ID %d", workerID)
+	}
+
+	worker := wm.Workers[workerID]
+	if worker == nil {
+		return fmt.Errorf("worker %d not found", workerID)
+	}
+
+	worker.Mutex.Lock()
+	defer worker.Mutex.Unlock()
+
+	err := wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
+	if err != nil {
+		return fmt.Errorf("failed to send stop command to worker %d: %v", workerID, err)
+	}
+
+	// Clean up task from channel tracking
+	wm.removeTaskFromChannel(task.Channel, task.Type, task.ID)
+
+	log.Printf("Pod %s released task %s (%s:%s) from worker %d", wm.PodID, task.ID, task.Channel, task.Type, workerID)
+	return nil
+}
+
+// failTask stops a task due to unrecoverable error and marks it as FAILED
+func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
+	// Find worker for this task
+	workerID := task.WorkerID
+	if workerID < 0 || workerID >= len(wm.Workers) {
+		// Task not assigned to worker, just mark as FAILED
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateFailed, reason)
+		log.Printf("Marked unassigned task %s as FAILED: %s", task.ID, reason)
+		return nil
+	}
+
+	worker := wm.Workers[workerID]
+	if worker == nil {
+		// Worker gone, just mark as FAILED
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateFailed, reason)
+		log.Printf("Marked task %s as FAILED (worker gone): %s", task.ID, reason)
+		return nil
+	}
+
+	// Send stop command to worker first
+	udsMsg := &UDSMessage{
+		TaskID:  task.ID,
+		Cmd:     task.Type,
+		Action:  "stop",
+		Channel: task.Channel,
+		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
+	}
+
+	worker.Mutex.Lock()
+	defer worker.Mutex.Unlock()
+
+	// Try to send stop command to worker (best effort)
+	err := wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
+	if err != nil {
+		log.Printf("Failed to send stop command to worker %d for FAILED task %s: %v", workerID, task.ID, err)
+		// Continue anyway - mark as FAILED even if stop failed
+	}
+
+	// Clean up worker state
+	worker.Status.TaskID = ""
+
+	// Clean up task from channel tracking
+	wm.removeTaskFromChannel(task.Channel, task.Type, task.ID)
+
+	// Mark task as FAILED in Redis
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateFailed, reason)
+
+	log.Printf("Pod %s marked task %s (%s:%s) as FAILED and stopped worker %d: %s",
+		wm.PodID, task.ID, task.Channel, task.Type, workerID, reason)
+	return nil
+}
+
+// isUnrecoverableError detects error messages that indicate unrecoverable failures
+// These are errors that cannot be resolved by retrying and should mark tasks as FAILED
+func (wm *WorkerManager) isUnrecoverableError(errorMsg string) bool {
+	if errorMsg == "" {
+		return false
+	}
+
+	errorLower := strings.ToLower(errorMsg)
+
+	// Authentication and permission errors (including SDK-specific messages)
+	if strings.Contains(errorLower, "access_token") ||
+		strings.Contains(errorLower, "authentication") ||
+		strings.Contains(errorLower, "unauthorized") ||
+		strings.Contains(errorLower, "permission denied") ||
+		strings.Contains(errorLower, "token") && strings.Contains(errorLower, "invalid") ||
+		strings.Contains(errorLower, "token") && strings.Contains(errorLower, "expired") ||
+		strings.Contains(errorLower, "access_token_expired") ||
+		strings.Contains(errorLower, "invalid token") ||
+		strings.Contains(errorLower, "token expired") {
+		return true
+	}
+
+	// RTC channel and connection errors (usually unrecoverable)
+	if strings.Contains(errorLower, "channel") && strings.Contains(errorLower, "join") && strings.Contains(errorLower, "failed") ||
+		strings.Contains(errorLower, "rtc") && strings.Contains(errorLower, "connect") && strings.Contains(errorLower, "failed") ||
+		strings.Contains(errorLower, "invalid") && strings.Contains(errorLower, "channel") ||
+		strings.Contains(errorLower, "connection_failure") ||
+		strings.Contains(errorLower, "connection_lost") ||
+		strings.Contains(errorLower, "rtc connection") && strings.Contains(errorLower, "failed") ||
+		strings.Contains(errorLower, "rtc connection lost") ||
+		strings.Contains(errorLower, "banned by server") ||
+		strings.Contains(errorLower, "rejected by server") ||
+		strings.Contains(errorLower, "invalid app id") ||
+		strings.Contains(errorLower, "invalid channel name") ||
+		strings.Contains(errorLower, "too many broadcasters") ||
+		strings.Contains(errorLower, "same uid login") {
+		return true
+	}
+
+	// Resource exhaustion errors
+	if strings.Contains(errorLower, "no space left") ||
+		strings.Contains(errorLower, "disk full") ||
+		strings.Contains(errorLower, "storage") && strings.Contains(errorLower, "full") ||
+		strings.Contains(errorLower, "out of disk") ||
+		strings.Contains(errorLower, "insufficient") && strings.Contains(errorLower, "space") {
+		return true
+	}
+
+	// Configuration and initialization errors
+	if strings.Contains(errorLower, "config") && strings.Contains(errorLower, "invalid") ||
+		strings.Contains(errorLower, "initialization") && strings.Contains(errorLower, "failed") ||
+		strings.Contains(errorLower, "codec") && strings.Contains(errorLower, "not supported") {
+		return true
+	}
+
+	// SDK and library errors
+	if strings.Contains(errorLower, "sdk") && strings.Contains(errorLower, "error") ||
+		strings.Contains(errorLower, "agora") && strings.Contains(errorLower, "error") ||
+		strings.Contains(errorLower, "sdk error:") ||
+		strings.Contains(errorLower, "task failed due to unrecoverable sdk error") ||
+		strings.Contains(errorLower, "failed to create agora service") ||
+		strings.Contains(errorLower, "failed to create media node factory") ||
+		strings.Contains(errorLower, "failed to create video mixer") {
+		return true
+	}
+
+	return false
+}
+
+// getTaskStatus gets status of a task from Redis queue directly
+func (wm *WorkerManager) getTaskStatus(task *queue.Task) error {
+	udsMsg := &UDSMessage{
+		TaskID:  task.ID,
+		Cmd:     task.Type,
+		Action:  task.Action,
+		Channel: task.Channel,
+		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
+	}
+
+	// Find worker for this task
+	workerID := task.WorkerID
+	if workerID < 0 || workerID >= len(wm.Workers) {
+		return fmt.Errorf("invalid worker ID %d", workerID)
+	}
+
+	worker := wm.Workers[workerID]
+	if worker == nil {
+		return fmt.Errorf("worker %d not found", workerID)
+	}
+
+	if worker.Status.TaskID != task.ID {
+		return fmt.Errorf("task %s not found on worker %d", task.ID, workerID)
+	}
+
+	worker.Mutex.Lock()
+	defer worker.Mutex.Unlock()
+
+	err := wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
+	if err != nil {
+		return fmt.Errorf("failed to send status command to worker %d: %v", workerID, err)
+	}
+
+	log.Printf("Pod %s get status of task %s on worker %d", wm.PodID, task.ID, workerID)
+	return nil
 }
 
 // findWorkerForChannel finds worker for channel (reuse existing or find free)
@@ -763,17 +1207,6 @@ func randomDigits(n int) string {
 	return string(digits)
 }
 
-func parseWorkerIdFromTaskId(taskId string, numWorkers int) (int, error) {
-	if len(taskId) != 12 {
-		return -1, fmt.Errorf("invalid taskId length")
-	}
-	workerId := int(taskId[11] - '0')
-	if workerId < 0 || workerId >= numWorkers {
-		return -1, fmt.Errorf("invalid taskId, can not find a proper worker")
-	}
-	return workerId, nil
-}
-
 // Helper to create WorkerCommand with all required protocol fields
 func NewWorkerCommand(cmd string, action string, payload map[string]interface{}) WorkerCommand {
 	// The payload should already have defaults applied by validateTaskRequest
@@ -784,7 +1217,7 @@ func NewWorkerCommand(cmd string, action string, payload map[string]interface{})
 	}
 }
 
-func (wm *WorkerManager) AssignTask(taskReq TaskRequest) (*TaskResponse, error) {
+func (wm *WorkerManager) StartTaskOnWorker(taskReq TaskRequest) (*TaskResponse, error) {
 	// 1. Validate and get channel info
 	udsMsg, err := ValidateAndFlattenTaskRequest(&taskReq)
 	if err != nil {
@@ -810,8 +1243,15 @@ func (wm *WorkerManager) AssignTask(taskReq TaskRequest) (*TaskResponse, error) 
 		}, err
 	}
 
-	// 3. Generate task ID
-	taskId := fmt.Sprintf("%s%d", randomDigits(11), worker.ID)
+	// 3. Use existing task ID or generate new one for HTTP requests
+	var taskId string
+	if taskReq.TaskID != "" {
+		// Use existing taskID from request (recovery case)
+		taskId = taskReq.TaskID
+	} else {
+		// Generate new taskID for new HTTP requests
+		taskId = fmt.Sprintf("%s%d", randomDigits(11), worker.ID)
+	}
 
 	// 4. Update channel mappings (before sending to avoid race conditions)
 	wm.ChannelWorkers[channel] = worker.ID
@@ -843,7 +1283,7 @@ func (wm *WorkerManager) AssignTask(taskReq TaskRequest) (*TaskResponse, error) 
 	worker.TaskID = taskId
 	worker.Mutex.Unlock()
 
-	log.Printf("Assigned task %s (%s:%s) to worker %d", taskId, channel, taskType, worker.ID)
+	log.Printf("Pod %s assigned task %s (%s:%s) to worker %d", wm.PodID, taskId, channel, taskType, worker.ID)
 	return &TaskResponse{
 		RequestID: taskReq.RequestID,
 		TaskID:    taskId,
@@ -851,7 +1291,7 @@ func (wm *WorkerManager) AssignTask(taskReq TaskRequest) (*TaskResponse, error) 
 	}, nil
 }
 
-func (wm *WorkerManager) ReleaseWorker(workerID int, taskReq TaskRequest) (*TaskResponse, error) {
+func (wm *WorkerManager) StopTaskOnWorker(workerID int, taskReq TaskRequest) (*TaskResponse, error) {
 	// 1. Find and validate worker
 	wm.Mutex.Lock()
 	worker := wm.Workers[workerID]
@@ -896,7 +1336,7 @@ func (wm *WorkerManager) ReleaseWorker(workerID int, taskReq TaskRequest) (*Task
 	// 4. Clean up channel tracking
 	wm.removeTaskFromChannel(udsMsg.Channel, taskReq.Cmd, taskReq.TaskID)
 
-	log.Printf("Released task %s (%s:%s) from worker %d", taskReq.TaskID, udsMsg.Channel, taskReq.Cmd, workerID)
+	log.Printf("Pod %s released task %s (%s:%s) from worker %d", wm.PodID, taskReq.TaskID, udsMsg.Channel, taskReq.Cmd, workerID)
 	return &TaskResponse{
 		RequestID: taskReq.RequestID,
 		TaskID:    taskReq.TaskID,
@@ -904,25 +1344,27 @@ func (wm *WorkerManager) ReleaseWorker(workerID int, taskReq TaskRequest) (*Task
 	}, nil
 }
 
-func (wm *WorkerManager) GetWorkerStatus(workerStatus *WorkerStatus, workerID int, taskReq TaskRequest) error {
+func (wm *WorkerManager) GetTaskStatusOnWorker(workerID int, taskReq TaskRequest) (*TaskResponse, error) {
 	wm.Mutex.Lock()
 	worker := wm.Workers[workerID]
 	wm.Mutex.Unlock()
 
 	if worker == nil {
-		workerStatus.State = WORKER_NOT_AVAILABLE
-		workerStatus.LastErr = fmt.Sprintf("worker %d not found", workerID)
-		return fmt.Errorf("worker %d not found", workerID)
+		return &TaskResponse{
+			RequestID: taskReq.RequestID,
+			TaskID:    taskReq.TaskID,
+			Status:    "failed",
+			Error:     fmt.Sprintf("worker %d not found", workerID),
+		}, fmt.Errorf("worker %d not found", workerID)
 	}
 
-	workerStatus.State = worker.Status.State
-	workerStatus.TaskID = worker.Status.TaskID
-	workerStatus.Pid = worker.Status.Pid
-	workerStatus.LastErr = ""
-
 	if worker.Status.TaskID != taskReq.TaskID {
-		workerStatus.LastErr = fmt.Sprintf("taskId %s not found on worker %d", taskReq.TaskID, workerID)
-		return fmt.Errorf("taskId %s not found on worker %d", taskReq.TaskID, workerID)
+		return &TaskResponse{
+			RequestID: taskReq.RequestID,
+			TaskID:    taskReq.TaskID,
+			Status:    "failed",
+			Error:     fmt.Sprintf("taskId %s not found on worker %d", taskReq.TaskID, workerID),
+		}, fmt.Errorf("taskId %s not found on worker %d", taskReq.TaskID, workerID)
 	}
 
 	worker.Mutex.Lock()
@@ -931,21 +1373,32 @@ func (wm *WorkerManager) GetWorkerStatus(workerStatus *WorkerStatus, workerID in
 	// Validate and flatten the task request
 	udsMsg, err := ValidateAndFlattenTaskRequest(&taskReq)
 	if err != nil {
-		workerStatus.LastErr = fmt.Sprintf("failed to validate and flatten task request: %v", err)
-		return fmt.Errorf("failed to validate and flatten task request: %v", err)
+		return &TaskResponse{
+			RequestID: taskReq.RequestID,
+			TaskID:    taskReq.TaskID,
+			Status:    "failed",
+			Error:     fmt.Sprintf("failed to validate and flatten task request: %v", err),
+		}, fmt.Errorf("failed to validate and flatten task request: %v", err)
 	}
 
 	// Send the flattened UDSMessage to worker
 	err = wm.sendUDSMessageToWorker(worker, taskReq.TaskID, udsMsg)
-
 	if err != nil {
-		workerStatus.LastErr = fmt.Sprintf("failed to send status command to worker %d: %v", workerID, err)
-		return fmt.Errorf("failed to send status command to worker %d: %v", workerID, err)
+		return &TaskResponse{
+			RequestID: taskReq.RequestID,
+			TaskID:    taskReq.TaskID,
+			Status:    "failed",
+			Error:     fmt.Sprintf("failed to send status command to worker %d: %v", workerID, err),
+		}, fmt.Errorf("failed to send status command to worker %d: %v", workerID, err)
 	}
 
-	log.Printf("Get status of task %s on worker %d", taskReq.TaskID, workerID)
+	log.Printf("Pod %s get status of task %s on worker %d", wm.PodID, taskReq.TaskID, workerID)
 
-	return nil
+	return &TaskResponse{
+		RequestID: taskReq.RequestID,
+		TaskID:    taskReq.TaskID,
+		Status:    "success",
+	}, nil
 }
 
 // sendUDSMessageToWorker sends a flattened UDSMessage directly to a worker
@@ -954,17 +1407,11 @@ func (wm *WorkerManager) sendUDSMessageToWorker(worker *Worker, taskID string, u
 		return fmt.Errorf("worker not running")
 	}
 
-	// Create a wrapper message that includes the task ID for the C++ worker
-	messageWithTaskID := struct {
-		TaskID string `json:"task_id"`
-		*UDSMessage
-	}{
-		TaskID:     taskID,
-		UDSMessage: udsMsg,
-	}
+	// Set the task ID in the UDSMessage
+	udsMsg.TaskID = taskID
 
-	// Send the message with task ID to worker
-	data, err := json.Marshal(messageWithTaskID)
+	// Send the message to worker
+	data, err := json.Marshal(udsMsg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal UDSMessage for worker %v: %v", worker, err)
 	}
@@ -978,11 +1425,7 @@ func (wm *WorkerManager) sendUDSMessageToWorker(worker *Worker, taskID string, u
 	return nil
 }
 
-func ManagerMain() {
-	ManagerMainWithRedis(nil)
-}
-
-func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
+func ManagerMainWithRedisAndHealth(redisQueue *queue.RedisQueue, healthManager *health.HealthManager, numWorkers int) {
 	binPath := "./bin/eg_worker" // Adjust if needed
 	egressConfigPath = ""
 	for i, arg := range os.Args {
@@ -994,10 +1437,10 @@ func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
 		log.Fatal("--config must be provided for egress processes")
 	}
 
-	// Generate unique worker ID
-	workerID := fmt.Sprintf("worker-%d", time.Now().UnixNano())
+	// Generate unique 12-character pod ID
+	podID := utils.GenerateRandomID(12)
 
-	wm := NewWorkerManager(binPath, 4, redisQueue, workerID)
+	wm := NewWorkerManagerWithHealth(binPath, numWorkers, redisQueue, podID, healthManager)
 	globalWorkerManager = wm // Store for cleanup
 	wm.StartAll()
 
@@ -1008,6 +1451,15 @@ func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
 		var taskReq TaskRequest
 		if err := c.ShouldBindJSON(&taskReq); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "request_id": taskReq.RequestID})
+			return
+		}
+
+		// Validate request parameters before Redis publishing
+		if err := ValidateStartTaskRequest(&taskReq); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":      fmt.Sprintf("validation failed: %v", err),
+				"request_id": taskReq.RequestID,
+			})
 			return
 		}
 
@@ -1031,7 +1483,12 @@ func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
 			}
 		}
 
-		task, err := wm.RedisQueue.PublishTask(ctx, taskReq.Cmd, "start", channel, taskReq.RequestID, taskReq.Payload)
+		// Parse region from client IP
+		clientIP := c.ClientIP()
+		region := parseRegionFromIP(clientIP)
+		log.Printf("Client IP: %s, Parsed region: %s", clientIP, region)
+
+		task, err := wm.RedisQueue.PublishTaskToRegion(ctx, taskReq.Cmd, "start", channel, taskReq.RequestID, taskReq.Payload, region)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":      err.Error(),
@@ -1049,9 +1506,21 @@ func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
 
 	// API endpoint to stop a worker from a task
 	r.POST("/egress/v1/task/stop", func(c *gin.Context) {
-		var taskReq TaskRequest
-		if err := c.ShouldBindJSON(&taskReq); err != nil {
+		var req struct {
+			RequestID string `json:"request_id"`
+			TaskID    string `json:"task_id"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Validate request parameters
+		if err := ValidateStopTaskRequest(req.RequestID, req.TaskID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":      fmt.Sprintf("validation failed: %v", err),
+				"request_id": req.RequestID,
+			})
 			return
 		}
 
@@ -1059,7 +1528,7 @@ func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
 		if wm.RedisQueue == nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":      "Redis queue not configured",
-				"request_id": taskReq.RequestID,
+				"request_id": req.RequestID,
 			})
 			return
 		}
@@ -1067,27 +1536,55 @@ func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		// Extract channel from payload
-		channel := "default"
-		if taskReq.Payload != nil {
-			if ch, ok := taskReq.Payload["channel"].(string); ok && ch != "" {
-				channel = ch
-			}
-		}
-
-		task, err := wm.RedisQueue.PublishTask(ctx, taskReq.Cmd, "stop", channel, taskReq.RequestID, taskReq.Payload)
+		// Get the existing task
+		task, err := wm.RedisQueue.GetTaskStatus(ctx, req.TaskID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":      err.Error(),
-				"request_id": taskReq.RequestID,
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":      fmt.Sprintf("Task %s not found: %v", req.TaskID, err),
+				"request_id": req.RequestID,
+				"task_id":    req.TaskID,
 			})
 			return
 		}
 
+		// Check if task is already completed
+		if task.State == queue.TaskStateSuccess || task.State == queue.TaskStateFailed || task.State == queue.TaskStateTimeout {
+			c.JSON(http.StatusOK, gin.H{
+				"request_id": req.RequestID,
+				"task_id":    req.TaskID,
+				"status":     "already_completed",
+				"message":    fmt.Sprintf("Task already in state: %s", task.State),
+			})
+			return
+		}
+
+		// Create stop task in Redis with original task_id in payload
+		stopPayload := map[string]interface{}{
+			"task_id": req.TaskID, // Include the original task_id so worker can find it
+		}
+
+		// Parse region from client IP for stop task as well
+		clientIP := c.ClientIP()
+		region := parseRegionFromIP(clientIP)
+		log.Printf("Stop task - Client IP: %s, Parsed region: %s", clientIP, region)
+
+		stopTask, err := wm.RedisQueue.PublishTaskToRegion(ctx, task.Type, "stop", task.Channel, req.RequestID, stopPayload, region)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":      fmt.Sprintf("Failed to create stop task: %v", err),
+				"request_id": req.RequestID,
+				"task_id":    req.TaskID,
+			})
+			return
+		}
+
+		log.Printf("Created stop task %s for original task %s", stopTask.ID, req.TaskID)
+
 		c.JSON(http.StatusOK, gin.H{
-			"request_id": taskReq.RequestID,
-			"task_id":    task.ID,
-			"status":     "queued",
+			"request_id":   req.RequestID,
+			"task_id":      req.TaskID,
+			"stop_task_id": stopTask.ID,
+			"status":       "stop_queued",
 		})
 	})
 
@@ -1103,8 +1600,12 @@ func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
 			return
 		}
 
-		if req.TaskID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "task_id is required"})
+		// Validate request parameters
+		if err := ValidateStatusTaskRequest(req.RequestID, req.TaskID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":      fmt.Sprintf("validation failed: %v", err),
+				"request_id": req.RequestID,
+			})
 			return
 		}
 
@@ -1142,4 +1643,11 @@ func ManagerMainWithRedis(redisQueue *queue.RedisQueue) {
 
 	log.Println("Manager API server running on :8090")
 	r.Run(":8090")
+}
+
+// getActiveTaskCount returns the number of currently active tasks
+func (wm *WorkerManager) getActiveTaskCount() int {
+	wm.TasksMutex.RLock()
+	defer wm.TasksMutex.RUnlock()
+	return len(wm.ActiveTasks)
 }
