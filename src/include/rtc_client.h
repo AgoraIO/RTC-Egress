@@ -38,6 +38,12 @@
 #include "video_frame.h"
 
 namespace agora {
+
+// Forward declarations from other namespaces
+namespace egress {
+class TaskConnectionObserver;
+}
+
 namespace rtc {
 
 struct AgoraServiceDeleter {
@@ -72,6 +78,8 @@ class RtcClient {
         std::function<void(const agora::media::base::VideoFrame&, const std::string& userId)>;
     using AudioFrameCallback = std::function<void(
         const agora::media::IAudioFrameObserverBase::AudioFrame&, const std::string& userId)>;
+    using SdkErrorCallback =
+        std::function<void(const std::string& errorType, const std::string& errorMessage)>;
 
     RtcClient();
     ~RtcClient();
@@ -90,6 +98,10 @@ class RtcClient {
 
     void setAudioFrameCallback(AudioFrameCallback callback) {
         audioFrameCallback_ = std::move(callback);
+    }
+
+    void setSdkErrorCallback(SdkErrorCallback callback) {
+        sdkErrorCallback_ = std::move(callback);
     }
 
     void setChannel(const std::string& channel) {
@@ -215,6 +227,7 @@ class RtcClient {
     std::atomic<bool> connected_{false};
     VideoFrameCallback videoFrameCallback_;
     AudioFrameCallback audioFrameCallback_;
+    SdkErrorCallback sdkErrorCallback_;
 
     // Agora SDK objects
     std::unique_ptr<agora::base::IAgoraService, AgoraServiceDeleter> service_;
@@ -224,6 +237,9 @@ class RtcClient {
     agora::agora_refptr<agora::rtc::ILocalVideoTrack> videoTrack_;
     agora::agora_refptr<YuvFrameObserver> frameObserver_;
     agora::agora_refptr<AudioFrameObserver> audioObserver_;
+
+    // Forward declaration for TaskConnectionObserver from agora::egress namespace
+    std::unique_ptr<agora::egress::TaskConnectionObserver> connectionObserver_;
 
     std::mutex mutex_;
 };

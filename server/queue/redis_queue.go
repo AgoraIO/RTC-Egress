@@ -6,21 +6,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	TaskStatePending    = "PENDING"
-	TaskStateProcessing = "PROCESSING"
-	TaskStateSuccess    = "SUCCESS"
-	TaskStateFailed     = "FAILED"
+	TaskStatePending    = "PENDING"    // Task waiting in queue (can timeout after TaskTimeout)
+	TaskStateProcessing = "PROCESSING" // Worker actively working on task
+	TaskStateSuccess    = "SUCCESS"    // Task completed successfully
+	TaskStateFailed     = "FAILED"     // Fatal error(Can not be retried/recovered), like wrong access_token, no more disk space, etc. no user stop call needed
+	TaskStateTimeout    = "TIMEOUT"    // Task aged out while PENDING (business staleness). no user stop call needed
+
+	// Business timeout settings
+	TaskTimeout = 30 * time.Second // Max time from creation to start processing (business staleness)
 
 	// Lease settings for automatic failover
 	LeaseRenewalInterval = 15 * time.Second // How often workers renew lease
 	LeaseTimeout         = 45 * time.Second // When to consider worker dead
-	CleanupInterval      = 5 * time.Second  // How often to check for expired leases
+	CleanupInterval      = 5 * time.Second  // How often to check for expired leases and aged tasks
 )
 
 type Task struct {
@@ -32,10 +37,11 @@ type Task struct {
 	Payload     map[string]interface{} `json:"payload"`
 	State       string                 `json:"state"`
 	CreatedAt   time.Time              `json:"created_at"`
+	PendingAt   *time.Time             `json:"pending_at,omitempty"` // When task was last set to PENDING (for timeout calculation)
 	ProcessedAt *time.Time             `json:"processed_at,omitempty"`
 	CompletedAt *time.Time             `json:"completed_at,omitempty"`
 	Error       string                 `json:"error,omitempty"`
-	WorkerID    string                 `json:"worker_id,omitempty"`
+	WorkerID    int                    `json:"worker_id,omitempty"`
 	LeaseExpiry *time.Time             `json:"lease_expiry,omitempty"` // When worker lease expires
 	RetryCount  int                    `json:"retry_count,omitempty"`  // Number of retry attempts
 }
@@ -44,9 +50,10 @@ type RedisQueue struct {
 	client   *redis.Client
 	ttl      time.Duration
 	patterns []string
+	region   string // Current pod's region
 }
 
-func NewRedisQueue(addr, password string, db int, ttl int, patterns []string) *RedisQueue {
+func NewRedisQueue(addr, password string, db int, ttl int, patterns []string, region string) *RedisQueue {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     addr,
 		Password: password,
@@ -57,6 +64,7 @@ func NewRedisQueue(addr, password string, db int, ttl int, patterns []string) *R
 		client:   rdb,
 		ttl:      time.Duration(ttl) * time.Second,
 		patterns: patterns,
+		region:   region,
 	}
 }
 
@@ -68,6 +76,26 @@ func (rq *RedisQueue) generateTaskID(taskType, channel, requestID string) string
 
 func (rq *RedisQueue) buildQueueKey(taskType, channel string) string {
 	return fmt.Sprintf("egress:%s:channel:%s", taskType, channel)
+}
+
+// buildRegionalQueueKey builds a region-specific queue key
+func (rq *RedisQueue) buildRegionalQueueKey(region, taskType, channel string) string {
+	if region == "" {
+		return fmt.Sprintf("egress:%s:channel:%s", taskType, channel)
+	}
+	return fmt.Sprintf("egress:%s:%s:channel:%s", region, taskType, channel)
+}
+
+// BuildRegionalQueueKey builds a region-specific queue key (public)
+func (rq *RedisQueue) BuildRegionalQueueKey(region, taskType, channel string) string {
+	return rq.buildRegionalQueueKey(region, taskType, channel)
+}
+
+// parseRegionFromIP extracts region from IP address (fake implementation for now)
+func parseRegionFromIP(ip string) string {
+	// TODO: Implement real IP-to-region mapping
+	// For now, return empty region (global)
+	return ""
 }
 
 func (rq *RedisQueue) BuildQueueKey(taskType, channel string) string {
@@ -102,7 +130,17 @@ func (rq *RedisQueue) BuildLeaseKey(taskID string) string {
 	return rq.buildLeaseKey(taskID)
 }
 
+// GetRegion returns the region for this RedisQueue
+func (rq *RedisQueue) GetRegion() string {
+	return rq.region
+}
+
 func (rq *RedisQueue) PublishTask(ctx context.Context, taskType, action, channel, requestID string, payload map[string]interface{}) (*Task, error) {
+	return rq.PublishTaskToRegion(ctx, taskType, action, channel, requestID, payload, "")
+}
+
+// PublishTaskToRegion publishes a task to a specific region queue
+func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, taskType, action, channel, requestID string, payload map[string]interface{}, region string) (*Task, error) {
 	dedupeKey := rq.buildDedupeKey(taskType, channel, requestID)
 
 	exists, err := rq.client.Exists(ctx, dedupeKey).Result()
@@ -114,6 +152,7 @@ func (rq *RedisQueue) PublishTask(ctx context.Context, taskType, action, channel
 	}
 
 	taskID := rq.generateTaskID(taskType, channel, requestID)
+	now := time.Now()
 	task := &Task{
 		ID:        taskID,
 		Type:      taskType,
@@ -122,7 +161,8 @@ func (rq *RedisQueue) PublishTask(ctx context.Context, taskType, action, channel
 		RequestID: requestID,
 		Payload:   payload,
 		State:     TaskStatePending,
-		CreatedAt: time.Now(),
+		CreatedAt: now,
+		PendingAt: &now, // Set initial PENDING timestamp
 	}
 
 	taskData, err := json.Marshal(task)
@@ -132,7 +172,13 @@ func (rq *RedisQueue) PublishTask(ctx context.Context, taskType, action, channel
 
 	pipe := rq.client.TxPipeline()
 
-	queueKey := rq.buildQueueKey(taskType, channel)
+	// Use regional queue if region is specified
+	var queueKey string
+	if region != "" {
+		queueKey = rq.buildRegionalQueueKey(region, taskType, channel)
+	} else {
+		queueKey = rq.buildRegionalQueueKey("", taskType, channel) // Use global queue
+	}
 	taskKey := rq.buildTaskKey(taskID)
 
 	pipe.LPush(ctx, queueKey, taskID)
@@ -178,7 +224,8 @@ func (rq *RedisQueue) SubscribeToTasks(ctx context.Context, workerID string, pat
 }
 
 func (rq *RedisQueue) fetchNextTask(ctx context.Context, workerID string, patterns []string) (*Task, error) {
-	queues := rq.getMatchingQueues(ctx, patterns)
+	// Get prioritized queues: regional queues first, then global queues
+	queues := rq.getPrioritizedQueues(ctx, patterns)
 	if len(queues) == 0 {
 		return nil, nil
 	}
@@ -186,6 +233,7 @@ func (rq *RedisQueue) fetchNextTask(ctx context.Context, workerID string, patter
 	processingQueue := rq.buildProcessingQueueKey(workerID)
 
 	// Try BRPOPLPUSH for each queue to atomically move task to processing queue
+	// Regional queues are checked first due to prioritized order
 	for _, queue := range queues {
 		taskID, err := rq.client.BRPopLPush(ctx, queue, processingQueue, 1*time.Second).Result()
 		if err != nil {
@@ -231,7 +279,8 @@ func (rq *RedisQueue) claimTaskWithLease(ctx context.Context, taskID, workerID s
 	leaseExpiry := now.Add(LeaseTimeout)
 	task.State = TaskStateProcessing
 	task.ProcessedAt = &now
-	task.WorkerID = workerID
+	// WorkerID remains 0 for now - will be updated when task is assigned to specific worker
+	task.WorkerID = 0
 	task.LeaseExpiry = &leaseExpiry
 
 	updatedData, err := json.Marshal(task)
@@ -242,7 +291,7 @@ func (rq *RedisQueue) claimTaskWithLease(ctx context.Context, taskID, workerID s
 	// Atomic update: task data + lease creation
 	pipe := rq.client.TxPipeline()
 	pipe.Set(ctx, taskKey, updatedData, rq.ttl)
-	pipe.Set(ctx, leaseKey, workerID, LeaseTimeout) // Lease expires automatically
+	pipe.Set(ctx, leaseKey, workerID, LeaseTimeout) // Lease expires automatically (workerID here is manager ID string)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update task and create lease: %v", err)
@@ -276,6 +325,103 @@ func (rq *RedisQueue) getMatchingQueues(ctx context.Context, patterns []string) 
 	return result
 }
 
+// getPrioritizedQueues returns queues with regional priority
+// If pod has a region: regional queues first, then global queues
+// If pod has no region: all queues (regional and global)
+func (rq *RedisQueue) getPrioritizedQueues(ctx context.Context, patterns []string) []string {
+	var regionalQueues []string
+	var globalQueues []string
+
+	for _, pattern := range patterns {
+		// Look for regional queues if pod has a region
+		if rq.region != "" {
+			regionalPattern := fmt.Sprintf("egress:%s:%s", rq.region, pattern)
+			keys, err := rq.client.Keys(ctx, regionalPattern).Result()
+			if err != nil {
+				log.Printf("Error getting regional keys for pattern %s: %v", regionalPattern, err)
+			} else {
+				regionalQueues = append(regionalQueues, keys...)
+			}
+		}
+
+		// Look for global queues
+		globalPattern := fmt.Sprintf("egress:global:%s", pattern)
+		keys, err := rq.client.Keys(ctx, globalPattern).Result()
+		if err != nil {
+			log.Printf("Error getting global keys for pattern %s: %v", globalPattern, err)
+		} else {
+			globalQueues = append(globalQueues, keys...)
+		}
+
+		// If pod has no region, also check all regional queues
+		if rq.region == "" {
+			allRegionalPattern := fmt.Sprintf("egress:*:%s", pattern)
+			keys, err := rq.client.Keys(ctx, allRegionalPattern).Result()
+			if err != nil {
+				log.Printf("Error getting all regional keys for pattern %s: %v", allRegionalPattern, err)
+			} else {
+				// Filter out global queues (already added above)
+				for _, key := range keys {
+					if !strings.Contains(key, ":global:") {
+						regionalQueues = append(regionalQueues, key)
+					}
+				}
+			}
+		}
+	}
+
+	// Combine with priority: regional first, then global
+	var result []string
+	uniqueQueues := make(map[string]bool)
+
+	// Add regional queues first (higher priority)
+	for _, queue := range regionalQueues {
+		if !uniqueQueues[queue] {
+			uniqueQueues[queue] = true
+			result = append(result, queue)
+		}
+	}
+
+	// Add global queues second (lower priority)
+	for _, queue := range globalQueues {
+		if !uniqueQueues[queue] {
+			uniqueQueues[queue] = true
+			result = append(result, queue)
+		}
+	}
+
+	return result
+}
+
+func (rq *RedisQueue) UpdateTaskWorker(ctx context.Context, taskID string, workerID int) error {
+	taskKey := rq.buildTaskKey(taskID)
+
+	taskData, err := rq.client.Get(ctx, taskKey).Result()
+	if err != nil {
+		return fmt.Errorf("failed to get task data: %v", err)
+	}
+
+	var task Task
+	if err := json.Unmarshal([]byte(taskData), &task); err != nil {
+		return fmt.Errorf("failed to unmarshal task: %v", err)
+	}
+
+	task.WorkerID = workerID
+
+	updatedData, err := json.Marshal(task)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated task: %v", err)
+	}
+
+	err = rq.client.Set(ctx, taskKey, updatedData, rq.ttl).Err()
+	if err != nil {
+		return fmt.Errorf("failed to update task worker: %v", err)
+	}
+
+	log.Printf("Updated task %s worker to %d", taskID, workerID)
+	return nil
+}
+
 func (rq *RedisQueue) UpdateTaskResult(ctx context.Context, taskID, state, errorMsg string) error {
 	taskKey := rq.buildTaskKey(taskID)
 
@@ -306,7 +452,7 @@ func (rq *RedisQueue) UpdateTaskResult(ctx context.Context, taskID, state, error
 		return fmt.Errorf("failed to update task result: %v", err)
 	}
 
-	if state == TaskStateSuccess || state == TaskStateFailed {
+	if state == TaskStateSuccess || state == TaskStateFailed || state == TaskStateTimeout {
 		dedupeKey := rq.buildDedupeKey(task.Type, task.Channel, task.RequestID)
 		rq.client.Del(ctx, dedupeKey)
 	}
@@ -452,9 +598,12 @@ func (rq *RedisQueue) checkAndRecoverTask(ctx context.Context, taskID, processin
 	// Increment retry count and reset state
 	task.RetryCount++
 	task.State = TaskStatePending
-	task.WorkerID = ""
+	task.WorkerID = 0 // Reset worker ID to 0
 	task.LeaseExpiry = nil
 	task.ProcessedAt = nil
+	// Reset PENDING timestamp for fresh timeout window
+	now := time.Now()
+	task.PendingAt = &now
 
 	// Move back to original queue
 	originalQueue := rq.buildQueueKey(task.Type, task.Channel)
@@ -482,6 +631,109 @@ func (rq *RedisQueue) checkAndRecoverTask(ctx context.Context, taskID, processin
 	return nil
 }
 
+// CleanupAgedTasks marks PENDING tasks that have exceeded TaskTimeout as TIMEOUT
+func (rq *RedisQueue) CleanupAgedTasks(ctx context.Context) error {
+	// Find all main queues (not processing queues - only check PENDING tasks)
+	queuePattern := "egress:*:channel:*"
+	queues, err := rq.client.Keys(ctx, queuePattern).Result()
+	if err != nil {
+		return fmt.Errorf("failed to get queues: %v", err)
+	}
+
+	for _, queue := range queues {
+		// Get all tasks in this queue
+		taskIDs, err := rq.client.LRange(ctx, queue, 0, -1).Result()
+		if err != nil {
+			log.Printf("Failed to get tasks from %s: %v", queue, err)
+			continue
+		}
+
+		for _, taskID := range taskIDs {
+			if err := rq.checkAndTimeoutPendingTask(ctx, taskID, queue); err != nil {
+				log.Printf("Failed to check task age %s: %v", taskID, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkAndTimeoutPendingTask atomically checks if a PENDING task has exceeded TaskTimeout and marks it as TIMEOUT
+func (rq *RedisQueue) checkAndTimeoutPendingTask(ctx context.Context, taskID, queueName string) error {
+	taskKey := rq.buildTaskKey(taskID)
+
+	// Atomic operation: check if task is still in queue AND still PENDING, then timeout
+	// This prevents race condition where worker picks up task while we're checking timeout
+	return rq.client.Watch(ctx, func(tx *redis.Tx) error {
+		// Get task data
+		taskData, err := tx.Get(ctx, taskKey).Result()
+		if err != nil {
+			if err == redis.Nil {
+				// Task data gone, try to remove from queue (cleanup)
+				tx.LRem(ctx, queueName, 1, taskID)
+				return nil
+			}
+			return fmt.Errorf("failed to get task data: %v", err)
+		}
+
+		var task Task
+		if err := json.Unmarshal([]byte(taskData), &task); err != nil {
+			return fmt.Errorf("failed to unmarshal task: %v", err)
+		}
+
+		// Only timeout PENDING tasks (not PROCESSING, SUCCESS, FAILED, or already TIMEOUT)
+		if task.State != TaskStatePending {
+			return nil
+		}
+
+		// Check if PENDING task has exceeded business timeout (30s since last PENDING)
+		var pendingTime time.Time
+		if task.PendingAt != nil {
+			pendingTime = *task.PendingAt
+		} else {
+			// Fallback for old tasks without PendingAt
+			pendingTime = task.CreatedAt
+		}
+
+		taskAge := time.Since(pendingTime)
+		if taskAge <= TaskTimeout {
+			return nil // Task is still fresh
+		}
+
+		// Check if task is still in the queue (hasn't been picked up by worker)
+		isInQueue, err := tx.LPos(ctx, queueName, taskID, redis.LPosArgs{}).Result()
+		if err != nil {
+			if err.Error() == "redis: nil" {
+				// Task no longer in queue (worker picked it up), don't timeout
+				return nil
+			}
+			return fmt.Errorf("failed to check if task in queue: %v", err)
+		}
+		_ = isInQueue // Task is in queue
+
+		// Mark task as TIMEOUT and remove from queue atomically
+		task.State = TaskStateTimeout
+		task.Error = fmt.Sprintf("Task timeout: PENDING task exceeded %v limit (age: %v)", TaskTimeout, taskAge)
+
+		updatedData, err := json.Marshal(task)
+		if err != nil {
+			return fmt.Errorf("failed to marshal timed out task: %v", err)
+		}
+
+		// Execute atomic transaction
+		pipe := tx.TxPipeline()
+		pipe.Set(ctx, taskKey, updatedData, rq.ttl)
+		pipe.LRem(ctx, queueName, 1, taskID) // Remove from queue so it won't be picked up
+		_, err = pipe.Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to timeout task: %v", err)
+		}
+
+		log.Printf("Marked PENDING task %s as TIMEOUT (age: %v, limit: %v)", taskID, taskAge, TaskTimeout)
+		return nil
+	}, taskKey, queueName)
+}
+
 // StartCleanupProcess runs background cleanup of expired leases
 func (rq *RedisQueue) StartCleanupProcess(ctx context.Context) {
 	go func() {
@@ -494,8 +746,12 @@ func (rq *RedisQueue) StartCleanupProcess(ctx context.Context) {
 				log.Printf("Stopping Redis cleanup process")
 				return
 			case <-ticker.C:
+				// Handle both business timeouts and worker failure recovery
 				if err := rq.CleanupExpiredLeases(ctx); err != nil {
-					log.Printf("Cleanup error: %v", err)
+					log.Printf("Lease cleanup error: %v", err)
+				}
+				if err := rq.CleanupAgedTasks(ctx); err != nil {
+					log.Printf("Task timeout cleanup error: %v", err)
 				}
 			}
 		}

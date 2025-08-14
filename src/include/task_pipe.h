@@ -65,6 +65,9 @@ class TaskPipe {
     // Helper to check if any tasks of a specific type are active
     bool hasActiveTasksOfType(const std::string& task_type) const;
 
+    // SDK error handler - called when unrecoverable SDK errors occur
+    void handleSdkError(const std::string& errorType, const std::string& errorMessage);
+
     // Member variables
     std::unordered_map<std::string, CommandHandler> command_handlers_;
     std::unordered_map<std::string, ChannelState> channel_states_;

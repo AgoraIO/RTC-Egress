@@ -103,6 +103,7 @@ target_link_libraries(snapshot_sink PUBLIC
 add_executable(eg_worker
     src/main.cpp
     src/task_pipe.cpp
+    src/task_connection_observer.cpp
     src/frame_processor.cpp
     src/common/opt_parser.cpp
 )

@@ -8,7 +8,7 @@ General development guidelines for this project:
 
 - **Incremental progress over big bangs** - Small changes that compile and pass tests
 - **Learning from existing code** - Study and plan before implementing
-- **Pragmatic over dogmatic** - Adapt to project reality
+- **Pragmatic over dogmatic** - Adapt to project reality, real-world focus
 - **Clear intent over clever code** - Be boring and obvious
 
 ### Simplicity Means
@@ -16,13 +16,14 @@ General development guidelines for this project:
 - Single responsibility per function/class
 - Avoid premature abstractions
 - No clever tricks - choose the boring solution
-- If you need to explain it, it's too complex
+- Avoid unnecessary complexity, if you need to explain it, it's too complex
+- Avoid unreadable code
 
 ## Process
 
 ### 1. Planning & Staging
 
-Break complex work into 3-5 stages. Document in `IMPLEMENTATION_PLAN.md`:
+Break complex work into 3-5 stages. And document key designs in `designs/IMPLEMENTATION_design.md`:
 
 ```markdown
 ## Stage N: [Name]
@@ -81,6 +82,7 @@ Break complex work into 3-5 stages. Document in `IMPLEMENTATION_PLAN.md`:
   - Pass all existing tests
   - Include tests for new functionality
   - Follow project formatting/linting
+  - No performance regressions
 
 - **Before committing**:
   - Run formatters/linters
@@ -124,12 +126,12 @@ When multiple valid approaches exist, choose based on:
 
 ### Definition of Done
 
-- [ ] Tests written and passing
-- [ ] Code follows project conventions
-- [ ] No linter/formatter warnings
-- [ ] Commit messages are clear
-- [ ] Implementation matches plan
-- [ ] No TODOs without issue numbers
+- Tests written and passing
+- Code follows project conventions
+- No linter/formatter warnings
+- Commit messages are clear
+- Implementation matches plan
+- No TODOs without issue numbers
 
 ### Test Guidelines
 
@@ -195,16 +197,17 @@ This is an Agora RTC egress recording system with a hybrid C++/Go architecture:
    - `main.go` - HTTP server providing REST API and health checks
    - `egress/manager.go` - Manages C++ worker processes and task distribution
    - `uploader/` - Handles S3 file uploads and filesystem watching
+   - `queue/` - Handles task queueing and distribution (redis)
 
 3. **Web Interface (`web/template/`)**:
    - Simple HTML template for monitoring and control
 
 ### Data Flow
 
-1. Go server receives HTTP API requests to start/stop recording sessions
-2. Manager spawns C++ worker processes (`eg_worker`) via Unix domain sockets
+1. Go server receives HTTP API requests and puts tasks into redis queue
+2. Manager fetches tasks from redis queue and spawns C++ worker processes (`eg_worker`) via Unix domain sockets
 3. C++ workers connect to Agora RTC channels and capture video frames
-4. Frames are processed and saved as snapshots to configured output directories
+4. Frames are processed and saved as snapshots/recordings to configured output directories
 5. File watcher detects new files and uploads them to S3 if configured
 6. Workers report status back to manager via IPC
 
@@ -220,6 +223,9 @@ This is an Agora RTC egress recording system with a hybrid C++/Go architecture:
 - under `designs` directory
   - `composition_mode_design.md`: composition mode design
   - `rtc_pts_design.md`: a/v sync, pts design
+  - `task_dispatching_design.md`: task dispatching design
+  - `validation_security_design.md`: validation and security design
+  - `worker_recovery_design.md`: worker/egress recovery design
 
 ## Configuration
 
@@ -281,10 +287,3 @@ open http://localhost:3000
 - Missing system dependencies: Run `./build.sh deps`
 - Configuration errors: Ensure `config/egress_config.yaml` has valid Agora credentials
 - Port conflicts: Check that ports 8080, 8182, and 3000 are available
-
-# Code style
-- Always use simple and high performance code
-
-# Workflow
-- Be sure to typecheck when you’re done making a series of code changes
-- Prefer running single tests, and not the whole test suite, for performance

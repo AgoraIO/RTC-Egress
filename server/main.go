@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/agora-build/rtc-egress/server/egress"
+	"github.com/agora-build/rtc-egress/server/health"
 	"github.com/agora-build/rtc-egress/server/queue"
 	"github.com/agora-build/rtc-egress/server/uploader"
+	"github.com/agora-build/rtc-egress/server/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
 )
@@ -49,6 +51,10 @@ type Config struct {
 		TaskTTL        int      `mapstructure:"task_ttl"`
 		WorkerPatterns []string `mapstructure:"worker_patterns"`
 	} `mapstructure:"redis"`
+	Pod struct {
+		Region     string `mapstructure:"region"`
+		NumWorkers int    `mapstructure:"workers"`
+	} `mapstructure:"pod"`
 	S3 struct {
 		Bucket    string `mapstructure:"bucket"`
 		Region    string `mapstructure:"region"`
@@ -59,8 +65,9 @@ type Config struct {
 }
 
 var (
-	config     Config
-	redisQueue *queue.RedisQueue
+	config        Config
+	redisQueue    *queue.RedisQueue
+	healthManager *health.HealthManager
 )
 
 func loadConfig() error {
@@ -104,6 +111,11 @@ func loadConfig() error {
 		return fmt.Errorf("recording.audio.codec is required")
 	}
 
+	// Set default worker count if not specified
+	if config.Pod.NumWorkers <= 0 {
+		config.Pod.NumWorkers = 4 // Default to 4 workers
+	}
+
 	// Validate S3 configuration if bucket is provided
 	if config.S3.Bucket != "" {
 		if config.S3.Region == "" {
@@ -144,6 +156,7 @@ func initRedisQueue() error {
 		config.Redis.DB,
 		config.Redis.TaskTTL,
 		config.Redis.WorkerPatterns,
+		config.Pod.Region,
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -154,12 +167,18 @@ func initRedisQueue() error {
 	}
 
 	log.Printf("Connected to Redis at %s", config.Redis.Addr)
+	if config.Pod.Region != "" {
+		log.Printf("Pod region configured: %s", config.Pod.Region)
+	} else {
+		log.Printf("Pod region not configured, will handle all regional queues")
+	}
+	log.Printf("Pod workers configured: %d", config.Pod.NumWorkers)
 	return nil
 }
 
 func startWorkerManager() {
 	go func() {
-		egress.ManagerMainWithRedis(redisQueue)
+		egress.ManagerMainWithRedisAndHealth(redisQueue, healthManager, config.Pod.NumWorkers)
 	}()
 }
 
@@ -170,11 +189,42 @@ func healthCheckHandler(c *gin.Context) {
 	})
 }
 
+func initHealthManager() error {
+	if redisQueue == nil {
+		log.Println("Redis not configured, HealthManager disabled")
+		return nil
+	}
+
+	// Generate unique 12-character pod ID
+	podID := utils.GenerateRandomID(12)
+	version := "v1.0.0" // Could be from build flags
+
+	healthManager = health.NewHealthManager(redisQueue.Client(), podID, config.Pod.Region, version)
+
+	// Register this pod
+	if err := healthManager.RegisterPod(config.Pod.NumWorkers); err != nil {
+		return fmt.Errorf("failed to register pod: %v", err)
+	}
+
+	// Start background processes
+	healthManager.StartRegionalStatsCalculation()
+
+	log.Printf("HealthManager initialized for pod %s in region %s", podID, config.Pod.Region)
+	return nil
+}
+
 func startHealthCheckServer() {
 	r := gin.Default()
 
 	// Health check
 	r.GET("/health", healthCheckHandler)
+
+	// Add health monitoring API if HealthManager is available
+	if healthManager != nil {
+		healthAPI := health.NewHealthAPI(healthManager)
+		healthAPI.RegisterRoutes(r)
+		log.Println("Health monitoring API enabled")
+	}
 
 	go func() {
 		srv := &http.Server{
@@ -268,6 +318,11 @@ func main() {
 	// Initialize Redis queue if configured
 	if err := initRedisQueue(); err != nil {
 		log.Fatalf("Error initializing Redis: %v", err)
+	}
+
+	// Initialize HealthManager if Redis is available
+	if err := initHealthManager(); err != nil {
+		log.Printf("Warning: Failed to initialize HealthManager: %v", err)
 	}
 
 	// Start worker manager in background in a separate goroutine

@@ -96,6 +96,12 @@ void TaskPipe::start(agora::rtc::RtcClient& rtc_client, agora::rtc::SnapshotSink
     snapshot_sink_ = &snapshot_sink;
     recording_sink_ = &recording_sink;
 
+    // Set up SDK error callback to handle connection and token errors
+    rtc_client_->setSdkErrorCallback(
+        [this](const std::string& errorType, const std::string& errorMessage) {
+            this->handleSdkError(errorType, errorMessage);
+        });
+
     // Setup frame callbacks
     rtc_client_->setVideoFrameCallback([this](const agora::media::base::VideoFrame& frame,
                                               const std::string& userId) {
@@ -233,35 +239,49 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
     } else if (action == "stop") {
         // Stop the specific snapshot task but keep channel if other tasks exist
         std::string completed_task_id;
+        std::string found_channel;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            auto it = channel_states_.find(msg.channel);
-            if (it != channel_states_.end()) {
-                auto& state = it->second;
-                // Find and remove a snapshot task (use msg.task_id if available, otherwise first
-                // found)
-                std::string task_to_remove = msg.task_id;
-                if (task_to_remove.empty()) {
-                    // Find first snapshot task if no specific task_id provided
+
+            // Search for the specific task_id across all channels
+            if (!msg.task_id.empty()) {
+                for (auto& [channel, state] : channel_states_) {
+                    if (state.active_tasks.count(msg.task_id)) {
+                        state.active_tasks.erase(msg.task_id);
+                        completed_task_id = msg.task_id;
+                        found_channel = channel;
+                        break;
+                    }
+                }
+            } else {
+                // Fallback: if no task_id provided, use channel-based search (legacy behavior)
+                auto it = channel_states_.find(msg.channel);
+                if (it != channel_states_.end()) {
+                    auto& state = it->second;
+                    // Find first snapshot task
                     for (const auto& [task_id, task_type] : state.active_tasks) {
                         if (task_type == "snapshot") {
-                            task_to_remove = task_id;
+                            state.active_tasks.erase(task_id);
+                            completed_task_id = task_id;
+                            found_channel = msg.channel;
                             break;
                         }
                     }
                 }
+            }
 
-                if (!task_to_remove.empty() && state.active_tasks.count(task_to_remove)) {
-                    state.active_tasks.erase(task_to_remove);
-                    completed_task_id = task_to_remove;
+            if (completed_task_id.empty()) {
+                logInfo("No matching snapshot task to stop (task_id: " + msg.task_id +
+                            ", channel: " + msg.channel + ")",
+                        instance_id_);
+                return;
+            }
 
-                    // Stop snapshot sink if no more snapshot tasks are active
-                    if (!hasActiveTasksOfType("snapshot")) {
-                        logInfo("Stopping snapshot for channel: " + msg.channel, instance_id_);
-                        if (snapshot_sink_ && snapshot_sink_->isCapturing()) {
-                            snapshot_sink_->stop();
-                        }
-                    }
+            // Stop snapshot sink if no more snapshot tasks are active
+            if (!hasActiveTasksOfType("snapshot")) {
+                logInfo("Stopping snapshot for channel: " + found_channel, instance_id_);
+                if (snapshot_sink_ && snapshot_sink_->isCapturing()) {
+                    snapshot_sink_->stop();
                 }
             }
         }
@@ -345,43 +365,50 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
         }
     } else if (action == "stop") {
         std::string completed_task_id;
+        std::string found_channel;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            auto it = channel_states_.find(msg.channel);
-            if (it == channel_states_.end()) {
-                logError("No active recording found for channel: " + msg.channel, instance_id_);
-                return;
-            }
 
-            auto& state = it->second;
-            // Find and remove a recording task (use msg.task_id if available, otherwise first
-            // found)
-            std::string task_to_remove = msg.task_id;
-            if (task_to_remove.empty()) {
-                // Find first recording task if no specific task_id provided
-                for (const auto& [task_id, task_type] : state.active_tasks) {
-                    if (task_type == "record") {
-                        task_to_remove = task_id;
+            // Search for the specific task_id across all channels
+            if (!msg.task_id.empty()) {
+                for (auto& [channel, state] : channel_states_) {
+                    if (state.active_tasks.count(msg.task_id)) {
+                        state.active_tasks.erase(msg.task_id);
+                        completed_task_id = msg.task_id;
+                        found_channel = channel;
                         break;
                     }
                 }
-            }
-
-            if (!task_to_remove.empty() && state.active_tasks.count(task_to_remove)) {
-                state.active_tasks.erase(task_to_remove);
-                completed_task_id = task_to_remove;
-
-                // Stop recording sink if no more recording tasks are active
-                if (!hasActiveTasksOfType("record")) {
-                    logInfo("Stopping recording for channel: " + msg.channel, instance_id_);
-                    if (recording_sink_) {
-                        recording_sink_->stop();
+            } else {
+                // Fallback: if no task_id provided, use channel-based search (legacy behavior)
+                auto it = channel_states_.find(msg.channel);
+                if (it != channel_states_.end()) {
+                    auto& state = it->second;
+                    // Find first recording task
+                    for (const auto& [task_id, task_type] : state.active_tasks) {
+                        if (task_type == "record") {
+                            state.active_tasks.erase(task_id);
+                            completed_task_id = task_id;
+                            found_channel = msg.channel;
+                            break;
+                        }
                     }
                 }
-            } else {
-                logInfo("No matching recording task to stop for channel: " + msg.channel,
+            }
+
+            if (completed_task_id.empty()) {
+                logInfo("No matching recording task to stop (task_id: " + msg.task_id +
+                            ", channel: " + msg.channel + ")",
                         instance_id_);
                 return;
+            }
+
+            // Stop recording sink if no more recording tasks are active
+            if (!hasActiveTasksOfType("record")) {
+                logInfo("Stopping recording for channel: " + found_channel, instance_id_);
+                if (recording_sink_) {
+                    recording_sink_->stop();
+                }
             }
         }
 
@@ -707,6 +734,33 @@ void TaskPipe::sendCompletionMessage(const std::string& task_id, const std::stri
                      std::string(e.what()),
                  instance_id_);
     }
+}
+
+void TaskPipe::handleSdkError(const std::string& errorType, const std::string& errorMessage) {
+    logError("SDK Error detected: " + errorType + " - " + errorMessage, instance_id_);
+
+    // Find all active tasks and fail them due to SDK error
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
+    std::vector<std::string> tasksToFail;
+    for (const auto& [channel, state] : channel_states_) {
+        for (const auto& [task_id, task_type] : state.active_tasks) {
+            tasksToFail.push_back(task_id);
+        }
+    }
+
+    // Send failure completion messages for all active tasks
+    for (const std::string& task_id : tasksToFail) {
+        std::string errorMsg = "SDK Error: " + errorType + " - " + errorMessage;
+        sendCompletionMessage(task_id, "failed", errorMsg,
+                              "Task failed due to unrecoverable SDK error");
+        logError("Failed task " + task_id + " due to SDK error: " + errorType, instance_id_);
+    }
+
+    // Clear all active tasks since SDK connection is broken
+    channel_states_.clear();
+
+    logInfo("All active tasks failed due to SDK error: " + errorType, instance_id_);
 }
 
 }  // namespace egress

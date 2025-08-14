@@ -493,7 +493,7 @@ void RecordingSink::processVideoFrames() {
     std::unique_lock<std::mutex> lock(videoQueueMutex_);
 
     static int process_log_count = 0;
-    if (process_log_count % 30 == 0) {  // Log every 50th encode to reduce spam
+    if (process_log_count % 600 == 0) {  // Log every 600th encode to reduce spam
         AG_LOG_FAST(INFO, "processVideoFrames() - queue size: %zu", videoFrameQueue_.size());
     }
     process_log_count++;

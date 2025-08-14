@@ -24,7 +24,7 @@
 #include "common/log.h"
 #include "common/opt_parser.h"
 #include "common/sample_common.h"
-#include "common/sample_connection_observer.h"
+#include "include/task_connection_observer.h"
 
 namespace agora {
 namespace rtc {
@@ -216,6 +216,14 @@ bool RtcClient::connect() {
         connection_->getLocalUser()->publishVideo(videoTrack_);
     }
 
+    // Create and register connection observer for SDK error detection
+    if (sdkErrorCallback_) {
+        connectionObserver_ =
+            std::make_unique<agora::egress::TaskConnectionObserver>(sdkErrorCallback_);
+        connection_->registerObserver(connectionObserver_.get());
+        AG_LOG(INFO, "Registered connection observer for SDK error detection");
+    }
+
     // Connect to Agora channel
     if (connection_->connect(config_.accessToken.c_str(), config_.channel.c_str(),
                              config_.egressUid.c_str())) {
@@ -271,6 +279,17 @@ void RtcClient::disconnect() {
         }
 
         if (connection_) {
+            // Unregister connection observer
+            if (connectionObserver_) {
+                try {
+                    connection_->unregisterObserver(connectionObserver_.get());
+                    AG_LOG(INFO, "Unregistered connection observer");
+                } catch (const std::exception& e) {
+                    AG_LOG(ERROR, "Exception unregistering connection observer: %s", e.what());
+                }
+                connectionObserver_.reset();
+            }
+
             // Unpublish video track if we published one
             if (config_.role == agora::rtc::CLIENT_ROLE_BROADCASTER && videoTrack_) {
                 try {

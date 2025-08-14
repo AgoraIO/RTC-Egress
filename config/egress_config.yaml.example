@@ -23,6 +23,12 @@ redis:
     - "egress:snapshot:*"    # Example: workers can subscribe to specific patterns
     - "egress:record:*"      # Example: different workers for different tasks
 
+# Pod Configuration
+pod:
+  region: ""                  # Pod region (optional). If specified, pod will prioritize tasks from this region
+                              # Leave empty for pods that can handle all regions
+  workers: 4                  # Number of worker processes (default: 4)
+
 # S3 Configuration (optional)
 s3:
   bucket: "your-s3-bucket"

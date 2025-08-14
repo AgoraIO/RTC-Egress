@@ -2,12 +2,16 @@ package egress
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
+
+	"github.com/agora-build/rtc-egress/server/queue"
 )
 
 // UDSMessage defines the communication protocol between Go (egress) and C++ (eg_worker).
 // All fields are serialized in JSON format.
 type UDSMessage struct {
+	TaskID             string   `json:"task_id"`            // Task ID for tracking completion
 	Cmd                string   `json:"cmd"`                // "snapshot", "record", "rtmp", or "whip"
 	Action             string   `json:"action"`             // "start", "stop", "status"
 	Layout             string   `json:"layout"`             // "grid", "flat", "spotlight", or "freestyle"
@@ -71,29 +75,29 @@ func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]in
 		}
 	}
 
-	// Channel (required)
+	// Channel (required only for start actions)
 	if channelVal, ok := payload["channel"]; ok {
 		if channelStr, isStr := channelVal.(string); isStr {
 			udsMsg.Channel = channelStr
 		} else {
 			return nil, fmt.Errorf("channel must be a string")
 		}
-	} else {
-		return nil, fmt.Errorf("channel is required")
+	} else if action == "start" {
+		return nil, fmt.Errorf("channel is required for start actions")
 	}
 
-	// AccessToken (required)
+	// AccessToken (required only for start actions)
 	if tokenVal, ok := payload["access_token"]; ok {
 		if tokenStr, isStr := tokenVal.(string); isStr {
 			udsMsg.AccessToken = tokenStr
 		} else {
 			return nil, fmt.Errorf("access_token must be a string")
 		}
-	} else {
-		return nil, fmt.Errorf("access_token is required")
+	} else if action == "start" {
+		return nil, fmt.Errorf("access_token is required for start actions")
 	}
 
-	// WorkerUid (required)
+	// WorkerUid (required only for start actions)
 	if workerUidVal, ok := payload["workerUid"]; ok {
 		switch v := workerUidVal.(type) {
 		case float64:
@@ -105,8 +109,8 @@ func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]in
 		default:
 			return nil, fmt.Errorf("workerUid must be a number")
 		}
-	} else {
-		return nil, fmt.Errorf("workerUid is required")
+	} else if action == "start" {
+		return nil, fmt.Errorf("workerUid is required for start actions")
 	}
 
 	// IntervalInMs (optional)
@@ -124,6 +128,13 @@ func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]in
 	} else {
 		// Default to 20 seconds if not provided
 		udsMsg.IntervalInMs = 20000
+	}
+
+	// TaskID (extract from payload if present)
+	if taskIDVal, ok := payload["task_id"]; ok {
+		if taskIDStr, isStr := taskIDVal.(string); isStr {
+			udsMsg.TaskID = taskIDStr
+		}
 	}
 
 	// Validate the flattened result
@@ -172,16 +183,20 @@ func ValidateUDSMessage(msg *UDSMessage) error {
 		return fmt.Errorf("uid count must be at most 32")
 	}
 
-	// Validate required fields
-	if msg.Channel == "" {
-		return fmt.Errorf("channel is required")
+	// Validate required fields based on action
+	if msg.Action == "start" {
+		// Start actions require channel, access_token, and workerUid
+		if msg.Channel == "" {
+			return fmt.Errorf("channel is required")
+		}
+		if msg.AccessToken == "" {
+			return fmt.Errorf("access_token is required")
+		}
+		if msg.WorkerUid == 0 {
+			return fmt.Errorf("workerUid is required and must be non-zero")
+		}
 	}
-	if msg.AccessToken == "" {
-		return fmt.Errorf("access_token is required")
-	}
-	if msg.WorkerUid == 0 {
-		return fmt.Errorf("workerUid is required and must be non-zero")
-	}
+	// Stop and status actions don't require these fields - they use task_id for identification
 
 	return nil
 }
@@ -203,6 +218,231 @@ func ValidateAndFlattenTaskRequest(taskReq *TaskRequest) (*UDSMessage, error) {
 	return udsMsg, nil
 }
 
+// ValidateStartTaskRequest validates TaskRequest specifically for Redis publishing
+// This includes additional validation for HTTP endpoint parameters
+func ValidateStartTaskRequest(taskReq *TaskRequest) error {
+	// Basic TaskRequest validation first
+	if err := validateTaskRequest(taskReq); err != nil {
+		return err
+	}
+
+	// Additional validation for Redis publishing
+	payload := taskReq.Payload
+	if payload == nil {
+		return fmt.Errorf("payload cannot be nil for Redis tasks")
+	}
+
+	// Validate channel name format for Redis queues
+	if channelVal, ok := payload["channel"]; ok {
+		if channelStr, isStr := channelVal.(string); isStr {
+			// Channel name validation for Redis key compatibility
+			if len(channelStr) == 0 {
+				return fmt.Errorf("channel name cannot be empty")
+			}
+			if len(channelStr) > 64 {
+				return fmt.Errorf("channel name must be at most 64 characters")
+			}
+			// Redis key safe characters
+			validChannelName := regexp.MustCompile(`^[a-zA-Z0-9_\-.:]+$`)
+			if !validChannelName.MatchString(channelStr) {
+				return fmt.Errorf("channel name contains invalid characters (only a-z, A-Z, 0-9, _, -, ., : allowed)")
+			}
+		}
+	}
+
+	// Validate access_token format
+	if tokenVal, ok := payload["access_token"]; ok {
+		if tokenStr, isStr := tokenVal.(string); isStr && tokenStr != "" {
+			if len(tokenStr) < 10 {
+				return fmt.Errorf("access_token too short (minimum 10 characters)")
+			}
+			if len(tokenStr) > 512 {
+				return fmt.Errorf("access_token too long (maximum 512 characters)")
+			}
+		}
+	}
+
+	// Validate workerUid range
+	if workerUidVal, ok := payload["workerUid"]; ok {
+		var workerUid int
+		switch v := workerUidVal.(type) {
+		case float64:
+			workerUid = int(v)
+		case int:
+			workerUid = v
+		case int64:
+			workerUid = int(v)
+		}
+		if workerUid < 1 || workerUid > 999999999 {
+			return fmt.Errorf("workerUid must be between 1 and 999999999")
+		}
+	}
+
+	// Validate interval_in_ms range
+	if intervalVal, ok := payload["interval_in_ms"]; ok {
+		var interval int
+		switch v := intervalVal.(type) {
+		case float64:
+			interval = int(v)
+		case int:
+			interval = v
+		case int64:
+			interval = int(v)
+		}
+		if interval < 1000 {
+			return fmt.Errorf("interval_in_ms must be at least 1000ms (1 second)")
+		}
+		if interval > 300000 {
+			return fmt.Errorf("interval_in_ms must be at most 300000ms (5 minutes)")
+		}
+	}
+
+	// Validate uid array elements
+	if uidVal, ok := payload["uid"]; ok && uidVal != nil {
+		switch v := uidVal.(type) {
+		case []string:
+			for i, uid := range v {
+				if uid == "" {
+					return fmt.Errorf("uid[%d] cannot be empty", i)
+				}
+				if len(uid) > 32 {
+					return fmt.Errorf("uid[%d] must be at most 32 characters", i)
+				}
+				// Validate uid format (numbers and common characters)
+				validUID := regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
+				if !validUID.MatchString(uid) {
+					return fmt.Errorf("uid[%d] contains invalid characters", i)
+				}
+			}
+		case []interface{}:
+			for i, item := range v {
+				if str, isStr := item.(string); isStr {
+					if str == "" {
+						return fmt.Errorf("uid[%d] cannot be empty", i)
+					}
+					if len(str) > 32 {
+						return fmt.Errorf("uid[%d] must be at most 32 characters", i)
+					}
+					validUID := regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
+					if !validUID.MatchString(str) {
+						return fmt.Errorf("uid[%d] contains invalid characters", i)
+					}
+				} else {
+					return fmt.Errorf("uid[%d] must be a string", i)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// ValidateStopTaskRequest validates parameters for stop task requests
+func ValidateStopTaskRequest(requestID, taskID string) error {
+	if err := ValidateRequestID(requestID); err != nil {
+		return err
+	}
+	if err := ValidateTaskID(taskID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateStatusTaskRequest validates parameters for task status requests
+func ValidateStatusTaskRequest(requestID, taskID string) error {
+	// Same validation as stop task request
+	return ValidateStopTaskRequest(requestID, taskID)
+}
+
+// ValidateRedisTask validates a queue.Task retrieved from Redis
+func ValidateRedisTask(task *queue.Task) error {
+	if task == nil {
+		return fmt.Errorf("task cannot be nil")
+	}
+
+	// Validate task ID
+	if err := ValidateTaskID(task.ID); err != nil {
+		return fmt.Errorf("invalid task ID: %v", err)
+	}
+
+	// Validate basic task fields
+	validTypes := map[string]bool{"snapshot": true, "record": true, "rtmp": true, "whip": true}
+	if !validTypes[task.Type] {
+		return fmt.Errorf("task type %s is not supported", task.Type)
+	}
+
+	validActions := map[string]bool{"start": true, "stop": true, "status": true}
+	if !validActions[task.Action] {
+		return fmt.Errorf("task action %s is not supported", task.Action)
+	}
+
+	// Validate channel name for Redis key safety
+	if task.Channel != "" {
+		if len(task.Channel) > 64 {
+			return fmt.Errorf("channel name must be at most 64 characters")
+		}
+		validChannelName := regexp.MustCompile(`^[a-zA-Z0-9_\-.:]+$`)
+		if !validChannelName.MatchString(task.Channel) {
+			return fmt.Errorf("channel name contains invalid characters")
+		}
+	}
+
+	// Validate request ID
+	if task.RequestID != "" {
+		if err := ValidateRequestID(task.RequestID); err != nil {
+			return fmt.Errorf("invalid request ID: %v", err)
+		}
+	}
+
+	// Validate payload for start actions
+	if task.Action == "start" && task.Payload != nil {
+		// Convert task.Payload to TaskRequest format for reusing existing validation
+		taskReq := &TaskRequest{
+			RequestID: task.RequestID,
+			Cmd:       task.Type,
+			Action:    task.Action,
+			TaskID:    task.ID,
+			Payload:   task.Payload,
+		}
+		if err := ValidateStartTaskRequest(taskReq); err != nil {
+			return fmt.Errorf("payload validation failed: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// ValidateTaskID validates task ID format
+func ValidateTaskID(taskID string) error {
+	if taskID == "" {
+		return fmt.Errorf("task_id is required")
+	}
+	if len(taskID) > 64 {
+		return fmt.Errorf("task_id must be at most 64 characters")
+	}
+	// Task ID should be hexadecimal (from generateTaskID function)
+	validTaskID := regexp.MustCompile(`^[a-f0-9]+$`)
+	if !validTaskID.MatchString(taskID) {
+		return fmt.Errorf("task_id format is invalid")
+	}
+	return nil
+}
+
+// ValidateRequestID validates request ID format
+func ValidateRequestID(requestID string) error {
+	if requestID == "" {
+		return fmt.Errorf("request_id is required")
+	}
+	if len(requestID) > 32 {
+		return fmt.Errorf("request_id must be at most 32 characters")
+	}
+	requestIdRegexp := regexp.MustCompile(`^[0-9a-zA-Z]{1,32}$`)
+	if !requestIdRegexp.MatchString(requestID) {
+		return fmt.Errorf("request_id must only contain 0-9, a-z, A-Z")
+	}
+	return nil
+}
+
 // Validate TaskRequest including request_id, cmd, and required payload fields
 func validateTaskRequest(taskReq *TaskRequest) error {
 	// Defensive: copy and update the payload map to ensure persistence
@@ -210,15 +450,9 @@ func validateTaskRequest(taskReq *TaskRequest) error {
 	if payload == nil {
 		payload = make(map[string]interface{})
 	}
-	// Validate request_id
-	if taskReq.RequestID == "" {
-		return fmt.Errorf("request_id is required")
-	}
-	if len(taskReq.RequestID) > 32 {
-		return fmt.Errorf("request_id must be at most 32 characters")
-	}
-	if !requestIdRegexp.MatchString(taskReq.RequestID) {
-		return fmt.Errorf("request_id must only contain 0-9, a-z, A-Z")
+	// Validate request_id using reusable function
+	if err := ValidateRequestID(taskReq.RequestID); err != nil {
+		return err
 	}
 	// Validate mainCmd
 	validCmds := map[string]bool{"snapshot": true, "record": true, "rtmp": true, "whip": true}
@@ -275,17 +509,25 @@ func validateTaskRequest(taskReq *TaskRequest) error {
 			}
 		}
 	}
-	// Validate required fields in payload
-	requiredFields := []string{"channel", "access_token", "workerUid"}
-	for _, field := range requiredFields {
-		v, ok := payload[field]
-		if !ok || v == nil || (field != "workerUid" && v == "") {
-			return fmt.Errorf("%s is required", field)
-		}
-		if field == "workerUid" {
-			if n, ok := v.(float64); !ok || int(n) == 0 {
-				return fmt.Errorf("workerUid is required and must be non-zero")
+	// Validate required fields based on action
+	if taskReq.Action == "start" {
+		// Start actions need channel, access_token, and workerUid
+		requiredFields := []string{"channel", "access_token", "workerUid"}
+		for _, field := range requiredFields {
+			v, ok := payload[field]
+			if !ok || v == nil || (field != "workerUid" && v == "") {
+				return fmt.Errorf("%s is required", field)
 			}
+			if field == "workerUid" {
+				if n, ok := v.(float64); !ok || int(n) == 0 {
+					return fmt.Errorf("workerUid is required and must be non-zero")
+				}
+			}
+		}
+	} else if taskReq.Action == "stop" || taskReq.Action == "status" {
+		// Stop and status actions need task_id to identify the specific task
+		if taskReq.TaskID == "" {
+			return fmt.Errorf("task_id is required for %s actions", taskReq.Action)
 		}
 	}
 	taskReq.Payload = payload // persistently update the payload
