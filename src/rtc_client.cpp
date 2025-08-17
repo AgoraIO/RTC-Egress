@@ -221,19 +221,19 @@ bool RtcClient::connect() {
         connectionObserver_ =
             std::make_unique<agora::egress::TaskConnectionObserver>(sdkErrorCallback_);
         connection_->registerObserver(connectionObserver_.get());
-        AG_LOG(INFO, "Registered connection observer for SDK error detection");
+        AG_LOG_TS(INFO, "Registered connection observer for SDK error detection");
     }
 
     // Connect to Agora channel
     if (connection_->connect(config_.accessToken.c_str(), config_.channel.c_str(),
                              config_.egressUid.c_str())) {
-        AG_LOG(ERROR, "Failed to connect to channel via RTC connection");
+        AG_LOG_TS(ERROR, "Failed to connect to channel via RTC connection");
         connection_ = nullptr;
         return false;
     }
 
     connected_ = true;
-    AG_LOG(INFO, "Connected to channel %s", config_.channel.c_str());
+    AG_LOG_TS(INFO, "Connected to channel %s", config_.channel.c_str());
     return true;
 }
 
@@ -262,7 +262,7 @@ void RtcClient::disconnect() {
             try {
                 connection_->getLocalUser()->unregisterVideoFrameObserver(frameObserver_.get());
             } catch (const std::exception& e) {
-                AG_LOG(ERROR, "Exception unregistering frame observer: %s", e.what());
+                AG_LOG_TS(ERROR, "Exception unregistering frame observer: %s", e.what());
             }
             frameObserver_->Release();  // Release our reference
             frameObserver_ = nullptr;
@@ -272,7 +272,7 @@ void RtcClient::disconnect() {
             try {
                 connection_->getLocalUser()->unregisterAudioFrameObserver(audioObserver_.get());
             } catch (const std::exception& e) {
-                AG_LOG(ERROR, "Exception unregistering audio frame observer: %s", e.what());
+                AG_LOG_TS(ERROR, "Exception unregistering audio frame observer: %s", e.what());
             }
             audioObserver_->Release();  // Release our reference
             audioObserver_ = nullptr;
@@ -283,9 +283,9 @@ void RtcClient::disconnect() {
             if (connectionObserver_) {
                 try {
                     connection_->unregisterObserver(connectionObserver_.get());
-                    AG_LOG(INFO, "Unregistered connection observer");
+                    AG_LOG_TS(INFO, "Unregistered connection observer");
                 } catch (const std::exception& e) {
-                    AG_LOG(ERROR, "Exception unregistering connection observer: %s", e.what());
+                    AG_LOG_TS(ERROR, "Exception unregistering connection observer: %s", e.what());
                 }
                 connectionObserver_.reset();
             }
@@ -295,7 +295,7 @@ void RtcClient::disconnect() {
                 try {
                     connection_->getLocalUser()->unpublishVideo(videoTrack_);
                 } catch (const std::exception& e) {
-                    AG_LOG(ERROR, "Exception unpublishing video: %s", e.what());
+                    AG_LOG_TS(ERROR, "Exception unpublishing video: %s", e.what());
                 }
             }
 
@@ -303,14 +303,14 @@ void RtcClient::disconnect() {
             try {
                 int ret = connection_->disconnect();
                 if (ret != 0) {
-                    AG_LOG(ERROR, "Failed to disconnect from channel, error: %d", ret);
+                    AG_LOG_TS(ERROR, "Failed to disconnect from channel, error: %d", ret);
                 }
 
                 // Wait for a moment to allow disconnection to complete
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
             } catch (const std::exception& e) {
-                AG_LOG(ERROR, "Exception during disconnect: %s", e.what());
+                AG_LOG_TS(ERROR, "Exception during disconnect: %s", e.what());
             }
 
             connection_ = nullptr;
@@ -323,7 +323,7 @@ void RtcClient::disconnect() {
         connected_ = false;
 
     } catch (const std::exception& e) {
-        AG_LOG(ERROR, "Exception in disconnect(): %s", e.what());
+        AG_LOG_TS(ERROR, "Exception in disconnect(): %s", e.what());
         connected_ = false;
     }
 }
@@ -365,14 +365,14 @@ void RtcClient::teardown() {
 
             // Wait for service release with timeout
             if (service_release_future.wait_for(timeout) != std::future_status::ready) {
-                AG_LOG(ERROR, "Timeout waiting for service release in teardown");
+                AG_LOG_TS(ERROR, "Timeout waiting for service release in teardown");
             }
         }
 
         initialized_ = false;
 
     } catch (const std::exception& e) {
-        AG_LOG(ERROR, "Exception in teardown(): %s", e.what());
+        AG_LOG_TS(ERROR, "Exception in teardown(): %s", e.what());
         initialized_ = false;
     }
 }
