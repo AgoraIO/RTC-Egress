@@ -739,26 +739,53 @@ void TaskPipe::sendCompletionMessage(const std::string& task_id, const std::stri
 void TaskPipe::handleSdkError(const std::string& errorType, const std::string& errorMessage) {
     logError("SDK Error detected: " + errorType + " - " + errorMessage, instance_id_);
 
-    // Find all active tasks and fail them due to SDK error
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    // Stop all active sinks before clearing state
+    bool had_active_recording = hasActiveTasksOfType("record");
+    bool had_active_snapshot = hasActiveTasksOfType("snapshot");
 
-    std::vector<std::string> tasksToFail;
-    for (const auto& [channel, state] : channel_states_) {
-        for (const auto& [task_id, task_type] : state.active_tasks) {
-            tasksToFail.push_back(task_id);
+    {
+        // Find all active tasks and fail them due to SDK error
+        std::lock_guard<std::mutex> lock(state_mutex_);
+
+        std::vector<std::string> tasksToFail;
+        for (const auto& [channel, state] : channel_states_) {
+            for (const auto& [task_id, task_type] : state.active_tasks) {
+                tasksToFail.push_back(task_id);
+            }
         }
+
+        // Send failure completion messages for all active tasks
+        for (const std::string& task_id : tasksToFail) {
+            std::string errorMsg = "SDK Error: " + errorType + " - " + errorMessage;
+            sendCompletionMessage(task_id, "failed", errorMsg,
+                                  "Task failed due to unrecoverable SDK error");
+            logError("Failed task " + task_id + " due to SDK error: " + errorType, instance_id_);
+        }
+
+        // Clear all active tasks since SDK connection is broken
+        channel_states_.clear();
     }
 
-    // Send failure completion messages for all active tasks
-    for (const std::string& task_id : tasksToFail) {
-        std::string errorMsg = "SDK Error: " + errorType + " - " + errorMessage;
-        sendCompletionMessage(task_id, "failed", errorMsg,
-                              "Task failed due to unrecoverable SDK error");
-        logError("Failed task " + task_id + " due to SDK error: " + errorType, instance_id_);
+    logInfo("Checking active tasks: recording=" + std::to_string(had_active_recording) +
+                ", snapshot=" + std::to_string(had_active_snapshot),
+            instance_id_);
+
+    // Stop sinks if they were active
+    if (had_active_recording && recording_sink_) {
+        logInfo("Stopping recording sink due to SDK error", instance_id_);
+        recording_sink_->stop();
+        logInfo("Recording sink stopped successfully", instance_id_);
+    } else {
+        logInfo("Recording sink not stopped: had_active=" + std::to_string(had_active_recording) +
+                    ", sink_exists=" + std::to_string(recording_sink_ != nullptr),
+                instance_id_);
     }
 
-    // Clear all active tasks since SDK connection is broken
-    channel_states_.clear();
+    if (had_active_snapshot && snapshot_sink_) {
+        logInfo("Stopping snapshot sink due to SDK error", instance_id_);
+        snapshot_sink_->stop();
+        logInfo("Snapshot sink stopped successfully", instance_id_);
+    }
 
     logInfo("All active tasks failed due to SDK error: " + errorType, instance_id_);
 }

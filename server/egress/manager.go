@@ -703,19 +703,14 @@ func (wm *WorkerManager) fetchTaskFromRedis(ctx context.Context, patterns []stri
 			return nil, fmt.Errorf("failed to pop from queue %s: %v", queue, err)
 		}
 
-		// Successfully got a task, get its details
-		task, err := wm.RedisQueue.GetTaskStatus(ctx, taskID)
+		// Use proper lease mechanism instead of manual state update
+		task, err := wm.RedisQueue.ClaimTaskWithLease(ctx, taskID, wm.PodID)
 		if err != nil {
-			// If we can't get task details, push it back to the original queue
+			// If we can't claim the task, push it back to the original queue
 			wm.RedisQueue.Client().LRem(ctx, processingQueue, 1, taskID)
 			wm.RedisQueue.Client().LPush(ctx, queue, taskID)
-			return nil, fmt.Errorf("failed to get task %s: %v", taskID, err)
+			return nil, fmt.Errorf("failed to claim task %s with lease: %v", taskID, err)
 		}
-
-		// Update task state to processing
-		task.State = "PROCESSING"
-		task.WorkerID = 0 // Will be set when assigned to actual worker
-		wm.RedisQueue.UpdateTaskResult(ctx, taskID, "PROCESSING", "")
 
 		log.Printf("Pod %s fetched task %s from queue %s", wm.PodID, taskID, queue)
 		return task, nil
@@ -942,42 +937,81 @@ func (wm *WorkerManager) startTask(task *queue.Task) error {
 
 // stopTask stops a task from Redis queue directly
 func (wm *WorkerManager) stopTask(task *queue.Task) error {
+	// Extract original task ID from stop task payload
+	var originalTaskID string
+	if task.Payload != nil {
+		if taskID, ok := task.Payload["task_id"].(string); ok {
+			originalTaskID = taskID
+		}
+	}
+
+	if originalTaskID == "" {
+		return fmt.Errorf("stop task %s missing original task_id in payload", task.ID)
+	}
+
+	// Find which worker is running the original task
+	var targetWorker *Worker
+	var targetWorkerID int
+	wm.Mutex.Lock()
+	for workerID, worker := range wm.Workers {
+		if worker != nil && worker.TaskID == originalTaskID {
+			targetWorker = worker
+			targetWorkerID = workerID
+			break
+		}
+	}
+	wm.Mutex.Unlock()
+
+	if targetWorker == nil {
+		// Original task may have already completed or not found
+		log.Printf("Original task %s not found on any worker for stop task %s", originalTaskID, task.ID)
+		return nil
+	}
+
+	// Create UDS message to stop the original task
 	udsMsg := &UDSMessage{
-		TaskID:  task.ID,
+		TaskID:  originalTaskID, // Use original task ID, not stop task ID
 		Cmd:     task.Type,
-		Action:  task.Action,
+		Action:  "stop",
 		Channel: task.Channel,
 		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
 	}
 
-	// Find worker for this task
-	workerID := task.WorkerID
-	if workerID < 0 || workerID >= len(wm.Workers) {
-		return fmt.Errorf("invalid worker ID %d", workerID)
-	}
+	targetWorker.Mutex.Lock()
+	defer targetWorker.Mutex.Unlock()
 
-	worker := wm.Workers[workerID]
-	if worker == nil {
-		return fmt.Errorf("worker %d not found", workerID)
-	}
-
-	worker.Mutex.Lock()
-	defer worker.Mutex.Unlock()
-
-	err := wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
+	err := wm.sendUDSMessageToWorker(targetWorker, originalTaskID, udsMsg)
 	if err != nil {
-		return fmt.Errorf("failed to send stop command to worker %d: %v", workerID, err)
+		return fmt.Errorf("failed to send stop command to worker %d for original task %s: %v", targetWorkerID, originalTaskID, err)
 	}
 
-	// Clean up task from channel tracking
-	wm.removeTaskFromChannel(task.Channel, task.Type, task.ID)
+	// Clean up original task from channel tracking
+	wm.removeTaskFromChannel(task.Channel, task.Type, originalTaskID)
 
-	log.Printf("Pod %s released task %s (%s:%s) from worker %d", wm.PodID, task.ID, task.Channel, task.Type, workerID)
+	log.Printf("Pod %s sent stop command to worker %d for original task %s (via stop task %s)", wm.PodID, targetWorkerID, originalTaskID, task.ID)
 	return nil
 }
 
 // failTask stops a task due to unrecoverable error and marks it as FAILED
 func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
+	// Protection against multiple concurrent failTask calls for the same task
+	failKey := fmt.Sprintf("failing:%s", task.ID)
+	wm.TasksMutex.Lock()
+	if _, exists := wm.ActiveTasks[failKey]; exists {
+		wm.TasksMutex.Unlock()
+		log.Printf("Task %s is already being failed by another process, skipping", task.ID)
+		return nil
+	}
+	wm.ActiveTasks[failKey] = "failing" // Mark as being failed
+	wm.TasksMutex.Unlock()
+
+	// Cleanup when function exits
+	defer func() {
+		wm.TasksMutex.Lock()
+		delete(wm.ActiveTasks, failKey)
+		wm.TasksMutex.Unlock()
+	}()
+
 	// Find worker for this task
 	workerID := task.WorkerID
 	if workerID < 0 || workerID >= len(wm.Workers) {
@@ -985,6 +1019,12 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateFailed, reason)
+
+		// Remove from active tasks tracking for lease renewal
+		wm.TasksMutex.Lock()
+		delete(wm.ActiveTasks, task.ID)
+		wm.TasksMutex.Unlock()
+
 		log.Printf("Marked unassigned task %s as FAILED: %s", task.ID, reason)
 		return nil
 	}
@@ -995,6 +1035,12 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateFailed, reason)
+
+		// Remove from active tasks tracking for lease renewal
+		wm.TasksMutex.Lock()
+		delete(wm.ActiveTasks, task.ID)
+		wm.TasksMutex.Unlock()
+
 		log.Printf("Marked task %s as FAILED (worker gone): %s", task.ID, reason)
 		return nil
 	}
@@ -1008,14 +1054,16 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
 	}
 
-	worker.Mutex.Lock()
-	defer worker.Mutex.Unlock()
-
+	// NOTE: Worker mutex is already locked by the caller (handleTaskCompletion)
+	// Do not lock again to avoid deadlock
 	// Try to send stop command to worker (best effort)
+	log.Printf("Sending stop command to worker %d for FAILED task %s (channel: %s, type: %s)", workerID, task.ID, task.Channel, task.Type)
 	err := wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
 	if err != nil {
 		log.Printf("Failed to send stop command to worker %d for FAILED task %s: %v", workerID, task.ID, err)
 		// Continue anyway - mark as FAILED even if stop failed
+	} else {
+		log.Printf("Successfully sent stop command to worker %d for FAILED task %s", workerID, task.ID)
 	}
 
 	// Clean up worker state
@@ -1024,10 +1072,38 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 	// Clean up task from channel tracking
 	wm.removeTaskFromChannel(task.Channel, task.Type, task.ID)
 
-	// Mark task as FAILED in Redis
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Mark task as FAILED in Redis and clean up
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateFailed, reason)
+
+	// Use existing queue method to mark task as FAILED
+	err = wm.RedisQueue.UpdateTaskResult(ctx, task.ID, "FAILED", reason)
+	if err != nil {
+		log.Printf("Warning: Failed to mark task %s as FAILED in Redis: %v", task.ID, err)
+	} else {
+		log.Printf("Marked task %s as FAILED in Redis", task.ID)
+	}
+
+	// Remove task from processing queue to prevent recovery
+	processingQueue := wm.RedisQueue.BuildProcessingQueueKey(wm.PodID)
+	removed, err := wm.RedisQueue.Client().LRem(ctx, processingQueue, -1, task.ID).Result()
+	if err != nil {
+		log.Printf("Warning: Failed to remove FAILED task %s from processing queue: %v", task.ID, err)
+	} else if removed > 0 {
+		log.Printf("Removed %d instances of FAILED task %s from processing queue", removed, task.ID)
+	}
+
+	// Remove lease to prevent lease renewal
+	leaseKey := wm.RedisQueue.BuildLeaseKey(task.ID)
+	err = wm.RedisQueue.Client().Del(ctx, leaseKey).Err()
+	if err != nil {
+		log.Printf("Warning: Failed to remove lease for FAILED task %s: %v", task.ID, err)
+	}
+
+	// Remove from local active tasks tracking (always do this)
+	wm.TasksMutex.Lock()
+	delete(wm.ActiveTasks, task.ID)
+	wm.TasksMutex.Unlock()
 
 	log.Printf("Pod %s marked task %s (%s:%s) as FAILED and stopped worker %d: %s",
 		wm.PodID, task.ID, task.Channel, task.Type, workerID, reason)
@@ -1454,6 +1530,9 @@ func ManagerMainWithRedisAndHealth(redisQueue *queue.RedisQueue, healthManager *
 			return
 		}
 
+		// Set action to "start" since this is the start endpoint
+		taskReq.Action = "start"
+
 		// Validate request parameters before Redis publishing
 		if err := ValidateStartTaskRequest(&taskReq); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -1584,7 +1663,7 @@ func ManagerMainWithRedisAndHealth(redisQueue *queue.RedisQueue, healthManager *
 			"request_id":   req.RequestID,
 			"task_id":      req.TaskID,
 			"stop_task_id": stopTask.ID,
-			"status":       "stop_queued",
+			"status":       "queued",
 		})
 	})
 

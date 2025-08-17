@@ -244,7 +244,7 @@ func (rq *RedisQueue) fetchNextTask(ctx context.Context, workerID string, patter
 		}
 
 		// Successfully got a task, now update its state and create lease
-		task, err := rq.claimTaskWithLease(ctx, taskID, workerID)
+		task, err := rq.ClaimTaskWithLease(ctx, taskID, workerID)
 		if err != nil {
 			// If we can't claim the task, push it back to the original queue
 			rq.client.LRem(ctx, processingQueue, 1, taskID)
@@ -259,8 +259,8 @@ func (rq *RedisQueue) fetchNextTask(ctx context.Context, workerID string, patter
 	return nil, nil // No tasks available
 }
 
-// claimTaskWithLease updates task state and creates a lease
-func (rq *RedisQueue) claimTaskWithLease(ctx context.Context, taskID, workerID string) (*Task, error) {
+// ClaimTaskWithLease updates task state and creates a lease
+func (rq *RedisQueue) ClaimTaskWithLease(ctx context.Context, taskID, workerID string) (*Task, error) {
 	taskKey := rq.buildTaskKey(taskID)
 	leaseKey := rq.buildLeaseKey(taskID)
 
