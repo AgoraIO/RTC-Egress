@@ -1,0 +1,116 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ag_egress_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ag_egress:
+    image: ghcr.io/your-username/agora-rtc-egress:latest
+    container_name: ag_egress_server
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"    # API port
+      - "8182:8182"    # Health check port
+      - "3000:3000"    # Web interface port
+    volumes:
+      - ./config:/opt/ag_egress/config:ro
+      - ./recordings:/recordings
+      - ./snapshots:/snapshots
+      - ag_egress_logs:/var/log/ag_egress
+    environment:
+      # Agora Configuration - REQUIRED
+      - APP_ID=${APP_ID:-YOUR_AGORA_APP_ID}
+      - ACCESS_TOKEN=${ACCESS_TOKEN:-YOUR_AGORA_CHANNEL_TOKEN}
+      - CHANNEL_NAME=${CHANNEL_NAME:-egress_test}
+      - EGRESS_UID=${EGRESS_UID:-42}
+      
+      # Redis Configuration
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-0}
+      
+      # Server Configuration
+      - GIN_MODE=release
+      - API_PORT=8080
+      - HEALTH_PORT=8182
+      - CANVAS_TEMPLATE_PORT=3000
+      
+      # Pod Configuration
+      - POD_REGION=${POD_REGION:-}
+      - POD_WORKERS=${POD_WORKERS:-4}
+      
+      # AWS S3 Configuration (optional)
+      - S3_BUCKET=${S3_BUCKET:-}
+      - S3_REGION=${S3_REGION:-us-west-2}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      
+      # Recording Configuration
+      - RECORDING_ENABLED=${RECORDING_ENABLED:-false}
+      - RECORDING_FORMAT=${RECORDING_FORMAT:-mp4}
+      - VIDEO_WIDTH=${VIDEO_WIDTH:-1280}
+      - VIDEO_HEIGHT=${VIDEO_HEIGHT:-720}
+      - VIDEO_FPS=${VIDEO_FPS:-30}
+      - VIDEO_BITRATE=${VIDEO_BITRATE:-2000000}
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8182/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Security settings
+    read_only: false
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+
+  # Optional: Web UI for monitoring (if you have one)
+  ag_egress_web:
+    image: nginx:alpine
+    container_name: ag_egress_web
+    depends_on:
+      - ag_egress
+    ports:
+      - "8888:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+    profiles:
+      - web
+
+volumes:
+  redis_data:
+    driver: local
+  ag_egress_logs:
+    driver: local
+
+networks:
+  default:
+    name: ag_egress_network
+    driver: bridge

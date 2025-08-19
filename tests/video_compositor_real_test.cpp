@@ -1,14 +1,15 @@
 #include <gtest/gtest.h>
-#include <vector>
-#include <thread>
-#include <chrono>
-#include <atomic>
-#include <mutex>
+
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
-#include <fstream>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 // Include the REAL project headers
 #include "../src/include/video_compositor.h"
@@ -18,11 +19,11 @@ using namespace agora::rtc;
 
 // Frame Generator for testing real VideoCompositor
 class VideoCompositorFrameGenerator {
-public:
+   public:
     // Generate YUV420P video frame data compatible with VideoFrame
     VideoFrame generateVideoFrame(const std::string& userId, uint64_t timestamp,
-                                 uint32_t width = 640, uint32_t height = 480,
-                                 uint8_t colorPattern = 128) {
+                                  uint32_t width = 640, uint32_t height = 480,
+                                  uint8_t colorPattern = 128) {
         // Create raw YUV buffers first
         uint32_t ySize = width * height;
         uint32_t uvSize = (width / 2) * (height / 2);
@@ -33,11 +34,9 @@ public:
 
         // Use the proper VideoFrame initialization API
         VideoFrame frame;
-        bool success = frame.initializeFromYUV(
-            yBuffer.data(), uBuffer.data(), vBuffer.data(),
-            width, width / 2, width / 2,  // strides
-            width, height, timestamp, userId
-        );
+        bool success = frame.initializeFromYUV(yBuffer.data(), uBuffer.data(), vBuffer.data(),
+                                               width, width / 2, width / 2,  // strides
+                                               width, height, timestamp, userId);
 
         if (!success) {
             // Return an invalid frame
@@ -49,13 +48,13 @@ public:
 
     // Generate test pattern frames for visual verification
     VideoFrame generateTestPattern(const std::string& userId, uint64_t timestamp,
-                                  const std::string& pattern = "gradient",
-                                  uint32_t width = 640, uint32_t height = 480) {
+                                   const std::string& pattern = "gradient", uint32_t width = 640,
+                                   uint32_t height = 480) {
         // Create raw YUV buffers with patterns
         uint32_t ySize = width * height;
         uint32_t uvSize = (width / 2) * (height / 2);
 
-        std::vector<uint8_t> yBuffer(ySize, 128); // Default gray
+        std::vector<uint8_t> yBuffer(ySize, 128);  // Default gray
         std::vector<uint8_t> uBuffer(uvSize, 128);
         std::vector<uint8_t> vBuffer(uvSize, 128);
 
@@ -88,11 +87,9 @@ public:
 
         // Initialize VideoFrame with the pattern data
         VideoFrame frame;
-        bool success = frame.initializeFromYUV(
-            yBuffer.data(), uBuffer.data(), vBuffer.data(),
-            width, width / 2, width / 2,  // strides
-            width, height, timestamp, userId
-        );
+        bool success = frame.initializeFromYUV(yBuffer.data(), uBuffer.data(), vBuffer.data(),
+                                               width, width / 2, width / 2,  // strides
+                                               width, height, timestamp, userId);
 
         if (!success) {
             frame.clear();
@@ -103,12 +100,13 @@ public:
 };
 
 class RealVideoCompositorTest : public ::testing::Test {
-protected:
+   protected:
     void SetUp() override {
         generator_ = std::make_unique<VideoCompositorFrameGenerator>();
-        
+
         // Create temporary test directory
-        testDir_ = "/tmp/compositor_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        testDir_ = "/tmp/compositor_test_" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         std::filesystem::create_directories(testDir_);
     }
 
@@ -132,7 +130,7 @@ TEST_F(RealVideoCompositorTest, RealCompositorInitialization) {
 
     VideoCompositor compositor;
     ASSERT_TRUE(compositor.initialize(config));
-    
+
     // Verify initialization succeeded (can't easily test user count without public API)
     EXPECT_EQ(compositor.getDroppedFrameCount(), 0);
 }
@@ -149,10 +147,10 @@ TEST_F(RealVideoCompositorTest, RealCompositorSingleUser) {
 
     // Add frame from single user
     auto frame = generator_->generateTestPattern("user1", 1000, "gradient", 640, 480);
-    
+
     bool success = compositor.addUserFrame(frame, "user1");
     EXPECT_TRUE(success);
-    
+
     // Note: Cannot easily verify user count without public API, but adding frame should succeed
 }
 
@@ -167,12 +165,12 @@ TEST_F(RealVideoCompositorTest, RealCompositorMultipleUsers) {
     ASSERT_TRUE(compositor.initialize(config));
 
     std::vector<std::string> users = {"alice", "bob", "charlie", "david"};
-    
+
     // Add frames from multiple users
     for (size_t i = 0; i < users.size(); i++) {
         std::string pattern = (i % 2 == 0) ? "gradient" : "checkerboard";
         auto frame = generator_->generateTestPattern(users[i], 1000 + i, pattern, 640, 480);
-        
+
         bool success = compositor.addUserFrame(frame, users[i]);
         EXPECT_TRUE(success);
     }
@@ -183,31 +181,31 @@ TEST_F(RealVideoCompositorTest, RealCompositorMultipleUsers) {
 // Test: Real VideoCompositor layout calculation
 TEST_F(RealVideoCompositorTest, RealCompositorLayoutCalculation) {
     VideoCompositor compositor;
-    
+
     // Test various user counts and their expected layouts
     struct LayoutTest {
         int userCount;
         int expectedCols;
         int expectedRows;
     };
-    
+
     std::vector<LayoutTest> layoutTests = {
-        {1, 1, 1},   // Single user - full screen
-        {2, 2, 1},   // Two users - side by side  
-        {3, 3, 1},   // Three users - 3x1 grid (based on actual implementation)
-        {4, 2, 2},   // Four users - 2x2 grid
-        {5, 3, 2},   // Five users - 3x2 grid
-        {6, 3, 2},   // Six users - 3x2 grid
-        {9, 3, 3},   // Nine users - 3x3 grid
-        {16, 4, 4}   // Sixteen users - 4x4 grid
+        {1, 1, 1},  // Single user - full screen
+        {2, 2, 1},  // Two users - side by side
+        {3, 3, 1},  // Three users - 3x1 grid (based on actual implementation)
+        {4, 2, 2},  // Four users - 2x2 grid
+        {5, 3, 2},  // Five users - 3x2 grid
+        {6, 3, 2},  // Six users - 3x2 grid
+        {9, 3, 3},  // Nine users - 3x3 grid
+        {16, 4, 4}  // Sixteen users - 4x4 grid
     };
 
     for (const auto& test : layoutTests) {
         auto layout = compositor.calculateOptimalLayout(test.userCount);
-        
-        EXPECT_EQ(layout.first, test.expectedCols) 
+
+        EXPECT_EQ(layout.first, test.expectedCols)
             << "Column count mismatch for " << test.userCount << " users";
-        EXPECT_EQ(layout.second, test.expectedRows) 
+        EXPECT_EQ(layout.second, test.expectedRows)
             << "Row count mismatch for " << test.userCount << " users";
     }
 }
@@ -222,7 +220,7 @@ TEST_F(RealVideoCompositorTest, RealCompositorUserRemoval) {
     ASSERT_TRUE(compositor.initialize(config));
 
     std::vector<std::string> users = {"user1", "user2", "user3"};
-    
+
     // Add users
     for (const auto& userId : users) {
         auto frame = generator_->generateTestPattern(userId, 1000, "solid", 640, 480);
@@ -234,7 +232,7 @@ TEST_F(RealVideoCompositorTest, RealCompositorUserRemoval) {
     // Remove users one by one
     for (const auto& userId : users) {
         compositor.removeUser(userId);
-        // Note: We can't easily test the exact count after removal without 
+        // Note: We can't easily test the exact count after removal without
         // accessing internal state, but we can verify the operation doesn't crash
     }
 
@@ -248,7 +246,7 @@ TEST_F(RealVideoCompositorTest, RealCompositorFrameCallback) {
     VideoCompositor::Config config;
     config.outputWidth = 1280;
     config.outputHeight = 720;
-    config.minCompositeIntervalMs = 50; // Faster composition for testing
+    config.minCompositeIntervalMs = 50;  // Faster composition for testing
 
     VideoCompositor compositor;
     ASSERT_TRUE(compositor.initialize(config));
@@ -268,17 +266,17 @@ TEST_F(RealVideoCompositorTest, RealCompositorFrameCallback) {
 
     // Add frames from multiple users to trigger composition
     std::vector<std::string> users = {"user1", "user2"};
-    
+
     for (int frameIdx = 0; frameIdx < 5; frameIdx++) {
         for (const auto& userId : users) {
             auto frame = generator_->generateTestPattern(userId, frameIdx * 33, "solid", 640, 480);
             compositor.addUserFrame(frame, userId);
         }
-        
+
         // Create composite frame
         compositor.createCompositeFrameWithoutLock(users);
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(60)); // Allow callback processing
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));  // Allow callback processing
     }
 
     // Verify callback was called with valid frames
@@ -302,17 +300,16 @@ TEST_F(RealVideoCompositorTest, RealCompositorMixedFrameSizes) {
         uint32_t width;
         uint32_t height;
     };
-    
-    std::vector<FrameTest> frameTests = {
-        {"user_vga", 640, 480},
-        {"user_hd", 1280, 720},
-        {"user_mobile", 480, 640}, // Portrait
-        {"user_small", 320, 240}
-    };
+
+    std::vector<FrameTest> frameTests = {{"user_vga", 640, 480},
+                                         {"user_hd", 1280, 720},
+                                         {"user_mobile", 480, 640},  // Portrait
+                                         {"user_small", 320, 240}};
 
     for (const auto& test : frameTests) {
-        auto frame = generator_->generateTestPattern(test.userId, 1000, "gradient", test.width, test.height);
-        
+        auto frame =
+            generator_->generateTestPattern(test.userId, 1000, "gradient", test.width, test.height);
+
         bool success = compositor.addUserFrame(frame, test.userId);
         EXPECT_TRUE(success) << "Failed to add frame for " << test.userId;
     }
@@ -332,7 +329,7 @@ TEST_F(RealVideoCompositorTest, RealCompositorConcurrentFrames) {
 
     std::atomic<int> totalFramesAdded{0};
     std::atomic<int> successfulFrames{0};
-    
+
     const int numUsers = 4;
     const int framesPerUser = 10;
     std::vector<std::thread> threads;
@@ -341,20 +338,21 @@ TEST_F(RealVideoCompositorTest, RealCompositorConcurrentFrames) {
     for (int userId = 0; userId < numUsers; userId++) {
         threads.emplace_back([&, userId]() {
             std::string userIdStr = "user" + std::to_string(userId);
-            
+
             for (int frameIdx = 0; frameIdx < framesPerUser; frameIdx++) {
-                uint64_t timestamp = frameIdx * 33; // 30fps timing
+                uint64_t timestamp = frameIdx * 33;  // 30fps timing
                 std::string pattern = (userId % 2 == 0) ? "gradient" : "stripes";
-                
-                auto frame = generator_->generateTestPattern(userIdStr, timestamp, pattern, 640, 480);
-                
+
+                auto frame =
+                    generator_->generateTestPattern(userIdStr, timestamp, pattern, 640, 480);
+
                 bool success = compositor.addUserFrame(frame, userIdStr);
                 if (success) {
                     successfulFrames++;
                 }
                 totalFramesAdded++;
-                
-                std::this_thread::sleep_for(std::chrono::milliseconds(5)); // Small delay
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));  // Small delay
             }
         });
     }
@@ -366,7 +364,7 @@ TEST_F(RealVideoCompositorTest, RealCompositorConcurrentFrames) {
 
     // Verify results
     EXPECT_EQ(totalFramesAdded.load(), numUsers * framesPerUser);
-    EXPECT_GT(successfulFrames.load(), 0); // At least some frames should succeed
+    EXPECT_GT(successfulFrames.load(), 0);  // At least some frames should succeed
     // Note: Cannot verify exact user count without public API
 }
 
@@ -388,7 +386,7 @@ TEST_F(RealVideoCompositorTest, RealCompositorCleanup) {
 
     // Test cleanup
     compositor.cleanup();
-    
+
     // After cleanup, should be able to reinitialize
     ASSERT_TRUE(compositor.initialize(config));
     // Note: Cannot verify user count after cleanup without public API
@@ -417,8 +415,8 @@ TEST_F(RealVideoCompositorTest, RealCompositorExpectedUsers) {
     // Add frame for unexpected user
     auto unexpectedFrame = generator_->generateTestPattern("unexpected", 1000, "stripes", 640, 480);
     bool success = compositor.addUserFrame(unexpectedFrame, "unexpected");
-    EXPECT_TRUE(success); // Should still succeed, just might be handled differently
-    
+    EXPECT_TRUE(success);  // Should still succeed, just might be handled differently
+
     // Note: Cannot verify user count without public API
 }
 
@@ -428,26 +426,26 @@ TEST_F(RealVideoCompositorTest, RealCompositorErrorHandling) {
 
     // Test with invalid config
     VideoCompositor::Config invalidConfig;
-    invalidConfig.outputWidth = 0; // Invalid
+    invalidConfig.outputWidth = 0;  // Invalid
     invalidConfig.outputHeight = 720;
-    
+
     EXPECT_FALSE(compositor.initialize(invalidConfig));
 
     // Test with valid config
     VideoCompositor::Config validConfig;
     validConfig.outputWidth = 1280;
     validConfig.outputHeight = 720;
-    
+
     ASSERT_TRUE(compositor.initialize(validConfig));
 
     // Test adding frame before proper initialization of internal state
     auto frame = generator_->generateTestPattern("error_test", 1000, "solid", 640, 480);
     bool success = compositor.addUserFrame(frame, "error_test");
     // Should handle gracefully (might succeed or fail depending on internal state)
-    
+
     // Test operations after cleanup
     compositor.cleanup();
-    
+
     // Operations after cleanup should be handled gracefully
     compositor.removeUser("nonexistent");
     compositor.clearAllUsers();

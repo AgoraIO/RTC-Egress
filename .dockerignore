@@ -1,0 +1,54 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Build artifacts
+build/
+*.o
+*.a
+
+# Temporary files
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Go files (but allow go.mod and go.sum for builds)
+
+# Test files
+test_*
+*_test.go
+
+# Documentation
+README.md
+*.md
+docs/
+
+# Configuration files with secrets
+.env
+config/egress_config.yaml
+!config/egress_config.yaml.example
+
+# Runtime directories
+snapshots/
+recordings/
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github/
+
+# Logs
+logs/
+*.log

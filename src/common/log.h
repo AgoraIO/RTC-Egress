@@ -126,7 +126,7 @@ inline void ag_format_timestamp(char* buf, size_t buf_size) {
 
 // Fast timestamp formatting with thread-local caching
 inline void ag_format_timestamp_fast(char* buf, size_t buf_size) {
-    static thread_local char cached_time[64];
+    static thread_local char cached_time[80];  // Increased size to avoid truncation warnings
     static thread_local time_t last_sec = 0;
     static thread_local bool cache_valid = false;
     
@@ -187,7 +187,7 @@ inline void ag_format_timestamp_fast(char* buf, size_t buf_size) {
 
 // Enhanced AG_LOG with timestamp and tag
 #define AG_LOG_TS(level, format, ...) do { \
-    char time_buf[64]; \
+    char time_buf[96]; \
     ag_format_timestamp(time_buf, sizeof(time_buf)); \
     const char* color = ag_get_level_color(level); \
     const char* reset = ag_log_use_colors ? AG_COLOR_RESET : ""; \
@@ -208,7 +208,7 @@ inline void ag_format_timestamp_fast(char* buf, size_t buf_size) {
 
 // High-performance version with tag support
 #define AG_LOG_FAST(level, format, ...) do { \
-    char time_buf[64]; \
+    char time_buf[96]; \
     ag_format_timestamp_fast(time_buf, sizeof(time_buf)); \
     const char* color = ag_get_level_color(level); \
     const char* reset = ag_log_use_colors ? AG_COLOR_RESET : ""; \
@@ -236,7 +236,7 @@ inline void ag_format_timestamp_fast(char* buf, size_t buf_size) {
 } while(0)
 
 #define AG_LOG_TS_WITH_TAG(tag, level, format, ...) do { \
-    char time_buf[64]; \
+    char time_buf[96]; \
     ag_format_timestamp(time_buf, sizeof(time_buf)); \
     const char* color = ag_get_level_color(level); \
     const char* reset = ag_log_use_colors ? AG_COLOR_RESET : ""; \

@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agora-build/rtc-egress/server/egress"
-	"github.com/agora-build/rtc-egress/server/health"
-	"github.com/agora-build/rtc-egress/server/queue"
-	"github.com/agora-build/rtc-egress/server/uploader"
-	"github.com/agora-build/rtc-egress/server/utils"
+	"github.com/agora-build/rtc-egress/pkg/egress"
+	"github.com/agora-build/rtc-egress/pkg/health"
+	"github.com/agora-build/rtc-egress/pkg/queue"
+	"github.com/agora-build/rtc-egress/pkg/uploader"
+	"github.com/agora-build/rtc-egress/pkg/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
 )
@@ -74,8 +74,21 @@ func loadConfig() error {
 	viper.SetConfigName("egress_config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath("./config")
-	viper.AddConfigPath("/etc/egress")
-	viper.AddConfigPath("$HOME/.egress")
+	viper.AddConfigPath("/etc/ag_egress")
+	viper.AddConfigPath("/opt/ag_egress/config")
+	viper.AddConfigPath("$HOME/.ag_egress")
+
+	// Enable environment variable overrides
+	viper.AutomaticEnv()
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	// Set environment variable bindings for key configuration
+	viper.BindEnv("app_id", "APP_ID")
+	viper.BindEnv("redis.addr", "REDIS_ADDR")
+	viper.BindEnv("redis.password", "REDIS_PASSWORD")
+	viper.BindEnv("redis.db", "REDIS_DB")
+	viper.BindEnv("pod.region", "POD_REGION")
+	viper.BindEnv("pod.workers", "POD_WORKERS")
 
 	// Read config file
 	if err := viper.ReadInConfig(); err != nil {
@@ -86,6 +99,14 @@ func loadConfig() error {
 	if err := viper.Unmarshal(&config); err != nil {
 		return fmt.Errorf("error unmarshaling config: %v", err)
 	}
+
+	// Validate mandatory APP_ID (managed mode - ACCESS_TOKEN comes from requests)
+	if strings.TrimSpace(config.AppID) == "" {
+		return fmt.Errorf("app_id is required (set via environment variable APP_ID or in egress_config.yaml)")
+	}
+
+	log.Printf("Configuration loaded for managed mode:")
+	log.Printf("  APP_ID: %s", config.AppID)
 
 	// Validate required fields
 	if strings.TrimSpace(config.Snapshots.OutputDir) == "" {

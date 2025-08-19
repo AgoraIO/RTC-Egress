@@ -51,14 +51,14 @@ bool LayoutDetector::initialize(const Config& config) {
             users_[userId] = UserInfo(userId, currentTime);
             users_[userId].state = UserState::JOINING;
         }
-        AG_LOG_FAST(INFO, "Pre-populated %zu expected users (only these will be considered)",
-                    config_.expectedUsers.size());
+        AG_LOG_FAST(INFO, "Pre-populated %u expected users (only these will be considered)",
+                    (uint32_t)config_.expectedUsers.size());
     } else {
         AG_LOG_FAST(INFO, "Auto-detect mode: will consider any user that sends frames");
     }
 
     AG_LOG_FAST(INFO,
-                "Initialized with config: userTimeout=%lums layoutStability=%lums maxUsers=%zu",
+                "Initialized with config: userTimeout=%lums layoutStability=%lums maxUsers=%u",
                 config_.userTimeoutMs, config_.layoutStabilityMs, config_.maxUsers);
 
     return true;
@@ -383,7 +383,8 @@ void LayoutDetector::checkLayoutChange() {
             if (!userList.empty()) userList += ", ";
             userList += userId;
         }
-        AG_LOG_FAST(INFO, "Layout changed to %zu users: %s", newLayout.size(), userList.c_str());
+        AG_LOG_FAST(INFO, "Layout changed to %u users: %s", (uint32_t)newLayout.size(),
+                    userList.c_str());
 
         // Notify callback
         if (layoutCallback_) {
