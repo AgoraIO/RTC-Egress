@@ -278,7 +278,7 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
             }
 
             // Stop snapshot sink if no more snapshot tasks are active
-            if (!hasActiveTasksOfType("snapshot")) {
+            if (!hasActiveTasksOfType("snapshot", false)) {
                 logInfo("Stopping snapshot for channel: " + found_channel, instance_id_);
                 if (snapshot_sink_ && snapshot_sink_->isCapturing()) {
                     snapshot_sink_->stop();
@@ -404,7 +404,7 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
             }
 
             // Stop recording sink if no more recording tasks are active
-            if (!hasActiveTasksOfType("record")) {
+            if (!hasActiveTasksOfType("record", false)) {
                 logInfo("Stopping recording for channel: " + found_channel, instance_id_);
                 if (recording_sink_) {
                     recording_sink_->stop();
@@ -657,6 +657,12 @@ void TaskPipe::thread_func() {
                         // Use the from_json function to parse the message
                         UDSMessage msg = json.get<UDSMessage>();
 
+                        // Log received message for debugging
+                        logInfo("Received UDS message - cmd: " + msg.cmd +
+                                    ", action: " + msg.action + ", task_id: " + msg.task_id +
+                                    ", channel: " + msg.channel,
+                                instance_id_);
+
                         // Handle the command
                         auto it = command_handlers_.find(msg.cmd);
                         if (it != command_handlers_.end()) {
@@ -690,8 +696,11 @@ void TaskPipe::thread_func() {
     logInfo("Task pipe thread exiting", instance_id_);
 }
 
-bool TaskPipe::hasActiveTasksOfType(const std::string& task_type) const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+bool TaskPipe::hasActiveTasksOfType(const std::string& task_type, const bool withLock) const {
+    if (withLock) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+    }
+
     for (const auto& [channel, state] : channel_states_) {
         for (const auto& [task_id, type] : state.active_tasks) {
             if (type == task_type) {

@@ -2,36 +2,36 @@
 
 ## Concepts
   1. State Definition
-	- TaskStatePending    = "PENDING"    // Task waiting in queue (can timeout after TaskTimeout)
+	- TaskStateEnqueued    = "ENQUEUED"    // Task waiting in queue (can timeout after TaskTimeout)
 	- TaskStateProcessing = "PROCESSING" // Worker actively working on task
 	- TaskStateSuccess    = "SUCCESS"    // Task completed successfully
 	- TaskStateFailed     = "FAILED"     // Fatal error(Can not be retried/recovered), like wrong access_token, no more disk space, etc. no user stop call needed
-	- TaskStateTimeout    = "TIMEOUT"    // Task aged out while PENDING (business staleness). no user stop call needed
+	- TaskStateTimeout    = "TIMEOUT"    // Task aged out while ENQUEUEDs (business staleness). no user stop call needed
 
 
   2. Atomic State Transitions
 
 
-  - PENDING → PROCESSING: Worker atomically moves task via BRPopLPush
-  - PENDING → TIMEOUT: Cleanup atomically checks queue presence + state with WATCH
-  - PROCESSING → PENDING: Worker failure recovery
+  - ENQUEUED → PROCESSING: Worker atomically moves task via BRPopLPush
+  - ENQUEUED → TIMEOUT: Cleanup atomically checks queue presence + state with WATCH
+  - PROCESSING → ENQUEUED: Worker failure recovery
   - PROCESSING → SUCCESS/FAILED: Worker completion
 
 
   3. Task State Transitions
-  | Scenario            | State   | Retry? | Stays in Redis?         | Timeout Window        |
-  |---------------------|---------|--------|---------------------|-----------------------|
-  | Business timeout    | TIMEOUT | ❌ No   | ✅ Yes                  | 30s from last PENDING |
-  | Worker crash        | PENDING | ✅ Yes  | ✅ Yes                  | Fresh 30s window      |
-  | Unrecoverable error | FAILED  | ❌ No   | ✅ Yes(Terminate task)  | N/A                   |
-  | Success             | SUCCESS | ❌ No   | ✅ Yes                  | N/A                   |
+  | Scenario            | State    | Retry?  | Stays in Redis?         | Timeout Window        |
+  |---------------------|----------|---------|---------------------|-----------------------|
+  | Business timeout    | TIMEOUT  | ❌ No   | ✅ Yes                  | 30s from last ENQUEUED |
+  | Worker crash        | ENQUEUED | ✅ Yes  | ✅ Yes                  | Fresh 30s window      |
+  | Unrecoverable error | FAILED   | ❌ No   | ✅ Yes(Terminate task)  | N/A                   |
+  | Success             | SUCCESS  | ❌ No   | ✅ Yes                  | N/A                   |
 
 
   4. Race Condition Prevention
 
-  // Atomic check: task must be BOTH in queue AND still PENDING
+  // Atomic check: task must be BOTH in queue AND still ENQUEUED
   rq.client.Watch(ctx, func(tx *redis.Tx) error {
-      // Check state is PENDING
+      // Check state is ENQUEUED
       // Check task age > 30s
       // Check task still in queue (not picked up by worker)
       // If all true: atomically mark TIMEOUT + remove from queue
@@ -40,9 +40,9 @@
 
   5. State Flow
 
-  PENDING (age ≤ 30s) → Worker picks up → PROCESSING → SUCCESS/FAILED
-  PENDING (age > 30s) → Cleanup marks → TIMEOUT (final state)
-  PROCESSING → Worker crashes → Cleanup recovers → PENDING (retry)
+  ENQUEUED (age ≤ 30s) → Worker picks up → PROCESSING → SUCCESS/FAILED
+  ENQUEUED (age > 30s) → Cleanup marks → TIMEOUT (final state)
+  PROCESSING → Worker crashes → Cleanup recovers → ENQUEUED (retry)
 
 
   6. Key Benefits
@@ -53,7 +53,7 @@
   - ✅ Clear separation: Business timeout vs worker failure
   - ✅ Future ready: TIMEOUT state ready for notification module
 
-  The implementation ensures that PENDING tasks can only transition to either PROCESSING (by worker) or TIMEOUT (by cleanup), never both
+  The implementation ensures that ENQUEUED tasks can only transition to either PROCESSING (by worker) or TIMEOUT (by cleanup), never both
 
 ## Pull-Based Regional Architecture
 
@@ -96,9 +96,9 @@
       "layout": "flat",
       "uid": ["user123", "user456"]
     },
-    "state": "PROCESSING", // PENDING, PROCESSING, SUCCESS, FAILED
+    "state": "PROCESSING", // ENQUEUED, PROCESSING, SUCCESS, FAILED
     "created_at": "2025-01-13T14:32:18Z",
-    "pending_at": "2025-01-13T14:32:18Z",
+    "enqueued_at": "2025-01-13T14:32:18Z",
     "processed_at": "2025-01-13T14:32:19Z",
     "completed_at": null,
     "error": "",
@@ -109,5 +109,5 @@
 ```
 
 ## Task State Transitions
-### Worker failure/crash/loss pushes task to PENDING. BE atomic, one PENDING task can only be proccesing by one worker(marked as PROCESSING) or marked as TIMEOUT. All the task state transition should be atomic.
+### Worker failure/crash/loss pushes task to ENQUEUED. BE atomic, one ENQUEUED task can only be proccesing by one worker(marked as PROCESSING) or marked as TIMEOUT. All the task state transition should be atomic.
 ### No task loss, No task duplication

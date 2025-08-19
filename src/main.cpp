@@ -153,6 +153,23 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // Set up signal handlers for socket mode as well
+            struct sigaction sa;
+            sa.sa_handler = signal_handler;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+
+            if (sigaction(SIGINT, &sa, NULL) == -1) {
+                std::cerr << "Failed to set up SIGINT handler in socket mode" << std::endl;
+                return 1;
+            }
+            if (sigaction(SIGTERM, &sa, NULL) == -1) {
+                std::cerr << "Failed to set up SIGTERM handler in socket mode" << std::endl;
+                return 1;
+            }
+
+            AG_LOG_FAST(INFO, "Signal handlers set up for socket mode");
+
             std::unique_ptr<agora::egress::TaskPipe> task_pipe =
                 std::make_unique<agora::egress::TaskPipe>(socket_path, instance_id);
             task_pipe->setSnapshotConfig(snapshots_config);
