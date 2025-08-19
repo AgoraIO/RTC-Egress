@@ -178,8 +178,7 @@ bool RecordingSink::start() {
 }
 
 void RecordingSink::stop() {
-    // std::cout << "[RecordingSink] stop() called, requesting thread shutdown..." << std::endl;
-    // std::flush(std::cout);
+    AG_LOG_TS(INFO, "RecordingSink::stop() called - requesting thread shutdown");
 
     {
         std::lock_guard<std::mutex> lock(mutex_);

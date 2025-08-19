@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	TaskStatePending    = "PENDING"    // Task waiting in queue (can timeout after TaskTimeout)
+	TaskStateEnqueued   = "ENQUEUED"   // Task waiting in queue (can timeout after TaskTimeout)
 	TaskStateProcessing = "PROCESSING" // Worker actively working on task
 	TaskStateSuccess    = "SUCCESS"    // Task completed successfully
 	TaskStateFailed     = "FAILED"     // Fatal error(Can not be retried/recovered), like wrong access_token, no more disk space, etc. no user stop call needed
-	TaskStateTimeout    = "TIMEOUT"    // Task aged out while PENDING (business staleness). no user stop call needed
+	TaskStateTimeout    = "TIMEOUT"    // Task aged out while ENQUEUED (business staleness). no user stop call needed
 
 	// Business timeout settings
 	TaskTimeout = 30 * time.Second // Max time from creation to start processing (business staleness)
@@ -37,7 +37,7 @@ type Task struct {
 	Payload     map[string]interface{} `json:"payload"`
 	State       string                 `json:"state"`
 	CreatedAt   time.Time              `json:"created_at"`
-	PendingAt   *time.Time             `json:"pending_at,omitempty"` // When task was last set to PENDING (for timeout calculation)
+	EnqueuedAt  *time.Time             `json:"enqueued_at,omitempty"` // When task was last set to ENQUEUED (for timeout calculation)
 	ProcessedAt *time.Time             `json:"processed_at,omitempty"`
 	CompletedAt *time.Time             `json:"completed_at,omitempty"`
 	Error       string                 `json:"error,omitempty"`
@@ -154,15 +154,15 @@ func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, taskType, action,
 	taskID := rq.generateTaskID(taskType, channel, requestID)
 	now := time.Now()
 	task := &Task{
-		ID:        taskID,
-		Type:      taskType,
-		Action:    action,
-		Channel:   channel,
-		RequestID: requestID,
-		Payload:   payload,
-		State:     TaskStatePending,
-		CreatedAt: now,
-		PendingAt: &now, // Set initial PENDING timestamp
+		ID:         taskID,
+		Type:       taskType,
+		Action:     action,
+		Channel:    channel,
+		RequestID:  requestID,
+		Payload:    payload,
+		State:      TaskStateEnqueued,
+		CreatedAt:  now,
+		EnqueuedAt: &now, // Set initial ENQUEUED timestamp
 	}
 
 	taskData, err := json.Marshal(task)
@@ -595,15 +595,23 @@ func (rq *RedisQueue) checkAndRecoverTask(ctx context.Context, taskID, processin
 		return fmt.Errorf("failed to unmarshal task: %v", err)
 	}
 
+	// Only recover PROCESSING or ENQUEUED tasks, not completed ones
+	if task.State == TaskStateSuccess || task.State == TaskStateFailed || task.State == TaskStateTimeout {
+		// Task is already completed, just remove from processing queue
+		rq.client.LRem(ctx, processingQueue, 1, taskID)
+		log.Printf("Skipped recovery of completed task %s (state: %s)", taskID, task.State)
+		return nil
+	}
+
 	// Increment retry count and reset state
 	task.RetryCount++
-	task.State = TaskStatePending
+	task.State = TaskStateEnqueued
 	task.WorkerID = 0 // Reset worker ID to 0
 	task.LeaseExpiry = nil
 	task.ProcessedAt = nil
-	// Reset PENDING timestamp for fresh timeout window
+	// Reset ENQUEUED timestamp for fresh timeout window
 	now := time.Now()
-	task.PendingAt = &now
+	task.EnqueuedAt = &now
 
 	// Move back to original queue
 	originalQueue := rq.buildQueueKey(task.Type, task.Channel)
@@ -631,9 +639,9 @@ func (rq *RedisQueue) checkAndRecoverTask(ctx context.Context, taskID, processin
 	return nil
 }
 
-// CleanupAgedTasks marks PENDING tasks that have exceeded TaskTimeout as TIMEOUT
+// CleanupAgedTasks marks ENQUEUED tasks that have exceeded TaskTimeout as TIMEOUT
 func (rq *RedisQueue) CleanupAgedTasks(ctx context.Context) error {
-	// Find all main queues (not processing queues - only check PENDING tasks)
+	// Find all main queues (not processing queues - only check ENQUEUED tasks)
 	queuePattern := "egress:*:channel:*"
 	queues, err := rq.client.Keys(ctx, queuePattern).Result()
 	if err != nil {
@@ -649,7 +657,7 @@ func (rq *RedisQueue) CleanupAgedTasks(ctx context.Context) error {
 		}
 
 		for _, taskID := range taskIDs {
-			if err := rq.checkAndTimeoutPendingTask(ctx, taskID, queue); err != nil {
+			if err := rq.checkAndTimeoutEnqueuedTask(ctx, taskID, queue); err != nil {
 				log.Printf("Failed to check task age %s: %v", taskID, err)
 			}
 		}
@@ -658,11 +666,11 @@ func (rq *RedisQueue) CleanupAgedTasks(ctx context.Context) error {
 	return nil
 }
 
-// checkAndTimeoutPendingTask atomically checks if a PENDING task has exceeded TaskTimeout and marks it as TIMEOUT
-func (rq *RedisQueue) checkAndTimeoutPendingTask(ctx context.Context, taskID, queueName string) error {
+// checkAndTimeoutEnqueuedTask atomically checks if a ENQUEUED task has exceeded TaskTimeout and marks it as TIMEOUT
+func (rq *RedisQueue) checkAndTimeoutEnqueuedTask(ctx context.Context, taskID, queueName string) error {
 	taskKey := rq.buildTaskKey(taskID)
 
-	// Atomic operation: check if task is still in queue AND still PENDING, then timeout
+	// Atomic operation: check if task is still in queue AND still ENQUEUED, then timeout
 	// This prevents race condition where worker picks up task while we're checking timeout
 	return rq.client.Watch(ctx, func(tx *redis.Tx) error {
 		// Get task data
@@ -681,21 +689,21 @@ func (rq *RedisQueue) checkAndTimeoutPendingTask(ctx context.Context, taskID, qu
 			return fmt.Errorf("failed to unmarshal task: %v", err)
 		}
 
-		// Only timeout PENDING tasks (not PROCESSING, SUCCESS, FAILED, or already TIMEOUT)
-		if task.State != TaskStatePending {
+		// Only timeout ENQUEUED tasks (not PROCESSING, SUCCESS, FAILED, or already TIMEOUT)
+		if task.State != TaskStateEnqueued {
 			return nil
 		}
 
-		// Check if PENDING task has exceeded business timeout (30s since last PENDING)
-		var pendingTime time.Time
-		if task.PendingAt != nil {
-			pendingTime = *task.PendingAt
+		// Check if ENQUEUED task has exceeded business timeout (30s since last ENQUEUED)
+		var enqueuedTime time.Time
+		if task.EnqueuedAt != nil {
+			enqueuedTime = *task.EnqueuedAt
 		} else {
-			// Fallback for old tasks without PendingAt
-			pendingTime = task.CreatedAt
+			// Fallback for old tasks without EnqueuedAt
+			enqueuedTime = task.CreatedAt
 		}
 
-		taskAge := time.Since(pendingTime)
+		taskAge := time.Since(enqueuedTime)
 		if taskAge <= TaskTimeout {
 			return nil // Task is still fresh
 		}
@@ -713,7 +721,7 @@ func (rq *RedisQueue) checkAndTimeoutPendingTask(ctx context.Context, taskID, qu
 
 		// Mark task as TIMEOUT and remove from queue atomically
 		task.State = TaskStateTimeout
-		task.Error = fmt.Sprintf("Task timeout: PENDING task exceeded %v limit (age: %v)", TaskTimeout, taskAge)
+		task.Error = fmt.Sprintf("Task timeout: ENQUEUED task exceeded %v limit (age: %v)", TaskTimeout, taskAge)
 
 		updatedData, err := json.Marshal(task)
 		if err != nil {
@@ -729,7 +737,7 @@ func (rq *RedisQueue) checkAndTimeoutPendingTask(ctx context.Context, taskID, qu
 			return fmt.Errorf("failed to timeout task: %v", err)
 		}
 
-		log.Printf("Marked PENDING task %s as TIMEOUT (age: %v, limit: %v)", taskID, taskAge, TaskTimeout)
+		log.Printf("Marked ENQUEUED task %s as TIMEOUT (age: %v, limit: %v)", taskID, taskAge, TaskTimeout)
 		return nil
 	}, taskKey, queueName)
 }
@@ -765,4 +773,22 @@ func (rq *RedisQueue) Client() *redis.Client {
 
 func (rq *RedisQueue) TTL() time.Duration {
 	return rq.ttl
+}
+
+// DeleteTask completely removes a task from Redis (task data and lease)
+func (rq *RedisQueue) DeleteTask(ctx context.Context, taskID string) error {
+	taskKey := rq.buildTaskKey(taskID)
+	leaseKey := rq.buildLeaseKey(taskID)
+
+	pipe := rq.client.Pipeline()
+	pipe.Del(ctx, taskKey)  // Remove task data
+	pipe.Del(ctx, leaseKey) // Remove lease data
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to delete task %s: %v", taskID, err)
+	}
+
+	log.Printf("Deleted task %s from Redis completely", taskID)
+	return nil
 }

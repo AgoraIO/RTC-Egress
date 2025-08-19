@@ -63,7 +63,7 @@ class TaskPipe {
                                const std::string& error = "", const std::string& message = "");
 
     // Helper to check if any tasks of a specific type are active
-    bool hasActiveTasksOfType(const std::string& task_type) const;
+    bool hasActiveTasksOfType(const std::string& task_type, const bool withLock = true) const;
 
     // SDK error handler - called when unrecoverable SDK errors occur
     void handleSdkError(const std::string& errorType, const std::string& errorMessage);
