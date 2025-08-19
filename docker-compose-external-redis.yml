@@ -1,0 +1,53 @@
+services:
+  ag_egress:
+    image: ag_egress:debug
+    container_name: ag_egress_server
+    ports:
+      - "8080:8080"    # API port
+      - "8182:8182"    # Health check port
+      - "3000:3000"    # Web interface port
+    volumes:
+      # Mount your local config file
+      - ./config/egress_config.yaml:/opt/ag_egress/config/egress_config.yaml:ro
+      # Mount directories for recordings and snapshots
+      - ./recordings:/recordings
+      - ./snapshots:/snapshots
+      - ./logs:/var/log/ag_egress
+    environment:
+      # External Redis Configuration
+      - REDIS_ADDR=192.168.30.48:7379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-0}
+      
+      # Agora Configuration
+      - APP_ID=${APP_ID:-}
+      - ACCESS_TOKEN=${ACCESS_TOKEN:-}
+      - CHANNEL_NAME=${CHANNEL_NAME:-}
+      # ACCESS_TOKEN and CHANNEL_NAME are optional for managed mode (passed via IPC)
+      # For standalone mode, they can be set via env vars to override config file
+      
+      # Server Configuration  
+      - GIN_MODE=debug
+      - API_PORT=8080
+      - HEALTH_PORT=8182
+      - TEMPLATE_PORT=3000
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    
+    # Use the default command from Dockerfile (already configured properly)
+    # This is equivalent to: ./bin/egress --config /opt/ag_egress/config/egress_config.yaml
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8182/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  default:
+    name: ag_egress_external_network
+    driver: bridge

@@ -35,7 +35,7 @@ if ! command -v goimports &> /dev/null; then
 fi
 
 # Directories to format
-TARGET_DIRS=("src" "src/include" "server")
+TARGET_DIRS=("src" "src/include" "cmd" "pkg" "tests")
 # Directories to exclude from formatting (relative to project root)
 EXCLUDED_DIRS=("src/common" "src/nlohmann")
 

@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/agora-build/rtc-egress/server/queue"
+	"github.com/agora-build/rtc-egress/pkg/queue"
 )
 
 // UDSMessage defines the communication protocol between Go (egress) and C++ (eg_worker).

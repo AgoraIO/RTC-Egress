@@ -1,14 +1,15 @@
 #include <gtest/gtest.h>
-#include <vector>
-#include <thread>
-#include <chrono>
-#include <atomic>
-#include <mutex>
+
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
-#include <fstream>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 // Stub out Agora SDK dependencies for testing
 namespace agora {
@@ -37,7 +38,7 @@ struct SimpleAudioFrame {
 
 // Mock implementations to test the core logic
 class TestableRecordingSink {
-public:
+   public:
     struct Config {
         std::string outputDir = "./recordings";
         uint32_t videoWidth = 1280;
@@ -48,10 +49,10 @@ public:
     };
 
     TestableRecordingSink() = default;
-    
+
     bool initialize(const Config& config) {
         config_ = config;
-        
+
         // Create output directory
         try {
             std::filesystem::create_directories(config_.outputDir);
@@ -78,20 +79,20 @@ public:
                       int32_t yStride, int32_t uStride, int32_t vStride, uint32_t width,
                       uint32_t height, uint64_t timestamp, const std::string& userId = "") {
         if (!isRecording_) return;
-        
+
         std::lock_guard<std::mutex> lock(mutex_);
         videoFrameCount_++;
         lastVideoTimestamp_ = timestamp;
         lastVideoUser_ = userId;
-        
+
         // Simulate frame processing
-        processedFrameSize_ = width * height * 3 / 2; // YUV420 size
+        processedFrameSize_ = width * height * 3 / 2;  // YUV420 size
     }
 
     void onAudioFrame(const uint8_t* audioBuffer, int samples, int sampleRate, int channels,
                       uint64_t timestamp, const std::string& userId = "") {
         if (!isRecording_) return;
-        
+
         std::lock_guard<std::mutex> lock(mutex_);
         audioFrameCount_++;
         lastAudioTimestamp_ = timestamp;
@@ -124,7 +125,7 @@ public:
         return processedFrameSize_;
     }
 
-private:
+   private:
     Config config_;
     std::atomic<bool> isRecording_{false};
     mutable std::mutex mutex_;
@@ -138,7 +139,7 @@ private:
 };
 
 class TestableSnapshotSink {
-public:
+   public:
     struct Config {
         std::string outputDir = "./snapshots";
         int width = 1280;
@@ -151,7 +152,7 @@ public:
 
     bool initialize(const Config& config) {
         config_ = config;
-        
+
         try {
             std::filesystem::create_directories(config_.outputDir);
             return true;
@@ -162,29 +163,27 @@ public:
 
     bool start() {
         if (isCapturing_) return false;
-        
+
         isCapturing_ = true;
         stopRequested_ = false;
-        
+
         // Start capture thread
-        captureThread_ = std::make_unique<std::thread>([this]() {
-            captureThreadFunc();
-        });
-        
+        captureThread_ = std::make_unique<std::thread>([this]() { captureThreadFunc(); });
+
         return true;
     }
 
     void stop() {
         if (!isCapturing_) return;
-        
+
         stopRequested_ = true;
         cv_.notify_all();
-        
+
         if (captureThread_ && captureThread_->joinable()) {
             captureThread_->join();
         }
         captureThread_.reset();
-        
+
         isCapturing_ = false;
     }
 
@@ -196,16 +195,16 @@ public:
                       int32_t yStride, int32_t uStride, int32_t vStride, uint32_t width,
                       uint32_t height, uint64_t timestamp, const std::string& userId = "") {
         if (!isCapturing_) return;
-        
+
         std::lock_guard<std::mutex> lock(frameMutex_);
-        
+
         // Store current frame
         currentFrame_.timestamp = timestamp;
         currentFrame_.userId = userId;
         currentFrame_.width = width;
         currentFrame_.height = height;
         currentFrame_.valid = true;
-        
+
         frameCount_++;
         cv_.notify_one();
     }
@@ -220,7 +219,7 @@ public:
         return frameCount_;
     }
 
-private:
+   private:
     struct FrameData {
         uint64_t timestamp = 0;
         std::string userId;
@@ -231,31 +230,31 @@ private:
 
     void captureThreadFunc() {
         auto lastSnapshotTime = std::chrono::steady_clock::now();
-        
+
         while (!stopRequested_) {
             std::unique_lock<std::mutex> lock(frameMutex_);
-            
+
             // Wait for frame or timeout
-            cv_.wait_for(lock, std::chrono::milliseconds(100), [this]() {
-                return stopRequested_ || currentFrame_.valid;
-            });
-            
+            cv_.wait_for(lock, std::chrono::milliseconds(100),
+                         [this]() { return stopRequested_ || currentFrame_.valid; });
+
             if (stopRequested_) break;
-            
+
             auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - lastSnapshotTime).count();
-            
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - lastSnapshotTime)
+                    .count();
+
             if (currentFrame_.valid && elapsed >= config_.intervalInMs) {
                 // Simulate saving snapshot
-                std::string filename = config_.outputDir + "/snapshot_" + 
-                                     std::to_string(snapshotCount_) + ".jpg";
-                
+                std::string filename =
+                    config_.outputDir + "/snapshot_" + std::to_string(snapshotCount_) + ".jpg";
+
                 // Create a dummy file to simulate snapshot
                 std::ofstream file(filename);
                 file << "Dummy JPEG data for testing - timestamp: " << currentFrame_.timestamp;
                 file.close();
-                
+
                 snapshotCount_++;
                 lastSnapshotTime = now;
                 currentFrame_.valid = false;
@@ -267,7 +266,7 @@ private:
     std::atomic<bool> isCapturing_{false};
     std::atomic<bool> stopRequested_{false};
     std::unique_ptr<std::thread> captureThread_;
-    
+
     mutable std::mutex frameMutex_;
     std::condition_variable cv_;
     FrameData currentFrame_;
@@ -276,7 +275,7 @@ private:
 };
 
 class TestableVideoCompositor {
-public:
+   public:
     struct Config {
         uint32_t outputWidth = 1280;
         uint32_t outputHeight = 720;
@@ -294,22 +293,22 @@ public:
                       int32_t yStride, int32_t uStride, int32_t vStride, uint32_t width,
                       uint32_t height, uint64_t timestamp, const std::string& userId) {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+
         UserFrame frame;
         frame.userId = userId;
         frame.timestamp = timestamp;
         frame.width = width;
         frame.height = height;
         frame.receivedTime = std::chrono::steady_clock::now();
-        
+
         userFrames_[userId] = frame;
         frameCount_++;
-        
+
         // Simulate composition when we have multiple users
         if (userFrames_.size() > 1) {
             compositeFrameCount_++;
         }
-        
+
         return true;
     }
 
@@ -343,7 +342,7 @@ public:
         return {4, 4};
     }
 
-private:
+   private:
     struct UserFrame {
         std::string userId;
         uint64_t timestamp;
@@ -359,12 +358,12 @@ private:
     int compositeFrameCount_ = 0;
 };
 
-} // namespace rtc
-} // namespace agora
+}  // namespace rtc
+}  // namespace agora
 
 // Frame Generator for testing
 class TestFrameGenerator {
-public:
+   public:
     struct VideoFrameData {
         std::vector<uint8_t> yBuffer;
         std::vector<uint8_t> uBuffer;
@@ -376,8 +375,8 @@ public:
     };
 
     VideoFrameData generateVideoFrame(const std::string& userId, uint64_t timestamp,
-                                     uint32_t width = 640, uint32_t height = 480,
-                                     uint8_t colorPattern = 128) {
+                                      uint32_t width = 640, uint32_t height = 480,
+                                      uint8_t colorPattern = 128) {
         VideoFrameData frame;
         frame.width = width;
         frame.height = height;
@@ -394,10 +393,10 @@ public:
         return frame;
     }
 
-    std::vector<uint8_t> generateAudioFrame(int samples = 960, int sampleRate = 48000, 
-                                           int channels = 2) {
+    std::vector<uint8_t> generateAudioFrame(int samples = 960, int sampleRate = 48000,
+                                            int channels = 2) {
         std::vector<int16_t> audioSamples(samples * channels);
-        
+
         for (int i = 0; i < samples; i++) {
             double time = static_cast<double>(i) / sampleRate;
             double sampleValue = sin(2.0 * M_PI * 440.0 * time) * 0.3;
@@ -408,17 +407,18 @@ public:
 
         std::vector<uint8_t> audioBuffer(samples * channels * sizeof(int16_t));
         memcpy(audioBuffer.data(), audioSamples.data(), audioBuffer.size());
-        
+
         return audioBuffer;
     }
 };
 
 class SimpleRealComponentTest : public ::testing::Test {
-protected:
+   protected:
     void SetUp() override {
         generator_ = std::make_unique<TestFrameGenerator>();
-        
-        testDir_ = "/tmp/egress_simple_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+
+        testDir_ = "/tmp/egress_simple_test_" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         std::filesystem::create_directories(testDir_);
         std::filesystem::create_directories(testDir_ + "/snapshots");
         std::filesystem::create_directories(testDir_ + "/recordings");
@@ -435,7 +435,7 @@ protected:
 // Test: Simple RecordingSink functionality
 TEST_F(SimpleRealComponentTest, RecordingSinkBasicFunctionality) {
     using namespace agora::rtc;
-    
+
     TestableRecordingSink::Config config;
     config.outputDir = testDir_ + "/recordings";
     config.videoWidth = 640;
@@ -449,28 +449,19 @@ TEST_F(SimpleRealComponentTest, RecordingSinkBasicFunctionality) {
     // Send video frames
     for (int i = 0; i < 10; i++) {
         auto frameData = generator_->generateVideoFrame("user1", i * 33, 640, 480);
-        
-        recordingSink.onVideoFrame(
-            frameData.yBuffer.data(),
-            frameData.uBuffer.data(), 
-            frameData.vBuffer.data(),
-            640, 320, 320,
-            640, 480,
-            frameData.timestamp,
-            frameData.userId
-        );
+
+        recordingSink.onVideoFrame(frameData.yBuffer.data(), frameData.uBuffer.data(),
+                                   frameData.vBuffer.data(), 640, 320, 320, 640, 480,
+                                   frameData.timestamp, frameData.userId);
     }
 
     // Send audio frames
     for (int i = 0; i < 15; i++) {
         auto audioData = generator_->generateAudioFrame(960, 48000, 2);
-        
-        recordingSink.onAudioFrame(
-            audioData.data(),
-            960, 48000, 2,
-            i * 20, // 20ms intervals
-            "user1"
-        );
+
+        recordingSink.onAudioFrame(audioData.data(), 960, 48000, 2,
+                                   i * 20,  // 20ms intervals
+                                   "user1");
     }
 
     recordingSink.stop();
@@ -486,10 +477,10 @@ TEST_F(SimpleRealComponentTest, RecordingSinkBasicFunctionality) {
 // Test: Simple SnapshotSink functionality
 TEST_F(SimpleRealComponentTest, SnapshotSinkBasicFunctionality) {
     using namespace agora::rtc;
-    
+
     TestableSnapshotSink::Config config;
     config.outputDir = testDir_ + "/snapshots";
-    config.intervalInMs = 100; // Fast snapshots for testing
+    config.intervalInMs = 100;  // Fast snapshots for testing
     config.width = 640;
     config.height = 480;
 
@@ -501,18 +492,12 @@ TEST_F(SimpleRealComponentTest, SnapshotSinkBasicFunctionality) {
     // Send frames
     for (int i = 0; i < 5; i++) {
         auto frameData = generator_->generateVideoFrame("user1", i * 33, 640, 480);
-        
-        snapshotSink.onVideoFrame(
-            frameData.yBuffer.data(),
-            frameData.uBuffer.data(), 
-            frameData.vBuffer.data(),
-            640, 320, 320,
-            640, 480,
-            frameData.timestamp,
-            frameData.userId
-        );
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(120)); // Allow snapshots
+
+        snapshotSink.onVideoFrame(frameData.yBuffer.data(), frameData.uBuffer.data(),
+                                  frameData.vBuffer.data(), 640, 320, 320, 640, 480,
+                                  frameData.timestamp, frameData.userId);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));  // Allow snapshots
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -536,7 +521,7 @@ TEST_F(SimpleRealComponentTest, SnapshotSinkBasicFunctionality) {
 // Test: Simple VideoCompositor functionality
 TEST_F(SimpleRealComponentTest, VideoCompositorBasicFunctionality) {
     using namespace agora::rtc;
-    
+
     TestableVideoCompositor::Config config;
     config.outputWidth = 1280;
     config.outputHeight = 720;
@@ -547,20 +532,14 @@ TEST_F(SimpleRealComponentTest, VideoCompositorBasicFunctionality) {
 
     // Add frames from multiple users
     std::vector<std::string> users = {"alice", "bob", "charlie"};
-    
+
     for (int frameIdx = 0; frameIdx < 5; frameIdx++) {
         for (const auto& userId : users) {
             auto frameData = generator_->generateVideoFrame(userId, frameIdx * 33, 640, 480);
-            
+
             bool success = compositor.addUserFrame(
-                frameData.yBuffer.data(),
-                frameData.uBuffer.data(),
-                frameData.vBuffer.data(),
-                640, 320, 320,
-                640, 480,
-                frameData.timestamp,
-                frameData.userId
-            );
+                frameData.yBuffer.data(), frameData.uBuffer.data(), frameData.vBuffer.data(), 640,
+                320, 320, 640, 480, frameData.timestamp, frameData.userId);
             EXPECT_TRUE(success);
         }
     }
@@ -568,11 +547,11 @@ TEST_F(SimpleRealComponentTest, VideoCompositorBasicFunctionality) {
     // Verify composition
     EXPECT_EQ(compositor.getActiveUserCount(), users.size());
     EXPECT_GT(compositor.getFrameCount(), 0);
-    EXPECT_GT(compositor.getCompositeFrameCount(), 0); // Should have composite frames
+    EXPECT_GT(compositor.getCompositeFrameCount(), 0);  // Should have composite frames
 
     // Test layout calculation
     auto layout = compositor.calculateOptimalLayout(users.size());
-    EXPECT_EQ(layout.first, 2); // 3 users -> 2x2 layout (since we round up)
+    EXPECT_EQ(layout.first, 2);  // 3 users -> 2x2 layout (since we round up)
     EXPECT_EQ(layout.second, 2);
 
     // Test user removal
@@ -583,43 +562,41 @@ TEST_F(SimpleRealComponentTest, VideoCompositorBasicFunctionality) {
 // Test: Concurrent operations
 TEST_F(SimpleRealComponentTest, ConcurrentOperations) {
     using namespace agora::rtc;
-    
+
     // Setup both recording and snapshot
     TestableRecordingSink::Config recConfig;
     recConfig.outputDir = testDir_ + "/recordings";
-    
+
     TestableSnapshotSink::Config snapConfig;
     snapConfig.outputDir = testDir_ + "/snapshots";
     snapConfig.intervalInMs = 200;
 
     TestableRecordingSink recordingSink;
     TestableSnapshotSink snapshotSink;
-    
+
     ASSERT_TRUE(recordingSink.initialize(recConfig));
     ASSERT_TRUE(snapshotSink.initialize(snapConfig));
-    
+
     ASSERT_TRUE(recordingSink.start());
     ASSERT_TRUE(snapshotSink.start());
 
     // Send frames to both simultaneously
     for (int i = 0; i < 10; i++) {
         auto frameData = generator_->generateVideoFrame("user1", i * 50, 640, 480);
-        
-        recordingSink.onVideoFrame(
-            frameData.yBuffer.data(), frameData.uBuffer.data(), frameData.vBuffer.data(),
-            640, 320, 320, 640, 480, frameData.timestamp, frameData.userId
-        );
-        
-        snapshotSink.onVideoFrame(
-            frameData.yBuffer.data(), frameData.uBuffer.data(), frameData.vBuffer.data(),
-            640, 320, 320, 640, 480, frameData.timestamp, frameData.userId
-        );
-        
+
+        recordingSink.onVideoFrame(frameData.yBuffer.data(), frameData.uBuffer.data(),
+                                   frameData.vBuffer.data(), 640, 320, 320, 640, 480,
+                                   frameData.timestamp, frameData.userId);
+
+        snapshotSink.onVideoFrame(frameData.yBuffer.data(), frameData.uBuffer.data(),
+                                  frameData.vBuffer.data(), 640, 320, 320, 640, 480,
+                                  frameData.timestamp, frameData.userId);
+
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    
+
     recordingSink.stop();
     snapshotSink.stop();
 
@@ -631,17 +608,17 @@ TEST_F(SimpleRealComponentTest, ConcurrentOperations) {
 // Test: Error handling
 TEST_F(SimpleRealComponentTest, ErrorHandling) {
     using namespace agora::rtc;
-    
+
     // Test invalid directory
     TestableRecordingSink::Config invalidConfig;
     invalidConfig.outputDir = "/invalid/nonexistent/path/that/cannot/be/created";
-    
+
     TestableRecordingSink recordingSink;
-    EXPECT_FALSE(recordingSink.initialize(invalidConfig)); // Should fail
-    
+    EXPECT_FALSE(recordingSink.initialize(invalidConfig));  // Should fail
+
     // Test valid config
     TestableRecordingSink::Config validConfig;
     validConfig.outputDir = testDir_ + "/valid";
-    
-    EXPECT_TRUE(recordingSink.initialize(validConfig)); // Should succeed
+
+    EXPECT_TRUE(recordingSink.initialize(validConfig));  // Should succeed
 }

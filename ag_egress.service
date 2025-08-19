@@ -1,23 +1,23 @@
 [Unit]
-Description=Agora RTC Egress Recorder
+Description=Agora RTC Egress Server
 After=network.target
 
 [Service]
 Type=simple
 User=egress
 Group=egress
-WorkingDirectory=/opt/egress-recorder
+WorkingDirectory=/opt/ag_egress
 
 # Environment variables
 Environment=GIN_MODE=release
 
 # Main command to run
-ExecStart=/opt/egress-recorder/bin/egress-server --config /etc/egress/config/egress_config.yaml
+ExecStart=/opt/ag_egress/bin/egress --config /etc/egress/config/egress_config.yaml
 
 # Make sure log directory exists and is writable
-ExecStartPre=/bin/mkdir -p /var/log/egress
-ExecStartPre=/bin/chown -R egress:egress /var/log/egress
-ExecStartPre=/bin/chmod 755 /var/log/egress
+ExecStartPre=/bin/mkdir -p /var/log/ag_egress
+ExecStartPre=/bin/chown -R egress:egress /var/log/ag_egress
+ExecStartPre=/bin/chmod 755 /var/log/ag_egress
 
 # Ensure recordings directory exists and is writable
 ExecStartPre=/bin/mkdir -p /recordings
@@ -29,7 +29,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/recordings /var/log/egress
+ReadWritePaths=/recordings /var/log/ag_egress
 
 # Restart settings
 Restart=on-failure
@@ -38,7 +38,7 @@ RestartSec=5s
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=egress-recorder
+SyslogIdentifier=ag_egress
 
 [Install]
 WantedBy=multi-user.target

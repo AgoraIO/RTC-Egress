@@ -1,0 +1,125 @@
+# Debug Dockerfile - Include source code and debugging tools
+FROM ubuntu:24.04 AS builder
+
+# Set timezone and avoid interactive prompts during build
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+ENV AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    curl \
+    pkg-config \
+    git \
+    ca-certificates \
+    libssl-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libswscale-dev \
+    libswresample-dev \
+    libyaml-cpp-dev \
+    golang-go \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create build directory
+WORKDIR /build
+
+# Copy all source code for debugging
+COPY . .
+
+# Build the application
+RUN ./build.sh docker
+
+# Debug runtime stage
+FROM ubuntu:24.04
+
+# Set timezone and avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+ENV GIN_MODE=debug
+
+# Install runtime dependencies + debugging tools
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    ffmpeg \
+    libavcodec60 \
+    libavformat60 \
+    libavutil58 \
+    libswscale7 \
+    libswresample4 \
+    libyaml-cpp0.8 \
+    # Debugging tools
+    gdb \
+    strace \
+    ltrace \
+    valgrind \
+    htop \
+    vim \
+    nano \
+    net-tools \
+    procps \
+    bash-completion \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create egress user and group
+RUN groupadd -r egress && useradd -r -g egress -d /opt/ag_egress -s /bin/bash egress
+
+# Create necessary directories with proper permissions
+RUN mkdir -p /opt/ag_egress \
+    /opt/ag_egress/bin \
+    /opt/ag_egress/config \
+    /opt/ag_egress/src \
+    /opt/ag_egress/cmd \
+    /opt/ag_egress/pkg \
+    /var/log/ag_egress \
+    /recordings \
+    /snapshots \
+    /tmp/egress \
+    && chown -R egress:egress /opt/ag_egress /var/log/ag_egress /recordings /snapshots /tmp/egress
+
+# Set working directory
+WORKDIR /opt/ag_egress
+
+# Copy binaries, libraries, configs AND source code for debugging
+COPY --from=builder --chown=egress:egress /build/bin ./bin
+COPY --from=builder --chown=egress:egress /build/agora_sdk ./agora_sdk
+COPY --from=builder --chown=egress:egress /build/config ./config
+COPY --from=builder --chown=egress:egress /build/src ./src
+COPY --from=builder --chown=egress:egress /build/cmd ./cmd
+COPY --from=builder --chown=egress:egress /build/pkg ./pkg
+COPY --from=builder --chown=egress:egress /build/CMakeLists.txt ./
+COPY --from=builder --chown=egress:egress /build/build.sh ./
+COPY --from=builder --chown=egress:egress /build/go.mod ./
+COPY --from=builder --chown=egress:egress /build/go.sum ./
+
+# Copy shared libraries to system library path
+COPY --from=builder /build/bin/*.so /usr/local/lib/
+RUN ldconfig
+
+# Copy entrypoint script
+COPY --chown=egress:egress docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Switch to egress user
+USER egress
+
+# Create volume mount points for configuration and data
+VOLUME ["/opt/ag_egress/config", "/recordings", "/snapshots", "/var/log/ag_egress"]
+
+# Expose ports
+EXPOSE 8080 8182 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8182/health || exit 1
+
+# Use entrypoint script
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# Default command
+CMD ["./bin/egress", "--config", "/opt/ag_egress/config/egress_config.yaml"]

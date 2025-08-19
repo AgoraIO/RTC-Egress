@@ -18,7 +18,7 @@ download_agora_sdk() {
     local url=$1
     if [ -z "$url" ]; then
         echo -e "${RED}Error: No Agora SDK URL provided.${NC}"
-        echo -e "Usage: $0 [full|build|cpp|go|deps|clean] [AGORA_SDK_URL]"
+        echo -e "Usage: $0 [full|docker|build|cpp|go|deps|clean] [AGORA_SDK_URL]"
         echo -e "Example: $0 full https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz"
         exit 1
     fi
@@ -119,10 +119,30 @@ build_cpp() {
 # Function to build the Go server
 build_go() {
     echo -e "${GREEN}Building Go server...${NC}"
-    cd server
+    
+    if [ ! -d "cmd/egress" ]; then
+        echo -e "${RED}Error: cmd/egress directory not found. Current directory: $(pwd)${NC}"
+        echo -e "${RED}Contents: $(ls -la)${NC}"
+        exit 1
+    fi
+    
+    if [ ! -f "go.mod" ]; then
+        echo -e "${RED}Error: go.mod not found in project root${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}Tidying Go modules...${NC}"
     go mod tidy
-    go build -o ../bin/egress
-    cd ../
+    
+    echo -e "${GREEN}Building egress service...${NC}"
+    go build -o bin/egress ./cmd/egress
+    
+    if [ ! -f "bin/egress" ]; then
+        echo -e "${RED}Build failed - egress binary not found${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}Go build completed successfully${NC}"
 }
 
 # Function to create necessary directories
@@ -142,6 +162,13 @@ create_dirs() {
     echo -e "${YELLOW}For production, you may want to use system directories like /var/log/egress and /recordings${NC}"
 }
 
+create_dirs_docker() {
+    echo -e "${GREEN}Creating necessary directories for Docker...${NC}"
+    mkdir -p bin
+    # For Docker, don't create logs/recordings/snapshots here as they'll be volumes
+    # Just ensure bin directory exists for build output
+}
+
 # Function to install dependencies
 install_dependencies() {
     echo -e "${GREEN}Installing dependencies...${NC}"
@@ -152,6 +179,7 @@ install_dependencies() {
         sudo apt-get install -y \
             build-essential \
             cmake \
+            libssl-dev \
             libavcodec-dev \
             libavformat-dev \
             libavutil-dev \
@@ -165,6 +193,7 @@ install_dependencies() {
         sudo yum groupinstall -y "Development Tools"
         sudo yum install -y \
             cmake \
+            openssl-devel \
             ffmpeg-devel \
             yaml-cpp-devel \
             golang
@@ -193,7 +222,10 @@ if [ -z "$AGORA_SDK_URL" ] && [ "$1" != "clean" ] && [ "$1" != "go" ]; then
     echo -e "2. Or pass as second argument: $0 all YOUR_URL"
 fi
 
-./prettifier.sh
+# Only run prettifier if not in Docker environment
+if [ "$1" != "docker" ]; then
+    ./prettifier.sh
+fi
 
 case "$1" in
     full)
@@ -203,6 +235,13 @@ case "$1" in
         build_go
         ;;
     build)
+        build_cpp
+        build_go
+        ;;
+    docker)
+        # Docker build without formatting (dependencies already installed by Dockerfile)
+        echo -e "${GREEN}Building for Docker environment...${NC}"
+        create_dirs_docker
         build_cpp
         build_go
         ;;

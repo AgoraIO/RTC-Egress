@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agora-build/rtc-egress/server/health"
-	"github.com/agora-build/rtc-egress/server/queue"
-	"github.com/agora-build/rtc-egress/server/utils"
+	"github.com/agora-build/rtc-egress/pkg/health"
+	"github.com/agora-build/rtc-egress/pkg/queue"
+	"github.com/agora-build/rtc-egress/pkg/utils"
 	"github.com/gin-gonic/gin"
 )
 
