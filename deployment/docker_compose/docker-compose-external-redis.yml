@@ -1,14 +1,15 @@
 services:
   ag_egress:
-    image: ag_egress:debug
-    container_name: ag_egress_server
+    # Production image built from Dockerfile.prod
+    image: ag_egress:latest
+    container_name: agora_egress_server
     ports:
       - "8080:8080"    # API port
       - "8182:8182"    # Health check port
       - "3000:3000"    # Web interface port
     volumes:
       # Mount your local config file
-      - ./config/egress_config.yaml:/opt/ag_egress/config/egress_config.yaml:ro
+      - ../../config/egress_config.yaml:/opt/ag_egress/config/egress_config.yaml:ro
       # Mount directories for recordings and snapshots
       - ./recordings:/recordings
       - ./snapshots:/snapshots
@@ -30,7 +31,7 @@ services:
       - GIN_MODE=debug
       - API_PORT=8080
       - HEALTH_PORT=8182
-      - TEMPLATE_PORT=3000
+      - CANVAS_TEMPLATE_PORT=3000
       
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-info}
@@ -50,4 +51,4 @@ services:
 networks:
   default:
     name: ag_egress_external_network
-    driver: bridge
+    external: true
