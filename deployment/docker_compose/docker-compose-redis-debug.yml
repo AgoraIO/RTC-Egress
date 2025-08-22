@@ -1,0 +1,98 @@
+services:
+  ag_egress:
+    # Development image built from Dockerfile.debug
+    image: ag_egress:debug
+    container_name: agora_egress_server
+    depends_on:
+      - redis
+    ports:
+      - "8080:8080"    # API port
+      - "8182:8182"    # Health check port
+      - "3000:3000"    # Web interface port
+    volumes:
+      # Mount your local config file
+      - ../../config/egress_config.yaml:/opt/ag_egress/config/egress_config.yaml:ro
+      # Mount directories for recordings and snapshots
+      - ../../recordings:/recordings
+      - ../../snapshots:/snapshots
+      - ../../logs:/var/log/ag_egress
+    environment:
+      # Redis Configuration (internal to this compose stack)
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-0}
+      
+      # Agora Configuration
+      - APP_ID=${APP_ID:-}
+      - ACCESS_TOKEN=${ACCESS_TOKEN:-}
+      - CHANNEL_NAME=${CHANNEL_NAME:-}
+      # ACCESS_TOKEN and CHANNEL_NAME are optional for managed mode (passed via IPC)
+      # For standalone mode, they can be set via env vars to override config file
+      
+      # Server Configuration  
+      - GIN_MODE=debug
+      - API_PORT=8080
+      - HEALTH_PORT=8182
+      - CANVAS_TEMPLATE_PORT=3000
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8182/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    networks:
+      - redis_network
+
+  redis:
+    image: redis:latest
+    container_name: redis-server
+    restart: unless-stopped
+    ports:
+      - "6379:6379"  # Map host port 6379 to container port 6379
+    command: |
+      redis-server 
+      --protected-mode no 
+      --bind 0.0.0.0 
+      --port 6379
+      --io-threads 4
+      --io-threads-do-reads yes
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    volumes:
+      - redis_data:/data
+      - ./logs:/var/log/redis
+    environment:
+      - REDIS_REPLICATION_MODE=master
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    sysctls:
+      - net.core.somaxconn=65535
+    ulimits:
+      memlock: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    networks:
+      - redis_network
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  redis_network:
+    driver: bridge
