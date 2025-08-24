@@ -28,25 +28,35 @@ The system consists of three main components:
 
 ## Quick Start
 
-1. **Clone the repository**
+### Using Pre-built Docker Images (Recommended)
+
+1. **With External Redis:**
    ```bash
-   git clone https://github.com/guohai/agora-rtc-egress.git
-   cd agora-rtc-egress
+   # Set your Redis connection
+   export REDIS_ADDR="your-redis-host:6379"
+   export APP_ID="your-agora-app-id"
+
+   # Download and run
+   curl -O https://raw.githubusercontent.com/AgoraIO/RTC-Egress/main/deployment/docker_compose/docker-compose-external-redis.yml
+   docker compose -f docker-compose-external-redis.yml up -d
    ```
 
-2. **Configure the application**
-   Edit the config file:
+2. **With Built-in Redis (Development):**
    ```bash
+   # Clone the repository for config files
+   git clone https://github.com/AgoraIO/RTC-Egress.git
+   cd RTC-Egress
+
+   # Configure the application
    cp config/egress_config.yaml.example config/egress_config.yaml
-   vim config/egress_config.yaml
+   # Edit config/egress_config.yaml with your Agora credentials
+
+   # Run with built-in Redis
+   cd deployment/docker_compose
+   docker compose -f docker-compose-redis-debug.yml up -d
    ```
 
-3. **Build and run with Docker Compose**
-   ```bash
-   docker-compose up --build -d
-   ```
-
-4. **Access the web interface**
+3. **Access the web interface**
    Open `http://localhost:3000` in your browser
 
 ## Configuration
@@ -162,19 +172,70 @@ GET /health
 
 ## Docker Deployment
 
-### Build the Docker image
+### Using Pre-built Images
+
+The easiest way to deploy is using the pre-built images from GitHub Container Registry:
+
 ```bash
-docker-compose build
+# Using Docker Run
+docker run -d \
+  --name rtc-egress \
+  -p 8080:8080 \
+  -p 8182:8182 \
+  -p 3000:3000 \
+  -v ./config:/opt/rtc_egress/config:ro \
+  -v ./recordings:/recordings \
+  -v ./snapshots:/snapshots \
+  -e REDIS_ADDR="your-redis-host:6379" \
+  -e APP_ID="your-agora-app-id" \
+  ghcr.io/AgoraIO/RTC-Egress:latest
 ```
+
+### Building Locally (Development)
+
+For development or customization:
+
+```bash
+# Build production image
+docker build -f Dockerfile.prod -t ag_rtc_egress:latest .
+
+# Build debug image
+docker build -f Dockerfile.debug -t ag_rtc_egress:debug .
+```
+
+### Available Images
+
+| Image | Purpose | Architecture | Use Case |
+|-------|---------|--------------|----------|
+| `ghcr.io/AgoraIO/RTC-Egress:latest` | Production | linux/amd64 | Production deployments |
+| `ghcr.io/AgoraIO/RTC-Egress:v1.x.x` | Specific version | linux/amd64 | Version-pinned deployments |
+| `ag_rtc_egress:debug` | Local debug | linux/amd64 | Development with debugging tools |
+
+> **Note**: Only x86_64 (amd64) architecture is supported due to Agora SDK limitations.
 
 ### Start the services
 ```bash
-docker-compose up -d
+# With external Redis
+cd deployment/docker_compose
+docker compose -f docker-compose-external-redis.yml up -d
+
+# With built-in Redis (development)
+docker compose -f docker-compose-redis-debug.yml up -d
 ```
 
 ### View logs
 ```bash
-docker-compose logs -f
+docker compose logs -f
+```
+
+### Health Checks
+
+```bash
+# Check if service is healthy
+curl http://localhost:8182/health
+
+# Expected response
+{"status":"ok","version":"1.0.0"}
 ```
 
 ## Monitoring
