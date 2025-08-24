@@ -1,19 +1,19 @@
 services:
-  ag_egress:
+  ag_rtc_egress:
     # Production image built from Dockerfile.prod
-    image: ag_egress:latest
-    container_name: agora_egress_server
+    image: ag_rtc_egress:latest
+    container_name: rtc-egress-service
     ports:
       - "8080:8080"    # API port
       - "8182:8182"    # Health check port
       - "3000:3000"    # Web interface port
     volumes:
       # Mount your local config file
-      - ../../config/egress_config.yaml:/opt/ag_egress/config/egress_config.yaml:ro
+      - ../../config/egress_config.yaml:/opt/rtc_egress/config/egress_config.yaml:ro
       # Mount directories for recordings and snapshots
       - ./recordings:/recordings
       - ./snapshots:/snapshots
-      - ./logs:/var/log/ag_egress
+      - ./logs:/var/log/rtc_egress
     environment:
       # External Redis Configuration
       - REDIS_ADDR=192.168.30.48:7379
@@ -37,7 +37,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
     
     # Use the default command from Dockerfile (already configured properly)
-    # This is equivalent to: ./bin/egress --config /opt/ag_egress/config/egress_config.yaml
+    # This is equivalent to: ./bin/egress --config /opt/rtc_egress/config/egress_config.yaml
     
     restart: unless-stopped
     
@@ -50,5 +50,5 @@ services:
 
 networks:
   default:
-    name: ag_egress_external_network
+    name: ag_rtc_egress_external_network
     external: true

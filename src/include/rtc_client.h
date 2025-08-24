@@ -59,7 +59,6 @@ class RtcClient {
         std::string channel;
         std::string accessToken;
         std::string egressUid = "42";
-        std::string EGRESS_HOME;
         std::string remoteUserId;
         std::string outputVideoFile = "received_video.yuv";
         bool enableVideo = true;
