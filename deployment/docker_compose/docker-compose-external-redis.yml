@@ -1,7 +1,7 @@
 services:
   ag_rtc_egress:
-    # Production image built from Dockerfile.prod
-    image: ag_rtc_egress:latest
+    # Production image from GitHub Container Registry
+    image: ghcr.io/AgoraIO/RTC-Egress:latest
     container_name: rtc-egress-service
     ports:
       - "8080:8080"    # API port
@@ -16,7 +16,7 @@ services:
       - ./logs:/var/log/rtc_egress
     environment:
       # External Redis Configuration
-      - REDIS_ADDR=192.168.30.48:7379
+      - REDIS_ADDR=${REDIS_ADDR:-}
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_DB=${REDIS_DB:-0}
       
