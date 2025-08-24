@@ -64,20 +64,20 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean
 
 # Create egress user and group
-RUN groupadd -r egress && useradd -r -g egress -d /opt/ag_egress -s /bin/bash egress
+RUN groupadd -r egress && useradd -r -g egress -d /opt/rtc_egress -s /bin/bash egress
 
 # Create necessary directories with proper permissions
-RUN mkdir -p /opt/ag_egress \
-    /opt/ag_egress/bin \
-    /opt/ag_egress/config \
-    /var/log/ag_egress \
+RUN mkdir -p /opt/rtc_egress \
+    /opt/rtc_egress/bin \
+    /opt/rtc_egress/config \
+    /var/log/rtc_egress \
     /recordings \
     /snapshots \
     /tmp/egress \
-    && chown -R egress:egress /opt/ag_egress /var/log/ag_egress /recordings /snapshots /tmp/egress
+    && chown -R egress:egress /opt/rtc_egress /var/log/rtc_egress /recordings /snapshots /tmp/egress
 
 # Set working directory
-WORKDIR /opt/ag_egress
+WORKDIR /opt/rtc_egress
 
 # Copy ONLY binaries, libraries and configs (NO source code)
 COPY --from=builder --chown=egress:egress /build/bin ./bin
@@ -95,7 +95,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 USER egress
 
 # Create volume mount points for configuration and data
-VOLUME ["/opt/ag_egress/config", "/recordings", "/snapshots", "/var/log/ag_egress"]
+VOLUME ["/opt/rtc_egress/config", "/recordings", "/snapshots", "/var/log/rtc_egress"]
 
 # Expose ports
 EXPOSE 8080 8182 3000
@@ -108,4 +108,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Default command
-CMD ["./bin/egress", "--config", "/opt/ag_egress/config/egress_config.yaml"]
+CMD ["./bin/egress", "--config", "/opt/rtc_egress/config/egress_config.yaml"]

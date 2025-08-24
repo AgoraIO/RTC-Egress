@@ -1,8 +1,8 @@
 services:
-  ag_egress:
+  ag_rtc_egress:
     # Development image built from Dockerfile.debug
-    image: ag_egress:debug
-    container_name: agora_egress_server
+    image: ag_rtc_egress:debug
+    container_name: rtc-egress-service-debug
     depends_on:
       - redis
     ports:
@@ -11,11 +11,11 @@ services:
       - "3000:3000"    # Web interface port
     volumes:
       # Mount your local config file
-      - ../../config/egress_config.yaml:/opt/ag_egress/config/egress_config.yaml:ro
+      - ../../config/egress_config.yaml:/opt/rtc_egress/config/egress_config.yaml:ro
       # Mount directories for recordings and snapshots
       - ../../recordings:/recordings
       - ../../snapshots:/snapshots
-      - ../../logs:/var/log/ag_egress
+      - ../../logs:/var/log/rtc_egress
     environment:
       # Redis Configuration (internal to this compose stack)
       - REDIS_ADDR=redis:6379

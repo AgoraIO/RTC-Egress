@@ -281,13 +281,7 @@ int main(int argc, char* argv[]) {
             rtc_config.remoteUserId = config["remote_user_id"].as<std::string>();
         }
 
-        // Set output directory
-        if (config["egress_home"]) {
-            rtc_config.EGRESS_HOME = config["egress_home"].as<std::string>();
-        }
-
-        std::string default_output_dir =
-            rtc_config.EGRESS_HOME.empty() ? "." : rtc_config.EGRESS_HOME;
+        // Output directories will be set explicitly in snapshots and recording sections
 
         // Generate unique task ID for this session
         auto now = std::chrono::system_clock::now();
@@ -311,7 +305,7 @@ int main(int argc, char* argv[]) {
             const auto& snapshots_node = config["snapshots"];
 
             // Set output directory
-            std::string output_dir = default_output_dir + "/snapshots";
+            std::string output_dir = "./snapshots";
             if (snapshots_node["output_dir"]) {
                 output_dir = snapshots_node["output_dir"].as<std::string>();
             }
@@ -370,8 +364,7 @@ int main(int argc, char* argv[]) {
             if (recording_node["output_dir"]) {
                 output_dir = recording_node["output_dir"].as<std::string>();
             }
-            recording_config.outputDir =
-                output_dir.empty() ? default_output_dir + "/recordings" : output_dir;
+            recording_config.outputDir = output_dir.empty() ? "./recordings" : output_dir;
             // Create output directory if it doesn't exist
             fs::create_directories(recording_config.outputDir);
 

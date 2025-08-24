@@ -74,9 +74,9 @@ func loadConfig() error {
 	viper.SetConfigName("egress_config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath("./config")
-	viper.AddConfigPath("/etc/ag_egress")
-	viper.AddConfigPath("/opt/ag_egress/config")
-	viper.AddConfigPath("$HOME/.ag_egress")
+	viper.AddConfigPath("/etc/rtc_egress")
+	viper.AddConfigPath("/opt/rtc_egress/config")
+	viper.AddConfigPath("$HOME/.rtc_egress")
 
 	// Enable environment variable overrides
 	viper.AutomaticEnv()

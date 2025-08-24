@@ -6,18 +6,18 @@ After=network.target
 Type=simple
 User=egress
 Group=egress
-WorkingDirectory=/opt/ag_egress
+WorkingDirectory=/opt/rtc_egress
 
 # Environment variables
 Environment=GIN_MODE=release
 
 # Main command to run
-ExecStart=/opt/ag_egress/bin/egress --config /etc/egress/config/egress_config.yaml
+ExecStart=/opt/rtc_egress/bin/egress --config /etc/egress/config/egress_config.yaml
 
 # Make sure log directory exists and is writable
-ExecStartPre=/bin/mkdir -p /var/log/ag_egress
-ExecStartPre=/bin/chown -R egress:egress /var/log/ag_egress
-ExecStartPre=/bin/chmod 755 /var/log/ag_egress
+ExecStartPre=/bin/mkdir -p /var/log/rtc_egress
+ExecStartPre=/bin/chown -R egress:egress /var/log/rtc_egress
+ExecStartPre=/bin/chmod 755 /var/log/rtc_egress
 
 # Ensure recordings directory exists and is writable
 ExecStartPre=/bin/mkdir -p /recordings
@@ -29,7 +29,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/recordings /var/log/ag_egress
+ReadWritePaths=/recordings /var/log/rtc_egress
 
 # Restart settings
 Restart=on-failure
@@ -38,7 +38,7 @@ RestartSec=5s
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=ag_egress
+SyslogIdentifier=rtc_egress
 
 [Install]
 WantedBy=multi-user.target

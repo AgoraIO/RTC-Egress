@@ -6,8 +6,6 @@ channel_name: "egress_test"
 access_token: "YOUR_AGORA_CHANNEL_TOKEN"
 egress_uid: "42"
 
-egress_home: "/tmp/egress"
-
 # Server configuration
 health_port: 8182  # Health check endpoint
 api_port: 8080     # API server port
