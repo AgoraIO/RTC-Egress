@@ -6,6 +6,10 @@ bin-*/
 
 .env
 
+# Configuration files with sensitive data
+egress_config.yaml
+config/egress_config.yaml
+
 .cache/
 
 agora_sdk/*
