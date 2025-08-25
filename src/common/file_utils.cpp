@@ -70,8 +70,7 @@ std::string generateTimestampedFilename(const std::string& prefix,
 
     // Add user ID if provided
     if (!userId.empty()) {
-        std::string sanitizedUserId = sanitizeFilename(userId);
-        ss << "_user_" << sanitizedUserId;
+        ss << "_user_" << userId;
     }
 
     // Add suffix (ensure it starts with a dot)
@@ -110,49 +109,6 @@ std::string getFileExtension(const std::string& format) {
     return "." + format;
 }
 
-std::string sanitizeFilename(const std::string& filename) {
-    std::string sanitized = filename;
-
-    // Replace invalid characters with underscores
-    const std::string invalidChars = "<>:\"/\\|?*";
-    for (char& c : sanitized) {
-        if (invalidChars.find(c) != std::string::npos || c < 32) {
-            c = '_';
-        }
-    }
-
-    // Remove leading/trailing dots and spaces
-    while (!sanitized.empty() && (sanitized.front() == '.' || sanitized.front() == ' ')) {
-        sanitized.erase(0, 1);
-    }
-    while (!sanitized.empty() && (sanitized.back() == '.' || sanitized.back() == ' ')) {
-        sanitized.pop_back();
-    }
-
-    // Ensure filename is not empty and not reserved names
-    if (sanitized.empty()) {
-        sanitized = "unnamed";
-    }
-
-    // Check for Windows reserved names
-    const std::vector<std::string> reservedNames = {
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
-        "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
-        "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
-    };
-
-    std::string upperSanitized = sanitized;
-    std::transform(upperSanitized.begin(), upperSanitized.end(), upperSanitized.begin(), ::toupper);
-
-    for (const auto& reserved : reservedNames) {
-        if (upperSanitized == reserved) {
-            sanitized = "file_" + sanitized;
-            break;
-        }
-    }
-
-    return sanitized;
-}
 
 } // namespace common
 } // namespace agora

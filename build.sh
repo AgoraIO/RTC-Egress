@@ -149,17 +149,17 @@ build_go() {
 create_dirs() {
     echo -e "${GREEN}Creating necessary directories...${NC}"
     mkdir -p bin
-    mkdir -p logs/egress
+    mkdir -p logs/rtc_egress
     mkdir -p recordings
     mkdir -p snapshots
 
     # Set permissions
-    chmod 755 logs/egress
+    chmod 755 logs/rtc_egress
     chmod 755 recordings
     chmod 755 snapshots
 
     echo -e "${YELLOW}Note: Using local 'logs' and 'recordings' directories in the project folder.${NC}"
-    echo -e "${YELLOW}For production, you may want to use system directories like /var/log/egress and /recordings${NC}"
+    echo -e "${YELLOW}For production, you may want to use system directories like /var/log/rtc_egress and /recordings${NC}"
 }
 
 create_dirs_docker() {
@@ -235,6 +235,7 @@ case "$1" in
         build_go
         ;;
     build)
+        create_dirs
         build_cpp
         build_go
         ;;
@@ -246,9 +247,11 @@ case "$1" in
         build_go
         ;;
     cpp)
+        create_dirs
         build_cpp
         ;;
     go)
+        create_dirs
         build_go
         ;;
     deps)

@@ -79,7 +79,8 @@ class RecordingSink {
         bool tsKeepIncompleteSegments = true;  // Keep incomplete segments on crash
 
         // Metadata tracking
-        std::string taskId = "";  // Task identifier for metadata
+        std::string taskId = "";   // Task identifier for metadata
+        std::string channel = "";  // Channel name for metadata
     };
 
     RecordingSink();

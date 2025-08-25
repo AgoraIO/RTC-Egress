@@ -86,6 +86,9 @@ class MetadataManager {
         std::vector<FileInfo> files;
         mutable std::mutex filesMutex;
 
+        // Session metadata file path (set once during startSession)
+        std::string outputFilePrefix;
+
         // Statistics
         std::atomic<int> totalFramesProcessed{0};
         std::atomic<int> droppedFrames{0};
@@ -99,8 +102,6 @@ class MetadataManager {
         // Session integrity and audit
         std::string sessionIntegrityHash;          // Hash of all session data
         std::vector<std::string> sessionAuditLog;  // Timestamped session events
-        std::string recoveryMetadataPath;          // Path to recovery metadata file
-        bool hasRecoveryData = false;              // Whether recovery data is available
 
         // File validation summary
         int totalFilesExpected = 0;               // Total files expected in session
@@ -113,8 +114,10 @@ class MetadataManager {
     ~MetadataManager();
 
     // Session lifecycle
-    bool startSession(const std::string& taskId, const TaskSession& session);
-    bool endSession(const std::string& taskId, const std::string& terminationReason = "normal");
+    bool startSession(const std::string& taskId, const TaskSession& session,
+                      const std::string& outputDir = "");
+    bool endSession(const std::string& taskId, const std::string& terminationReason = "normal",
+                    const std::string& outputDir = "");
 
     // File management - thread-safe operations
     bool addNewFileWithoutLock(TaskSession* session, const std::string& taskId,
@@ -152,12 +155,7 @@ class MetadataManager {
                                       const std::string& details = "");
     std::vector<std::string> getAuditTrail(TaskSession* session, const std::string& taskId);
 
-    // Recovery mechanisms
-    bool createRecoveryMetadataWithoutLock(TaskSession* session, const std::string& taskId);
-    std::string generateRecoveryReportWithoutLock(TaskSession* session, const std::string& taskId);
-
     // Internal serialization helpers
-    void copySessionToNew(TaskSession* dest, const TaskSession& src);
 
     // Cleanup operations
     void cleanupIncompleteFiles(const std::string& taskId);
@@ -191,7 +189,6 @@ class MetadataManager {
     FileType detectFileType(const std::string& filename) const;
     uint64_t getFileSize(const std::string& filepath) const;
     bool fileExists(const std::string& filepath) const;
-    std::string sanitizeFilename(const std::string& input) const;
 
     // Directory operations
     bool ensureDirectoryExists(const std::string& path);

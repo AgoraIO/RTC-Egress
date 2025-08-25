@@ -137,7 +137,7 @@ bool RecordingSink::start() {
         MetadataManager::TaskSession session;
         session.taskId = config_.taskId;
         session.description = "recording_session";
-        session.channel = "";  // Will be set by main.cpp if available
+        session.channel = config_.channel;
         session.users = config_.targetUsers;
         session.compositionMode = (config_.mode == VideoCompositor::Mode::Individual)
                                       ? MetadataManager::CompositionMode::Individual
@@ -163,7 +163,7 @@ bool RecordingSink::start() {
             session.outputFormat = "mkv";
         }
 
-        if (!metadataManager_->startSession(config_.taskId, session)) {
+        if (!metadataManager_->startSession(config_.taskId, session, config_.outputDir)) {
             AG_LOG_FAST(WARN, "Failed to start metadata session");
         }
     }
@@ -253,7 +253,7 @@ void RecordingSink::stop() {
 
     // End metadata session
     if (metadataManager_ && !config_.taskId.empty()) {
-        metadataManager_->endSession(config_.taskId, "normal");
+        metadataManager_->endSession(config_.taskId, "normal", config_.outputDir);
     }
 
     if (recordingThread_ && recordingThread_->joinable()) {
