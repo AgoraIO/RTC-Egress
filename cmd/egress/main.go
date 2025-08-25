@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agora-build/rtc-egress/pkg/egress"
-	"github.com/agora-build/rtc-egress/pkg/health"
-	"github.com/agora-build/rtc-egress/pkg/queue"
-	"github.com/agora-build/rtc-egress/pkg/uploader"
-	"github.com/agora-build/rtc-egress/pkg/utils"
+	"github.com/AgoraIO/RTC-Egress/pkg/egress"
+	"github.com/AgoraIO/RTC-Egress/pkg/health"
+	"github.com/AgoraIO/RTC-Egress/pkg/queue"
+	"github.com/AgoraIO/RTC-Egress/pkg/uploader"
+	"github.com/AgoraIO/RTC-Egress/pkg/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
 )
