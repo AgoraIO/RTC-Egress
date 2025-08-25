@@ -92,7 +92,8 @@ int main(int argc, char* argv[]) {
                     // Set RTC log file path with process ID
                     std::string rtcLogFile =
                         logPath + "/rtc_sdk_" + std::to_string(getpid()) + ".log";
-                    setRTCLogPath(rtcLogFile.c_str());
+                    AG_LOG_FAST(INFO, "About to set RTC log file to: %s", rtcLogFile.c_str());
+                    setRTCLogFile(rtcLogFile.c_str());
                     AG_LOG_FAST(INFO, "Set Agora RTC log path to: %s", rtcLogFile.c_str());
                 }
             }
@@ -256,7 +257,8 @@ int main(int argc, char* argv[]) {
                 }
                 // Set RTC log file path with process ID
                 std::string rtcLogFile = logPath + "/rtc_sdk_" + std::to_string(getpid()) + ".log";
-                setRTCLogPath(rtcLogFile.c_str());
+                AG_LOG_FAST(INFO, "About to set RTC log file to: %s", rtcLogFile.c_str());
+                setRTCLogFile(rtcLogFile.c_str());
                 AG_LOG_FAST(INFO, "Set Agora RTC log path to: %s", rtcLogFile.c_str());
             }
         }
@@ -331,7 +333,8 @@ int main(int argc, char* argv[]) {
 
         // Configure snapshot sink
         agora::rtc::SnapshotSink::Config snapshots_config;
-        snapshots_config.taskId = session_task_id;  // Set task ID for metadata generation
+        snapshots_config.taskId = session_task_id;      // Set task ID for metadata generation
+        snapshots_config.channel = rtc_config.channel;  // Set channel for metadata
 
         // Apply snapshots settings if provided
         if (config["snapshots"]) {
@@ -388,7 +391,8 @@ int main(int argc, char* argv[]) {
 
         // Configure recording sink
         agora::rtc::RecordingSink::Config recording_config;
-        recording_config.taskId = session_task_id;  // Set task ID for metadata generation
+        recording_config.taskId = session_task_id;      // Set task ID for metadata generation
+        recording_config.channel = rtc_config.channel;  // Set channel for metadata
 
         if (config["recording"]) {
             const auto& recording_node = config["recording"];
@@ -435,11 +439,11 @@ int main(int argc, char* argv[]) {
                 if (userList.empty()) {
                     AG_LOG_FAST(INFO,
                                 "[Config] No users specified - composite recording with dynamic "
-                                "layout (all users, adaptive grid)");
+                                "layout (all users, adaptive flat)");
                 } else {
                     AG_LOG_FAST(INFO,
                                 "[Config] Multiple users specified (%zu users) - composite "
-                                "recording with grid layout",
+                                "recording with flat layout",
                                 userList.size());
                 }
             }

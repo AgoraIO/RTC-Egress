@@ -214,6 +214,9 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
             return;
         }
 
+        // Update config with channel information
+        snapshot_config_.channel = msg.channel;
+
         // Update channel state
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
@@ -329,6 +332,9 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
             logError("Failed to connect to channel: " + msg.channel, instance_id_);
             return;
         }
+
+        // Update configs with channel information
+        recording_config_.channel = msg.channel;
 
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto& state = channel_states_[msg.channel];

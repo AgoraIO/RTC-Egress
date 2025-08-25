@@ -17,7 +17,7 @@ agora::base::IAgoraService* createAndInitAgoraService(bool enableAudioDevice,
                                                       bool enableAudioProcessor, bool enableVideo,bool enableuseStringUid = false,bool enablelowDelay = false, const char* appid =nullptr);
 
 // Override default log path for RTC SDK logs
-void setRTCLogPath(const char* logPath);
+void setRTCLogFile(const char* logFile);
 
 int verifyLicense();
 

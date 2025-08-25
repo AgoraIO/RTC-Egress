@@ -22,14 +22,14 @@
 
 // Default log paths - can be overridden
 #if defined(TARGET_OS_LINUX)
-static const char* DEFAULT_LOG_PATH = "/var/log/agora/";
+static std::string DEFAULT_LOG_FILE = "/var/log/agora/rtc_sdk.log";
 #else
-static const char* DEFAULT_LOG_PATH = "/data/local/tmp/agora/";
+static std::string DEFAULT_LOG_FILE = "/data/local/tmp/agora/rtc_sdk.log";
 #endif
 
 // Override default log path for RTC SDK logs
-void setRTCLogPath(const char* logPath) {
-    DEFAULT_LOG_PATH = logPath;
+void setRTCLogFile(const char* logFile) {
+  DEFAULT_LOG_FILE = std::string(logFile);
 }
 
 #define DEFAULT_LOG_SIZE (512 * 1024)  // default log size is 512 kb
@@ -64,10 +64,8 @@ agora::base::IAgoraService* createAndInitAgoraService(bool enableAudioDevice,
     return nullptr;
   }
 
-  char log_file[256];
-  snprintf(log_file, sizeof(log_file), "%s/%d/rtc_sdk.log", DEFAULT_LOG_PATH, getpid());
-  AG_LOG(INFO, "Created log file at %s", log_file);
-  if (service->setLogFile(log_file, DEFAULT_LOG_SIZE) != 0) {
+  AG_LOG(INFO, "Created log file at %s", DEFAULT_LOG_FILE.c_str());
+  if (service->setLogFile(DEFAULT_LOG_FILE.c_str(), DEFAULT_LOG_SIZE) != 0) {
     return nullptr;
   }
  if(verifyLicense() != 0) return nullptr;

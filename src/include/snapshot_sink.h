@@ -30,7 +30,8 @@ class SnapshotSink {
         SnapshotEncoder::Config encoderConfig;     // Snapshot encoder configuration
 
         // Metadata tracking
-        std::string taskId = "";  // Task identifier for metadata
+        std::string taskId = "";   // Task identifier for metadata
+        std::string channel = "";  // Channel name for metadata
     };
 
     SnapshotSink();

@@ -14,7 +14,10 @@ config/egress_config.yaml
 
 agora_sdk/*
 
+agora*.log
+
 debug/
+logs/*
 snapshots/*
 recordings/*
 

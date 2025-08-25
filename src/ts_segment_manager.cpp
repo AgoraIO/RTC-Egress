@@ -88,8 +88,8 @@ void TSSegmentManager::endCurrentSession() {
         finalizeCurrentSegment();
     }
 
-    // Generate final playlist
-    if (config_.generatePlaylist) {
+    // Generate final playlist only if we have segments
+    if (config_.generatePlaylist && !currentSession_.segments.empty()) {
         generateHLSPlaylist();
     }
 

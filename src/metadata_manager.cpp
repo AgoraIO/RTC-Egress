@@ -41,7 +41,8 @@ MetadataManager::~MetadataManager() {
     AG_LOG_FAST(INFO, "MetadataManager shutdown complete");
 }
 
-bool MetadataManager::startSession(const std::string& taskId, const TaskSession& session) {
+bool MetadataManager::startSession(const std::string& taskId, const TaskSession& session,
+                                   const std::string& outputDir) {
     std::lock_guard<std::mutex> lock(sessionsMutex_);
 
     if (activeSessions_.find(taskId) != activeSessions_.end()) {
@@ -78,8 +79,6 @@ bool MetadataManager::startSession(const std::string& taskId, const TaskSession&
     newSession->terminationReason = "active";
     newSession->sessionIntegrityHash = session.sessionIntegrityHash;
     newSession->sessionAuditLog = session.sessionAuditLog;
-    newSession->recoveryMetadataPath = session.recoveryMetadataPath;
-    newSession->hasRecoveryData = session.hasRecoveryData;
     newSession->totalFilesExpected = session.totalFilesExpected;
     newSession->filesWithIntegrityIssues = session.filesWithIntegrityIssues;
     newSession->missingFiles = session.missingFiles;
@@ -91,11 +90,29 @@ bool MetadataManager::startSession(const std::string& taskId, const TaskSession&
 
     activeSessions_[taskId] = std::move(newSession);
 
+    // Create initial JSON file if output directory is provided
+    if (!outputDir.empty()) {
+        std::string prefix = generateOutputFilePrefixWithoutLock(taskId);
+        std::string outputPrefix = outputDir + "/" + prefix;
+
+        // Get pointer to the session we just moved and store the output prefix
+        auto* sessionPtr = activeSessions_[taskId].get();
+        sessionPtr->outputFilePrefix = outputPrefix;  // Store for reuse in endSession
+
+        if (!saveSessionMetadataWithoutLock(sessionPtr, taskId, outputPrefix)) {
+            AG_LOG_FAST(WARN, "Failed to create initial metadata file for session %s",
+                        taskId.c_str());
+        } else {
+            AG_LOG_FAST(INFO, "Created initial metadata file for session %s", taskId.c_str());
+        }
+    }
+
     AG_LOG_FAST(INFO, "Started metadata session for task: %s", taskId.c_str());
     return true;
 }
 
-bool MetadataManager::endSession(const std::string& taskId, const std::string& terminationReason) {
+bool MetadataManager::endSession(const std::string& taskId, const std::string& terminationReason,
+                                 const std::string& outputDir) {
     std::lock_guard<std::mutex> lock(sessionsMutex_);
 
     auto it = activeSessions_.find(taskId);
@@ -125,8 +142,6 @@ bool MetadataManager::endSession(const std::string& taskId, const std::string& t
             << session->totalBytesGenerated.load() << " bytes, " << session->durationSeconds << "s";
     addAuditEntryWithoutLock(session.get(), taskId, "session_ended", summary.str());
 
-    // Create recovery metadata before ending session
-    createRecoveryMetadataWithoutLock(session.get(), taskId);
     bool saved = false;
 
     // Validate all files integrity before final save
@@ -134,9 +149,10 @@ bool MetadataManager::endSession(const std::string& taskId, const std::string& t
         std::lock_guard<std::mutex> fileLock(session->filesMutex);
         validateAllFilesIntegrityWithoutLock(session.get(), taskId);
 
-        std::string prefix = generateOutputFilePrefixWithoutLock(taskId);
+        // Use stored output prefix from startSession
+        std::string outputPrefix = session->outputFilePrefix;
 
-        saved = saveSessionMetadataWithoutLock(session.get(), taskId, prefix);
+        saved = saveSessionMetadataWithoutLock(session.get(), taskId, outputPrefix);
 
         AG_LOG_FAST(INFO, "Ended session %s after %.2fs (%s) - %d frames, %lu bytes",
                     taskId.c_str(), session->durationSeconds, terminationReason.c_str(),
@@ -308,7 +324,7 @@ bool MetadataManager::appendFileToMetadata(const std::string& taskId, const File
 }
 
 std::string MetadataManager::generateOutputFilePrefixWithoutLock(const std::string& taskId) const {
-    return formatDateTimePrefix() + "_" + sanitizeFilename(taskId);
+    return formatDateTimePrefix() + "_" + taskId;
 }
 
 std::string MetadataManager::generateMetadataPathWithoutLock(
@@ -337,23 +353,23 @@ MetadataManager::CompositionMode MetadataManager::stringToCompositionMode(const 
 std::string MetadataManager::layoutToString(Layout layout) {
     switch (layout) {
         case Layout::Flat:
-            return "Flat";
+            return "flat";
         case Layout::Spotlight:
-            return "Spotlight";
+            return "spotlight";
         case Layout::Freestyle:
-            return "Freestyle";
+            return "freestyle";
         case Layout::Customized:
-            return "Customized";
+            return "customized";
         default:
-            return "Unknown";
+            return "flat";
     }
 }
 
 MetadataManager::Layout MetadataManager::stringToLayout(const std::string& str) {
-    if (str == "Flat") return Layout::Flat;
-    if (str == "Spotlight") return Layout::Spotlight;
-    if (str == "Freestyle") return Layout::Freestyle;
-    if (str == "Customized") return Layout::Customized;
+    if (str == "flat" || str == "Flat") return Layout::Flat;
+    if (str == "spotlight" || str == "Spotlight") return Layout::Spotlight;
+    if (str == "freestyle" || str == "Freestyle") return Layout::Freestyle;
+    if (str == "customized" || str == "Customized") return Layout::Customized;
     return Layout::Flat;  // Default
 }
 
@@ -428,19 +444,6 @@ uint64_t MetadataManager::getFileSize(const std::string& filepath) const {
 
 bool MetadataManager::fileExists(const std::string& filepath) const {
     return fs::exists(filepath);
-}
-
-std::string MetadataManager::sanitizeFilename(const std::string& input) const {
-    std::string clean = input;
-    // Replace invalid filename characters
-    std::replace_if(
-        clean.begin(), clean.end(),
-        [](char c) {
-            return c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' ||
-                   c == '<' || c == '>' || c == '|' || c == ' ';
-        },
-        '_');
-    return clean;
 }
 
 bool MetadataManager::ensureDirectoryExists(const std::string& path) {
@@ -537,8 +540,6 @@ nlohmann::json MetadataManager::serializeSession(const TaskSession& session) con
     // Session integrity and audit
     j["sessionIntegrityHash"] = session.sessionIntegrityHash;
     j["sessionAuditLog"] = session.sessionAuditLog;
-    j["recoveryMetadataPath"] = session.recoveryMetadataPath;
-    j["hasRecoveryData"] = session.hasRecoveryData;
 
     // File validation summary
     j["totalFilesExpected"] = session.totalFilesExpected;
@@ -834,141 +835,6 @@ std::vector<std::string> MetadataManager::getAuditTrail(TaskSession* session,
     return session->sessionAuditLog;
 }
 
-bool MetadataManager::createRecoveryMetadataWithoutLock(TaskSession* session,
-                                                        const std::string& taskId) {
-    std::string prefix = generateOutputFilePrefixWithoutLock(taskId);
-    std::string recoveryPath = prefix + "_recovery.json";
-
-    nlohmann::json recoveryData;
-    { recoveryData = serializeSession(*session); }
-
-    // Add recovery-specific information
-    recoveryData["recovery_metadata"] = true;
-    recoveryData["recovery_created_at"] = formatTimestamp(std::chrono::system_clock::now());
-    recoveryData["recovery_version"] = "1.0";
-
-    bool success = atomicWriteMetadata(recoveryPath, recoveryData);
-    if (success) {
-        session->recoveryMetadataPath = recoveryPath;
-        session->hasRecoveryData = true;
-        addAuditEntryWithoutLock(session, taskId, "recovery_metadata_created",
-                                 "Path: " + recoveryPath);
-        AG_LOG_FAST(INFO, "Created recovery metadata for session %s: %s", taskId.c_str(),
-                    recoveryPath.c_str());
-    } else {
-        AG_LOG_FAST(ERROR, "Failed to create recovery metadata for session %s", taskId.c_str());
-    }
-
-    return success;
-}
-
-std::string MetadataManager::generateRecoveryReportWithoutLock(TaskSession* session,
-                                                               const std::string& taskId) {
-    std::ostringstream report;
-
-    report << "=== RECOVERY REPORT FOR SESSION: " << taskId << " ===\n";
-    report << "Generated: " << formatTimestamp(std::chrono::system_clock::now()) << "\n\n";
-
-    // Session overview
-    report << "SESSION OVERVIEW:\n";
-    report << "- Task ID: " << session->taskId << "\n";
-    report << "- Description: " << session->description << "\n";
-    report << "- Channel: " << session->channel << "\n";
-    report << "- Users: ";
-    for (size_t i = 0; i < session->users.size(); ++i) {
-        if (i > 0) report << ", ";
-        report << session->users[i];
-    }
-    report << "\n";
-    report << "- Session Started: " << formatTimestamp(session->sessionStartTime) << "\n";
-    if (session->sessionCompleted) {
-        report << "- Session Ended: " << formatTimestamp(session->sessionEndTime) << "\n";
-        report << "- Duration: " << session->durationSeconds << " seconds\n";
-    } else {
-        report << "- Session Status: INCOMPLETE\n";
-    }
-    report << "- Termination Reason: " << session->terminationReason << "\n\n";
-
-    // File integrity summary
-    report << "FILE INTEGRITY SUMMARY:\n";
-    int verified = 0, corrupted = 0, missing = 0, pending = 0;
-    {
-        std::lock_guard<std::mutex> fileLock(session->filesMutex);
-        report << "- Total Files: " << session->files.size() << "\n";
-
-        for (const auto& file : session->files) {
-            if (file.integrityStatus == "verified")
-                verified++;
-            else if (file.integrityStatus == "corrupted")
-                corrupted++;
-            else if (file.integrityStatus == "missing")
-                missing++;
-            else
-                pending++;
-        }
-
-        report << "- Verified: " << verified << "\n";
-        report << "- Corrupted: " << corrupted << "\n";
-        report << "- Missing: " << missing << "\n";
-        report << "- Pending Check: " << pending << "\n\n";
-
-        if (corrupted > 0 || missing > 0) {
-            report << "PROBLEMATIC FILES:\n";
-            for (const auto& file : session->files) {
-                if (file.integrityStatus == "corrupted" || file.integrityStatus == "missing") {
-                    report << "- " << file.filename << " [" << file.integrityStatus << "]\n";
-                    report << "  Path: " << file.fullPath << "\n";
-                    report << "  Expected Size: " << file.sizeBytes << " bytes\n";
-                    if (!file.backupPath.empty()) {
-                        report << "  Backup Available: " << file.backupPath << "\n";
-                    }
-                    if (!file.recoveryInfo.empty()) {
-                        report << "  Recovery Info: " << file.recoveryInfo << "\n";
-                    }
-                }
-            }
-            report << "\n";
-        }
-    }
-
-    // Performance statistics
-    report << "PERFORMANCE STATISTICS:\n";
-    report << "- Total Frames Processed: " << session->totalFramesProcessed.load() << "\n";
-    report << "- Dropped Frames: " << session->droppedFrames.load() << "\n";
-    report << "- Average Frame Rate: " << session->averageFrameRate << " fps\n";
-    report << "- Total Bytes Generated: " << session->totalBytesGenerated.load() << " bytes\n\n";
-
-    // Recent audit trail (last 10 entries)
-    report << "RECENT AUDIT TRAIL:\n";
-    int auditCount = std::min(10, static_cast<int>(session->sessionAuditLog.size()));
-    for (int i = session->sessionAuditLog.size() - auditCount;
-         i < static_cast<int>(session->sessionAuditLog.size()); ++i) {
-        report << "- " << session->sessionAuditLog[i] << "\n";
-    }
-
-    // Recovery recommendations
-    report << "\nRECOVERY RECOMMENDATIONS:\n";
-    if (missing > 0) {
-        report << "- Check original output directories for missing files\n";
-        report << "- Verify file system permissions and disk space\n";
-        if (session->hasRecoveryData) {
-            report << "- Use recovery metadata: " << session->recoveryMetadataPath << "\n";
-        }
-    }
-    if (corrupted > 0) {
-        report << "- Re-run integrity validation after system checks\n";
-        report << "- Check for hardware issues (disk, memory)\n";
-        report << "- Consider restoring from backup if available\n";
-    }
-    if (!session->sessionCompleted) {
-        report << "- Session was not completed normally\n";
-        report << "- Check application logs for crash/error details\n";
-        report << "- Consider resuming session if possible\n";
-    }
-
-    return report.str();
-}
-
 void MetadataManager::deserializeSessionInto(TaskSession* session,
                                              const nlohmann::json& json) const {
     // Basic info
@@ -1031,9 +897,6 @@ void MetadataManager::deserializeSessionInto(TaskSession* session,
     if (json.contains("sessionIntegrityHash"))
         session->sessionIntegrityHash = json["sessionIntegrityHash"];
     if (json.contains("sessionAuditLog")) session->sessionAuditLog = json["sessionAuditLog"];
-    if (json.contains("recoveryMetadataPath"))
-        session->recoveryMetadataPath = json["recoveryMetadataPath"];
-    if (json.contains("hasRecoveryData")) session->hasRecoveryData = json["hasRecoveryData"];
 
     // File validation summary
     if (json.contains("totalFilesExpected"))

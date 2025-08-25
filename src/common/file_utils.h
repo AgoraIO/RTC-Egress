@@ -32,12 +32,6 @@ std::string generateTimestampedFilename(const std::string& prefix,
  */
 std::string getFileExtension(const std::string& format);
 
-/**
- * Sanitize filename by removing invalid characters
- * @param filename Input filename
- * @return Sanitized filename safe for filesystem
- */
-std::string sanitizeFilename(const std::string& filename);
 
 } // namespace common
 } // namespace agora
