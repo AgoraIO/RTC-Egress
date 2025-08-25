@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/AgoraIO/RTC-Egress/pkg/utils"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -19,10 +20,15 @@ type Watcher struct {
 }
 
 func NewWatcher(outputDir string, s3Config S3Config) (*Watcher, error) {
-	// Create output directory if it doesn't exist
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return nil, err
+	// Create output directory only if not in container AND it doesn't exist
+	if !utils.IsRunningInContainer() {
+		if _, err := os.Stat(outputDir); os.IsNotExist(err) {
+			if err := os.MkdirAll(outputDir, 0755); err != nil {
+				return nil, err
+			}
+		}
 	}
+	// In container mode, directory should already exist via volume mounts
 
 	uploader, err := NewS3Uploader(s3Config)
 	if err != nil {

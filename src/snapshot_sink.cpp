@@ -18,10 +18,7 @@ namespace rtc {
 
 namespace fs = std::filesystem;
 
-SnapshotSink::SnapshotSink() {
-    // Create output directory if it doesn't exist
-    fs::create_directories("./snapshots");
-}
+SnapshotSink::SnapshotSink() {}
 
 SnapshotSink::~SnapshotSink() {
     stop();

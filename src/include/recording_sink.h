@@ -44,7 +44,7 @@ class RecordingSink {
     enum class OutputFormat { MP4, AVI, MKV, TS };
 
     struct Config {
-        std::string outputDir = "./recordings";
+        std::string outputDir;  // Directory to save recordings (configured at runtime)
         VideoCompositor::Mode mode = VideoCompositor::Mode::Composite;
         OutputFormat format = OutputFormat::MP4;
 

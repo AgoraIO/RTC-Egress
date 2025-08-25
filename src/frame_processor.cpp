@@ -1,3 +1,5 @@
+#define AG_LOG_TAG "FrameProcessor"
+
 #include "frame_processor.h"
 
 #include <chrono>
@@ -5,6 +7,8 @@
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
+
+#include "common/log.h"
 
 extern "C" {
 #include <libavutil/imgutils.h>
@@ -34,7 +38,7 @@ class FrameProcessor::Impl {
         try {
             fs::create_directories(output_dir_);
         } catch (const std::exception& e) {
-            fprintf(stderr, "Failed to create output directory: %s\n", e.what());
+            AG_LOG_FAST(ERROR, "Failed to create output directory: %s", e.what());
             return false;
         }
 
@@ -49,7 +53,7 @@ class FrameProcessor::Impl {
         if (frame->format != AV_PIX_FMT_RGB24) {
             rgb_frame = av_frame_alloc();
             if (!rgb_frame) {
-                fprintf(stderr, "Could not allocate RGB frame\n");
+                AG_LOG_FAST(ERROR, "Could not allocate RGB frame");
                 return;
             }
 
@@ -58,7 +62,7 @@ class FrameProcessor::Impl {
             rgb_frame->height = frame->height;
 
             if (av_frame_get_buffer(rgb_frame, 0) < 0) {
-                fprintf(stderr, "Could not allocate RGB frame buffer\n");
+                AG_LOG_FAST(ERROR, "Could not allocate RGB frame buffer");
                 av_frame_free(&rgb_frame);
                 return;
             }
@@ -69,7 +73,7 @@ class FrameProcessor::Impl {
                                           frame->width, frame->height, AV_PIX_FMT_RGB24,
                                           SWS_BILINEAR, nullptr, nullptr, nullptr);
                 if (!sws_ctx_) {
-                    fprintf(stderr, "Could not initialize scale context\n");
+                    AG_LOG_FAST(ERROR, "Could not initialize scale context");
                     av_frame_free(&rgb_frame);
                     return;
                 }
