@@ -45,7 +45,7 @@ bool SnapshotEncoder::encodeYUVToJPEG(const uint8_t* yBuffer, const uint8_t* uBu
                                       int32_t vStride, uint32_t width, uint32_t height,
                                       const std::string& filename) {
     if (!yBuffer || !uBuffer || !vBuffer || width == 0 || height == 0) {
-        std::cerr << "[SnapshotEncoder] Invalid input parameters" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid input parameters");
         return false;
     }
 
@@ -73,7 +73,7 @@ bool SnapshotEncoder::encodeYUVToJPEG(const uint8_t* yBuffer, const uint8_t* uBu
 
         // Ensure buffer is allocated
         if (av_frame_get_buffer(frame, 32) < 0) {
-            std::cerr << "[SnapshotEncoder] Failed to allocate frame buffer" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to allocate frame buffer");
             stats_.failedEncodes++;
             return false;
         }
@@ -120,7 +120,7 @@ bool SnapshotEncoder::encodeYUVToJPEG(const uint8_t* yBuffer, const uint8_t* uBu
         if (ret < 0) {
             char errbuf[AV_ERROR_MAX_STRING_SIZE];
             av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, ret);
-            std::cerr << "[SnapshotEncoder] Send frame failed: " << errbuf << std::endl;
+            AG_LOG_FAST(ERROR, "Send frame failed: %s", errbuf);
             stats_.failedEncodes++;
             return false;
         }
@@ -129,7 +129,7 @@ bool SnapshotEncoder::encodeYUVToJPEG(const uint8_t* yBuffer, const uint8_t* uBu
         if (ret < 0) {
             char errbuf[AV_ERROR_MAX_STRING_SIZE];
             av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, ret);
-            std::cerr << "[SnapshotEncoder] Receive packet failed: " << errbuf << std::endl;
+            AG_LOG_FAST(ERROR, "Receive packet failed: %s", errbuf);
             stats_.failedEncodes++;
             return false;
         }
@@ -154,7 +154,7 @@ bool SnapshotEncoder::encodeYUVToJPEG(const uint8_t* yBuffer, const uint8_t* uBu
 
 bool SnapshotEncoder::encodeFrameToJPEG(const AVFrame* frame, const std::string& filename) {
     if (!frame || frame->format != AV_PIX_FMT_YUV420P) {
-        std::cerr << "[SnapshotEncoder] Invalid frame or unsupported format" << std::endl;
+        AG_LOG_FAST(ERROR, "Invalid frame or unsupported format");
         return false;
     }
 
@@ -178,14 +178,14 @@ bool SnapshotEncoder::setupEncoder(int width, int height) {
     // Find MJPEG encoder
     const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
     if (!codec) {
-        std::cerr << "[SnapshotEncoder] MJPEG encoder not found" << std::endl;
+        AG_LOG_FAST(ERROR, "MJPEG encoder not found");
         return false;
     }
 
     // Allocate codec context
     context_->codecContext = avcodec_alloc_context3(codec);
     if (!context_->codecContext) {
-        std::cerr << "[SnapshotEncoder] Failed to allocate codec context" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to allocate codec context");
         return false;
     }
 
@@ -215,7 +215,7 @@ bool SnapshotEncoder::setupEncoder(int width, int height) {
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_make_error_string(errbuf, AV_ERROR_MAX_STRING_SIZE, ret);
-        std::cerr << "[SnapshotEncoder] Failed to open codec: " << errbuf << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to open codec: %s", errbuf);
         return false;
     }
 
@@ -224,7 +224,7 @@ bool SnapshotEncoder::setupEncoder(int width, int height) {
     context_->packet = av_packet_alloc();
 
     if (!context_->inputFrame || !context_->packet) {
-        std::cerr << "[SnapshotEncoder] Failed to allocate frame/packet" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to allocate frame/packet");
         return false;
     }
 
@@ -240,13 +240,13 @@ bool SnapshotEncoder::setupEncoder(int width, int height) {
 bool SnapshotEncoder::writeJPEGFile(const uint8_t* data, size_t size, const std::string& filename) {
     std::ofstream file(filename, std::ios::binary);
     if (!file) {
-        std::cerr << "[SnapshotEncoder] Failed to open file: " << filename << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to open file: %s", filename.c_str());
         return false;
     }
 
     file.write(reinterpret_cast<const char*>(data), size);
     if (!file.good()) {
-        std::cerr << "[SnapshotEncoder] Failed to write JPEG data" << std::endl;
+        AG_LOG_FAST(ERROR, "Failed to write JPEG data");
         return false;
     }
 

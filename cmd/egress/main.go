@@ -152,14 +152,31 @@ func loadConfig() error {
 		}
 	}
 
-	// Ensure snapshots output directory exists
-	if err := os.MkdirAll(config.Snapshots.OutputDir, 0755); err != nil {
-		return fmt.Errorf("failed to create snapshots output directory: %v", err)
-	}
+	// Create directories only if not in container AND they don't exist
+	if !utils.IsRunningInContainer() {
+		log.Printf("Running in local mode - checking output directories")
 
-	// Ensure recording output directory exists
-	if err := os.MkdirAll(config.Recording.OutputDir, 0755); err != nil {
-		return fmt.Errorf("failed to create recording output directory: %v", err)
+		// Check and create snapshots directory if needed
+		if _, err := os.Stat(config.Snapshots.OutputDir); os.IsNotExist(err) {
+			if err := os.MkdirAll(config.Snapshots.OutputDir, 0755); err != nil {
+				return fmt.Errorf("failed to create snapshots output directory: %v", err)
+			}
+			log.Printf("Created snapshots directory: %s", config.Snapshots.OutputDir)
+		}
+
+		// Check and create recording directory if needed
+		if _, err := os.Stat(config.Recording.OutputDir); os.IsNotExist(err) {
+			if err := os.MkdirAll(config.Recording.OutputDir, 0755); err != nil {
+				return fmt.Errorf("failed to create recording output directory: %v", err)
+			}
+			log.Printf("Created recording directory: %s", config.Recording.OutputDir)
+		}
+
+		log.Printf("Output directories ready: snapshots=%s, recordings=%s", config.Snapshots.OutputDir, config.Recording.OutputDir)
+	} else {
+		// In container mode, directories should already exist via volume mounts
+		log.Printf("Running in container mode - output directories should be mounted as volumes")
+		log.Printf("Expected mount points: snapshots=%s, recordings=%s", config.Snapshots.OutputDir, config.Recording.OutputDir)
 	}
 
 	return nil

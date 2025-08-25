@@ -36,7 +36,7 @@ LayoutDetector::~LayoutDetector() {
 
 bool LayoutDetector::initialize(const Config& config) {
     if (running_.load()) {
-        std::cerr << "[LayoutDetector] Cannot initialize while running" << std::endl;
+        AG_LOG_FAST(ERROR, "Cannot initialize while running");
         return false;
     }
 

@@ -47,7 +47,6 @@ snapshots:
 
 # Recording settings
 recording:
-  enabled: false               # Enable recording functionality
   output_dir: "./recordings"   # Where to store recordings
   users: "9032"                # Recording mode: "individual" or "composite"
   layout: "flat"               # Recording layout: "grid" or "flat" or "spotlight" or "freestyle" or "customized-layout"
@@ -84,7 +83,7 @@ recording:
 # Logging configuration
 log:
   level: "info"            # debug, info, warn, error, fatal, panic
-  file: "/var/log/egress/egress.log"
+  path: "/var/log/rtc_egress"  # Base path for all logs (egress, rtc, etc.)
   max_size: 100           # Max log file size in MB
   max_backups: 3           # Maximum number of old log files to retain
   max_age: 28              # Maximum number of days to retain old log files

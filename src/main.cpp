@@ -21,6 +21,7 @@
 
 #include "common/log.h"
 #include "common/opt_parser.h"
+#include "common/sample_common.h"
 #include "include/recording_sink.h"
 #include "include/rtc_client.h"
 #include "include/snapshot_sink.h"
@@ -79,6 +80,23 @@ int main(int argc, char* argv[]) {
         if (!socket_path.empty()) {
             // Minimal config just for RTC client and snapshot sink construction
             YAML::Node config = YAML::LoadFile(config_file);
+
+            // Configure Agora RTC SDK log path if specified in config
+            if (config["log"] && config["log"]["path"]) {
+                std::string logPath = config["log"]["path"].as<std::string>();
+                if (!logPath.empty()) {
+                    // Ensure log directory exists
+                    if (!fs::exists(logPath)) {
+                        fs::create_directories(logPath);
+                    }
+                    // Set RTC log file path with process ID
+                    std::string rtcLogFile =
+                        logPath + "/rtc_sdk_" + std::to_string(getpid()) + ".log";
+                    setRTCLogPath(rtcLogFile.c_str());
+                    AG_LOG_FAST(INFO, "Set Agora RTC log path to: %s", rtcLogFile.c_str());
+                }
+            }
+
             agora::rtc::RtcClient::Config rtc_config;
             if (config["app_id"]) rtc_config.appId = config["app_id"].as<std::string>();
             // Enable video subscription for socket mode
@@ -160,11 +178,11 @@ int main(int argc, char* argv[]) {
             sa.sa_flags = 0;
 
             if (sigaction(SIGINT, &sa, NULL) == -1) {
-                std::cerr << "Failed to set up SIGINT handler in socket mode" << std::endl;
+                AG_LOG_FAST(ERROR, "Failed to set up SIGINT handler in socket mode");
                 return 1;
             }
             if (sigaction(SIGTERM, &sa, NULL) == -1) {
-                std::cerr << "Failed to set up SIGTERM handler in socket mode" << std::endl;
+                AG_LOG_FAST(ERROR, "Failed to set up SIGTERM handler in socket mode");
                 return 1;
             }
 
@@ -228,6 +246,21 @@ int main(int argc, char* argv[]) {
         // Load configuration
         YAML::Node config = YAML::LoadFile(config_file);
 
+        // Configure Agora RTC SDK log path if specified in config
+        if (config["log"] && config["log"]["path"]) {
+            std::string logPath = config["log"]["path"].as<std::string>();
+            if (!logPath.empty()) {
+                // Ensure log directory exists
+                if (!fs::exists(logPath)) {
+                    fs::create_directories(logPath);
+                }
+                // Set RTC log file path with process ID
+                std::string rtcLogFile = logPath + "/rtc_sdk_" + std::to_string(getpid()) + ".log";
+                setRTCLogPath(rtcLogFile.c_str());
+                AG_LOG_FAST(INFO, "Set Agora RTC log path to: %s", rtcLogFile.c_str());
+            }
+        }
+
         // Set up signal handlers with proper initialization
         struct sigaction sa;
         sa.sa_handler = signal_handler;
@@ -235,11 +268,11 @@ int main(int argc, char* argv[]) {
         sa.sa_flags = 0;
 
         if (sigaction(SIGINT, &sa, NULL) == -1) {
-            std::cerr << "Failed to set up SIGINT handler" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to set up SIGINT handler");
             return 1;
         }
         if (sigaction(SIGTERM, &sa, NULL) == -1) {
-            std::cerr << "Failed to set up SIGTERM handler" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to set up SIGTERM handler");
             return 1;
         }
 
@@ -304,12 +337,12 @@ int main(int argc, char* argv[]) {
         if (config["snapshots"]) {
             const auto& snapshots_node = config["snapshots"];
 
-            // Set output directory
-            std::string output_dir = "./snapshots";
-            if (snapshots_node["output_dir"]) {
-                output_dir = snapshots_node["output_dir"].as<std::string>();
+            // Set output directory (required in config)
+            if (!snapshots_node["output_dir"]) {
+                AG_LOG_FAST(ERROR, "snapshots.output_dir is required in config");
+                return -1;
             }
-            snapshots_config.outputDir = output_dir;
+            snapshots_config.outputDir = snapshots_node["output_dir"].as<std::string>();
 
             // Create output directory if it doesn't exist
             fs::create_directories(snapshots_config.outputDir);
@@ -360,11 +393,12 @@ int main(int argc, char* argv[]) {
         if (config["recording"]) {
             const auto& recording_node = config["recording"];
 
-            std::string output_dir;
-            if (recording_node["output_dir"]) {
-                output_dir = recording_node["output_dir"].as<std::string>();
+            // Set output directory (required in config)
+            if (!recording_node["output_dir"]) {
+                AG_LOG_FAST(ERROR, "recording.output_dir is required in config");
+                return -1;
             }
-            recording_config.outputDir = output_dir.empty() ? "./recordings" : output_dir;
+            recording_config.outputDir = recording_node["output_dir"].as<std::string>();
             // Create output directory if it doesn't exist
             fs::create_directories(recording_config.outputDir);
 
@@ -498,7 +532,7 @@ int main(int argc, char* argv[]) {
 
         // Initialize RTC client
         if (!g_rtcClient->initialize(rtc_config)) {
-            std::cerr << "Failed to initialize RTC client" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to initialize RTC client");
             return 1;
         }
 
@@ -553,13 +587,13 @@ int main(int argc, char* argv[]) {
                                 session_task_id + "_user_" + userId;  // Unique taskId per user
 
                             if (!user_snapshot_sink->initialize(user_config)) {
-                                std::cerr << "Failed to initialize snapshot sink for user "
-                                          << userId << std::endl;
+                                AG_LOG_FAST(ERROR, "Failed to initialize snapshot sink for user %s",
+                                            userId.c_str());
                                 return;  // Skip this frame if initialization fails
                             }
                             if (!user_snapshot_sink->start()) {
-                                std::cerr << "Failed to start snapshot sink for user " << userId
-                                          << std::endl;
+                                AG_LOG_FAST(ERROR, "Failed to start snapshot sink for user %s",
+                                            userId.c_str());
                                 return;  // Skip this frame if start fails
                             }
                             AG_LOG_FAST(INFO, "Started capturing snapshots for user %s to: %s",
@@ -618,20 +652,20 @@ int main(int argc, char* argv[]) {
 
         // Connect to the channel
         if (!g_rtcClient->connect()) {
-            std::cerr << "Failed to connect to channel" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to connect to channel");
             return 1;
         }
 
         // Start snapshot capture
         if (!g_snapshotSink->start()) {
-            std::cerr << "Failed to start snapshot capture" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to start snapshot capture");
             return 1;
         }
 
         // Start recording
         AG_LOG_FAST(INFO, "About to start recording sink...");
         if (!g_recordingSink->start()) {
-            std::cerr << "Failed to start recording" << std::endl;
+            AG_LOG_FAST(ERROR, "Failed to start recording");
             return 1;
         }
         AG_LOG_FAST(INFO, "Recording sink started successfully");
@@ -679,7 +713,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         } catch (const std::exception& e) {
-            std::cerr << "Error in main loop: " << e.what() << std::endl;
+            AG_LOG_FAST(ERROR, "Error in main loop: %s", e.what());
             g_running = false;
         }
 
@@ -697,8 +731,8 @@ int main(int argc, char* argv[]) {
                         AG_LOG_FAST(INFO, "Successfully stopped snapshot for user %s",
                                     pair.first.c_str());
                     } catch (const std::exception& e) {
-                        std::cerr << "Error stopping snapshot for user " << pair.first << ": "
-                                  << e.what() << std::endl;
+                        AG_LOG_FAST(ERROR, "Error stopping snapshot for user %s: %s",
+                                    pair.first.c_str(), e.what());
                     }
                 }
             }
@@ -720,8 +754,7 @@ int main(int argc, char* argv[]) {
                 AG_LOG_FAST(INFO, "g_recordingSink->stop() returned successfully");
                 AG_LOG_FAST(INFO, "Recording stopped successfully");
             } catch (const std::exception& e) {
-                std::cerr << "Error stopping recording: " << e.what() << std::endl;
-                std::flush(std::cerr);
+                AG_LOG_FAST(ERROR, "Error stopping recording: %s", e.what());
             }
             AG_LOG_FAST(INFO, "Resetting recording sink...");
             g_recordingSink.reset();
@@ -733,7 +766,7 @@ int main(int argc, char* argv[]) {
                 AG_LOG_FAST(INFO, "Stopping snapshot capture...");
                 g_snapshotSink->stop();
             } catch (const std::exception& e) {
-                std::cerr << "Error stopping snapshot capture: " << e.what() << std::endl;
+                AG_LOG_FAST(ERROR, "Error stopping snapshot capture: %s", e.what());
             }
             g_snapshotSink.reset();
         }
@@ -743,7 +776,7 @@ int main(int argc, char* argv[]) {
                 AG_LOG_FAST(INFO, "Disconnecting from channel...");
                 g_rtcClient->disconnect();
             } catch (const std::exception& e) {
-                std::cerr << "Error disconnecting from channel: " << e.what() << std::endl;
+                AG_LOG_FAST(ERROR, "Error disconnecting from channel: %s", e.what());
             }
             g_rtcClient.reset();
         }
@@ -754,7 +787,7 @@ int main(int argc, char* argv[]) {
         AG_LOG_FAST(INFO, "Capture&Recording stopped");
 
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        AG_LOG_FAST(ERROR, "Error: %s", e.what());
         return 1;
     }
 
