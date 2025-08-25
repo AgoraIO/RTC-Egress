@@ -147,8 +147,8 @@ GET /health
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/guohai/agora-rtc-egress.git
-   cd agora-rtc-egress
+   git clone https://github.com/AgoraIO/RTC-Egress.git
+   cd RTC-Egress
    ```
 
 2. **Build the C++ components**
@@ -161,13 +161,13 @@ GET /health
 
 3. **Build the Go server**
    ```bash
-   cd cmd/egress-server
-   go build -o ../../bin/egress-server
+   cd cmd/egress
+   go build -o ../../bin/egress
    ```
 
 4. **Run the application**
    ```bash
-   ./bin/egress-server --config config/egress_config.yaml
+   ./bin/egress --config config/egress_config.yaml
    ```
 
 ## Docker Deployment

@@ -1,4 +1,4 @@
-module github.com/agora-build/rtc-egress
+module github.com/AgoraIO/RTC-Egress
 
 go 1.21.0
 

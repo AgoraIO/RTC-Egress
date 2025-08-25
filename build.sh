@@ -259,7 +259,7 @@ case "$1" in
         echo -e "${GREEN}Cleaning build directories...${NC}"
         rm -rf build/
         rm -f bin/egress
-        rm -f bin/egress-server
+        rm -f bin/eg_worker
         ;;
     *)
         echo "Usage: $0 {all|build|cpp|go|deps|clean} [AGORA_SDK_URL]"
