@@ -5,6 +5,7 @@ services:
     container_name: rtc-egress-service-debug
     depends_on:
       - redis
+      - web_recorder
     ports:
       - "8080:8080"    # API port
       - "8182:8182"    # Health check port
@@ -48,7 +49,7 @@ services:
       start_period: 30s
     
     networks:
-      - redis_network
+      - rtc_egress_network
 
   redis:
     image: redis:latest
@@ -87,12 +88,72 @@ services:
         soft: 65536
         hard: 65536
     networks:
-      - redis_network
+      - rtc_egress_network
+
+  web_recorder:
+    # Agora Web Recorder Engine
+    image: hub-master.agoralab.co/uap/cloud_recording/cloud_recording-web_recorder_engine:test_20250818024350_v2.13.8
+    container_name: web-recorder-engine
+    restart: unless-stopped
+    ports:
+      - "8001:8001"    # RESTful API port
+      - "8002:8002"    # Probe port
+    volumes:
+      # Mount upload directory - replace with your local path
+      - ./web_recordings:/opt2
+      - ./logs:/var/log/web_recorder
+    command: ["/usr/src/cloud_recording/run_default.sh", "--daemon", "--restful", "8001", "--probe-port", "8002"]
+    environment:
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # Web recorder takes longer to start
+    # Allocate 2GB shared memory as per your requirements
+    shm_size: "2g"
+    networks:
+      - rtc_egress_network
+
+  # REQUIRED: Flexible Recorder service handles web recording tasks
+  flexible-recorder:
+    build:
+      context: ../../
+      dockerfile: cmd/flexible_recorder/Dockerfile
+    container_name: flexible-recorder-service
+    depends_on:
+      - redis
+      - web_recorder
+    ports:
+      - "8183:8183"    # Health check port (matches flexible-recorder)
+    volumes:
+      - ../../config/flexible_recorder_config.yaml:/opt/config/flexible_recorder_config.yaml:ro
+      - ./logs:/var/log/flexible-recorder
+    environment:
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-0}
+      - APP_ID=${APP_ID:-}
+      - WEB_RECORDER_BASE_URL=http://web_recorder:8001
+      - WEB_RECORDER_AUTH_TOKEN=${WEB_RECORDER_AUTH_TOKEN:-}
+      - POD_REGION=${POD_REGION:-us-west-1}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8183/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - rtc_egress_network
 
 volumes:
   redis_data:
     driver: local
 
 networks:
-  redis_network:
+  rtc_egress_network:
+    name: rtc-egress-dev-network
     driver: bridge

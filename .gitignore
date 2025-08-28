@@ -40,3 +40,5 @@ tests/real_component_tests_simple
 tests/real_file_generation_tests
 tests/video_compositor_real_test
 tests/real_files_test_output_*/
+tests/fake_webhook_server
+

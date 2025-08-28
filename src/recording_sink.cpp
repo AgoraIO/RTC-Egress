@@ -458,6 +458,15 @@ void RecordingSink::recordingThread() {
         if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >=
             config_.maxDurationSeconds) {
             AG_LOG_FAST(INFO, "Max duration reached, breaking from recording loop");
+
+            // Notify task completion when max duration is reached
+            if (completionCallback_ && !config_.taskId.empty()) {
+                AG_LOG_FAST(INFO, "Notifying task completion for max duration reached: %s",
+                            config_.taskId.c_str());
+                completionCallback_(config_.taskId, "success",
+                                    "Recording completed - max duration reached");
+            }
+
             break;
         }
 

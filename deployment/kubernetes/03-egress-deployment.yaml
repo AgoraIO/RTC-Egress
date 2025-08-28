@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress
+  namespace: rtc-egress
+  labels:
+    app: egress
+    component: native-recorder
+spec:
+  # Initial replica count - will be managed by HPA
+  replicas: 3
+  selector:
+    matchLabels:
+      app: egress
+      component: native-recorder
+  template:
+    metadata:
+      labels:
+        app: egress
+        component: native-recorder
+    spec:
+      containers:
+      - name: egress
+        image: rtc-egress:latest  # Replace with your actual image
+        command: ["/app/bin/egress"]
+        args: ["--config", "/app/config/egress_config.yaml"]
+        ports:
+        - containerPort: 8090  # Manager API
+          name: api
+        - containerPort: 8182  # Health check
+          name: health
+        env:
+        - name: APP_ID
+          valueFrom:
+            secretKeyRef:
+              name: agora-secrets
+              key: app-id
+        - name: REDIS_ADDR
+          value: "redis:6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secrets
+              key: password
+              optional: true
+        - name: REDIS_DB
+          value: "0"
+        - name: POD_REGION
+          value: "us-west-1"  # Adjust per region
+        - name: POD_WORKERS
+          value: "4"  # Number of C++ workers per pod
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+        - name: recordings-volume
+          mountPath: /app/recordings
+        - name: snapshots-volume
+          mountPath: /app/snapshots
+        - name: logs-volume
+          mountPath: /app/logs
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8182
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8182
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
+      volumes:
+      - name: config-volume
+        configMap:
+          name: egress-config
+      - name: recordings-volume
+        persistentVolumeClaim:
+          claimName: recordings-pvc
+      - name: snapshots-volume
+        persistentVolumeClaim:
+          claimName: snapshots-pvc
+      - name: logs-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress
+  namespace: rtc-egress
+  labels:
+    app: egress
+    component: native-recorder
+spec:
+  ports:
+  - port: 8090
+    targetPort: 8090
+    name: api
+  - port: 8182
+    targetPort: 8182
+    name: health
+  selector:
+    app: egress
+    component: native-recorder
+  type: ClusterIP

@@ -1,0 +1,102 @@
+# Egress - Debug Image (Full build environment with source code and symbols)
+FROM ubuntu:24.04 as base
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    pkg-config \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    libyaml-cpp-dev \
+    curl \
+    gdb \
+    valgrind \
+    strace \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go builder stage
+FROM golang:1.21-alpine AS go_builder
+
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY cmd/egress/ ./cmd/egress/
+COPY pkg/ ./pkg/
+
+# Build the egress service binary with debug symbols
+RUN CGO_ENABLED=0 GOOS=linux go build -gcflags="all=-N -l" -o egress ./cmd/egress
+
+# C++ builder stage
+FROM base AS cpp_builder
+
+WORKDIR /app
+
+# Copy C++ source
+COPY src/ ./src/
+COPY include/ ./include/
+COPY CMakeLists.txt .
+COPY agora_sdk/ ./agora_sdk/
+
+# Build C++ components with debug symbols
+RUN mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Debug && \
+    make -j$(nproc)
+
+# Final debug image
+FROM ubuntu:24.04
+
+# Install runtime and debug dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    libavcodec60 \
+    libavformat60 \
+    libswscale7 \
+    libyaml-cpp0.8 \
+    gdb \
+    valgrind \
+    strace \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt
+
+# Copy Go binary with debug symbols
+COPY --from=go_builder /app/egress ./bin/
+
+# Copy C++ binaries and libraries with debug symbols
+COPY --from=cpp_builder /app/build/eg_worker ./bin/
+COPY --from=cpp_builder /app/agora_sdk/*.so ./lib/
+
+# Copy source code for debugging
+COPY --from=cpp_builder /app/src/ ./src/
+COPY --from=cpp_builder /app/include/ ./include/
+COPY --from=go_builder /app/cmd/ ./cmd/
+COPY --from=go_builder /app/pkg/ ./pkg/
+
+# Create directory structure
+RUN mkdir -p /opt/config /opt/logs /recordings /snapshots /web_recorder
+
+# Set library path for Agora SDK
+ENV LD_LIBRARY_PATH=/opt/lib:$LD_LIBRARY_PATH
+
+# Create non-root user
+RUN addgroup --gid 1000 egress && \
+    adduser --disabled-password --gecos '' --uid 1000 --gid 1000 egress && \
+    chown -R rtc_egress:rtc_egress /opt /recordings /snapshots /web_recorder
+
+USER egress
+
+# Expose ports (dynamic from config)
+EXPOSE 8182
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8182/health || exit 1
+
+# Default command
+CMD ["./bin/egress", "--config", "/opt/config/egress_config.yaml"]

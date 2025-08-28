@@ -1,0 +1,80 @@
+# Uploader Configuration - Standalone File Upload Service
+# This service watches directories and uploads files to S3
+
+server:
+  health_port: 8184   # Health check port (different from other services)
+
+pod:
+  region: "us-west-1" # Pod region identifier
+
+# Redis Configuration (optional - for health monitoring only)
+redis:
+  addr: "localhost:6379" # Redis server address
+  password: ""               # Redis password (leave empty if no password)
+  db: 0                      # Redis database number
+
+# File Watcher Configuration
+watcher:
+  # Directories to watch for new files (support multiple directories)
+  directories:
+    - "/recordings"         # Native recordings from egress pods
+    - "/opt2"               # Web recordings from flexible-recorder pods
+    - "/snapshots"          # Snapshot images
+  
+  poll_interval: 10         # How often to scan directories (seconds)
+  retry_interval: 60        # Retry failed uploads after (seconds)
+  max_retries: 5            # Maximum retry attempts per file
+  delete_after: false       # Delete local files after successful upload
+  min_file_size: 1024       # Minimum file size to upload (bytes)
+  max_file_age: 86400       # Ignore files older than (seconds) - 24 hours
+
+  # File types to upload (case insensitive)
+  file_extensions:
+    - ".mp4"                # Video recordings
+    - ".ts"                 # HLS segments
+    - ".m3u8"               # HLS playlists
+    - ".jpg"                # JPEG snapshots
+    - ".png"                # PNG snapshots
+    - ".webm"               # WebM recordings
+    - ".log"                # Log files (optional)
+
+# S3 Configuration
+s3:                 
+  bucket: "ag-egress-s3"         # S3 bucket name
+  region: "auto"
+  access_key: "" # AWS access key (or use IAM role)
+  secret_key: "" # AWS secret key (or use IAM role)  
+  endpoint: "" # Custom S3 endpoint (leave empty for AWS)
+
+# Concurrency Configuration  
+concurrency:
+  upload_timeout: 120            # Upload timeout in seconds (2 minutes)
+  max_workers: 4                 # Parallel upload workers
+  queue_size: 1000               # Upload queue buffer size
+  batch_size: 10                 # Files per upload batch
+  batch_timeout: 30              # Batch timeout in seconds
+
+
+# Kubernetes Resource Limits (for reference):
+# resources:
+#   requests:
+#     cpu: 200m      # Lower priority than recording pods
+#     memory: 256Mi  # Moderate memory for file buffers
+#   limits:
+#     cpu: 500m      # Can burst for large uploads  
+#     memory: 512Mi
+
+# Pod Priority Configuration (for reference):
+# priorityClassName: low-priority  # Lower than recording pods
+
+# Volume Configuration (for reference):  
+# volumes:
+#   - name: recordings-volume
+#     persistentVolumeClaim:
+#       claimName: recordings-pvc
+#       readOnly: true             # Read-only access to recording outputs
+
+# Environment variable overrides:
+# REDIS_ADDR, REDIS_PASSWORD, POD_REGION
+# S3_BUCKET, S3_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT
+# WATCHER_POLL_INTERVAL, WATCHER_MAX_RETRIES, WATCHER_DELETE_AFTER

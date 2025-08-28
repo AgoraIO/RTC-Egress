@@ -32,16 +32,11 @@ class TaskPipe {
     void setSnapshotConfig(const agora::rtc::SnapshotSink::Config& config);
     void setRecordingConfig(const agora::rtc::RecordingSink::Config& config);
 
-    // Get the current reference count for a channel
-    int getChannelRefCount(const std::string& channel) const;
-
    private:
     // Connection state for a channel
     struct ChannelState {
-        int ref_count = 0;
         bool is_connected = false;
         std::unordered_map<std::string, std::string> active_tasks;  // task_id -> task_type
-        int64_t snapshot_interval = 0;
     };
 
     // Command handlers
@@ -52,7 +47,7 @@ class TaskPipe {
 
     // Connection management
     bool ensureConnected(const std::string& channel, const std::string& token = "");
-    void releaseConnection(const std::string& channel);
+    void releaseConnection(const std::string& channel, const std::string& task_id);
     void cleanupConnection(const std::string& channel);
 
     // Thread function

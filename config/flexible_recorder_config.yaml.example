@@ -1,0 +1,44 @@
+# Flexible Recorder Configuration - Web Recording Service + Uploader
+# This service consumes web recording tasks from Redis and processes them via web recorder engine
+
+server:
+  health_port: 8183   # Health check port (different from egress)
+
+pod:
+  region: "us-west-1" # Pod region for task queue routing
+  workers: 1          # Number of coordination processes (web recorder engine does the work)
+
+# Redis Configuration
+redis:
+  addr: "localhost:6379" # Redis server address
+  password: ""               # Redis password (leave empty if no password)
+  db: 0                      # Redis database number
+  task_ttl: 172800           # Task TTL in seconds (48 hours)
+  worker_patterns:           # Web worker subscription patterns
+    - "egress:web:*"         # Global web recording tasks  
+    - "egress:*:web:*"       # Regional web recording tasks
+
+# Web Recorder configuration
+web_recorder:
+  base_url: "http://localhost:8001"  # Agora Web Recorder Engine API
+  timeout: 30                        # Request timeout in seconds
+  filename: "vod"
+  format: "hls"
+  logname: "rec.log"
+  audioSample: 48000
+  audioChannel: 2
+  audioBitrate: 96
+  windowWidth: 1280
+  windowHeight: 720
+  videoFps: 15
+  videoBitrate: 800
+  sliceDuration: 15
+  maxRecordingHours: 1
+  enableWebGL: false
+  output_path: "/opt2"               # Output directory for web recordings
+  max_retries: 3                     # Max retry attempts
+
+# Environment variable overrides:
+# REDIS_ADDR, REDIS_PASSWORD, POD_REGION, POD_WORKERS
+# WEB_RECORDER_BASE_URL
+# 

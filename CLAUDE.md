@@ -162,21 +162,21 @@ This is an Agora RTC egress recording system with a hybrid C++/Go architecture:
 
 ## Build Commands
 
-### C++ Components
+### Local Build Components (for development, without docker)
 - **Build all components**: `./build.sh full [AGORA_SDK_URL]` - Downloads Agora SDK, installs dependencies, and builds both C++ and Go components
 - **Build C++ and Go**: `./build.sh build` - Builds C++ components and Go server (requires Agora SDK to be present)
 - **Build C++ only**: `./build.sh cpp` - Builds C++ components (requires Agora SDK to be present)
+- **Build Go only**: `./build.sh go` - Builds Go server (requires Agora SDK to be present)
+- **Build local services**: `./build.sh local` - Builds all local services (requires Agora SDK to be present)
 - **Clean build**: `./build.sh clean` - Removes build artifacts
 - **Install dependencies**: `./build.sh deps` - Installs system dependencies (cmake, ffmpeg, yaml-cpp, etc.)
 
-### Go Server
-- **Build Go server**: `./build.sh go` or `cd server && go build -o ../bin/egress`
-- **Run with dependencies**: `cd server && go mod tidy && go build -o ../bin/egress`
-
 ### Docker
-- **Build and run**: `docker-compose up --build -d`
-- **View logs**: `docker-compose logs -f`
-- **Stop services**: `docker-compose down`
+- **Build images**: `./build.sh images` - Build all standard service images
+- **Build image**: `./build.sh image [api-server|egress|flexible-recorder|webhook-notifier]` - Build specific service image
+- **Build and run**: `docker compose up --build -d`
+- **View logs**: `docker compose logs -f`
+- **Stop services**: `docker compose down`
 
 ## Architecture Overview
 
@@ -193,23 +193,26 @@ This is an Agora RTC egress recording system with a hybrid C++/Go architecture:
    - `task_pipe.cpp` and `include/task_pipe.h` - IPC communication between Go manager and C++ workers via Unix domain sockets
    - `common/` - Shared utilities, logging, configuration parsing
 
-2. **Go HTTP Server (`server/` directory)**:
-   - `main.go` - HTTP server providing REST API and health checks
-   - `egress/manager.go` - Manages C++ worker processes and task distribution
-   - `uploader/` - Handles S3 file uploads and filesystem watching
-   - `queue/` - Handles task queueing and distribution (redis)
-
-3. **Web Interface (`web/template/`)**:
-   - Simple HTML template for monitoring and control
+2. **Go HTTP Server (`cmd/` directory)**:
 
 ### Data Flow
 
-1. Go server receives HTTP API requests and puts tasks into redis queue
-2. Manager fetches tasks from redis queue and spawns C++ worker processes (`eg_worker`) via Unix domain sockets
-3. C++ workers connect to Agora RTC channels and capture video frames
-4. Frames are processed and saved as snapshots/recordings to configured output directories
-5. File watcher detects new files and uploads them to S3 if configured
-6. Workers report status back to manager via IPC
+1. `cmd/api_server/` - Task publisher service
+- receives HTTP API requests and puts tasks into redis queue
+for native
+2. `cmd/egress/` - Native recording service (ModeNative)
+- Manager fetches tasks from redis queue and spawns C++ worker processes (`eg_worker`) via Unix domain sockets
+- C++ workers connect to Agora RTC channels and capture video frames
+- Frames are processed and saved as snapshots/recordings to configured output directories
+- Workers report status back to manager via IPC
+for web
+3. `cmd/flexible_recorder/` - Web recording service (ModeWeb, shares the code with `cmd/egress`, binary: flexible-recorder)
+- Manager fetches tasks from redis queue and send to Web Recorder
+- Web Recorder Engine(external stanalone service in a docker container)
+4. `cmd/uploader/` - File uploader service
+- detects new files in configured directory and uploads them to S3
+5. `cmd/webhook-notifier/` - Webhook notifier service
+- send webhook notifications to configured endpoints
 
 ### Key Dependencies
 
@@ -221,11 +224,13 @@ This is an Agora RTC egress recording system with a hybrid C++/Go architecture:
 ## Low level designs
 
 - under `designs` directory
-  - `composition_mode_design.md`: composition mode design
-  - `rtc_pts_design.md`: a/v sync, pts design
-  - `task_dispatching_design.md`: task dispatching design
-  - `validation_security_design.md`: validation and security design
-  - `worker_recovery_design.md`: worker/egress recovery design
+   - `unified_pod_architecture_design.md`: unified pod architecture design
+   - `vars_config_design.md`: variables and configuration design
+   - `composition_mode_design.md`: composition mode design
+   - `rtc_pts_design.md`: a/v sync, pts design
+   - `task_dispatching_design.md`: task dispatching design
+   - `validation_security_design.md`: validation and security design
+   - `worker_recovery_design.md`: worker/egress recovery design
 
 ## Configuration
 

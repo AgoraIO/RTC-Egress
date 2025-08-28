@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-notifier
+  namespace: rtc-egress
+  labels:
+    app: webhook-notifier
+    component: notification
+spec:
+  # Initial replica count - will be managed by HPA
+  replicas: 2
+  selector:
+    matchLabels:
+      app: webhook-notifier
+      component: notification
+  template:
+    metadata:
+      labels:
+        app: webhook-notifier
+        component: notification
+    spec:
+      containers:
+      - name: webhook-notifier
+        image: rtc-egress:latest  # Same image as egress, different binary
+        command: ["/app/bin/webhook_notifier"]
+        ports:
+        - containerPort: 8185  # Health check
+          name: health
+        env:
+        - name: APP_ID
+          valueFrom:
+            secretKeyRef:
+              name: agora-secrets
+              key: app-id
+        - name: REDIS_ADDR
+          value: "redis:6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secrets
+              key: password
+              optional: true
+        - name: REDIS_DB
+          value: "0"
+        - name: POD_REGION
+          value: "us-west-1"  # Adjust per region
+        - name: WEBHOOK_URL
+          valueFrom:
+            secretKeyRef:
+              name: webhook-secrets
+              key: url
+        - name: WEBHOOK_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: webhook-secrets
+              key: auth-token
+              optional: true
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+        - name: logs-volume
+          mountPath: /app/logs
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8185
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8185
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
+      volumes:
+      - name: config-volume
+        configMap:
+          name: webhook-notifier-config
+      - name: logs-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-notifier
+  namespace: rtc-egress
+  labels:
+    app: webhook-notifier
+    component: notification
+spec:
+  ports:
+  - port: 8185
+    targetPort: 8185
+    name: health
+  selector:
+    app: webhook-notifier
+    component: notification
+  type: ClusterIP

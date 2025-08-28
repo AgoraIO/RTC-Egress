@@ -1,0 +1,54 @@
+# Flexible Recorder - Debug Image (Full build environment with source code and symbols)
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY cmd/flexible_recorder/ ./cmd/flexible_recorder/
+COPY pkg/ ./pkg/
+
+# Build the flexible recorder binary with debug symbols
+RUN CGO_ENABLED=0 GOOS=linux go build -gcflags="all=-N -l" -o flexible_recorder ./cmd/flexible_recorder
+
+FROM ubuntu:24.04
+
+# Install runtime and debug dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    gdb \
+    strace \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt
+
+# Copy the flexible recorder binary with debug symbols
+COPY --from=builder /app/flexible_recorder ./bin/
+
+# Copy source code for debugging
+COPY --from=builder /app/cmd/ ./cmd/
+COPY --from=builder /app/pkg/ ./pkg/
+
+# Create non-root user
+RUN addgroup --gid 1000 rtc_egress && \
+    adduser --disabled-password --gecos '' --uid 1000 --gid 1000 rtc_egress
+
+# Create directories
+RUN mkdir -p /opt/config /var/log/flexible_recorder /web_recorder && \
+    chown -R rtc_egress:rtc_egress /opt /var/log/flexible_recorder /web_recorder
+
+USER rtc_egress
+
+# Expose ports (dynamic from config)
+EXPOSE 8193
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8193/health || exit 1
+
+# Default command
+CMD ["./bin/flexible_recorder", "--config", "/opt/config/flexible_recorder_config.yaml"]

@@ -47,13 +47,12 @@ type Task struct {
 }
 
 type RedisQueue struct {
-	client   *redis.Client
-	ttl      time.Duration
-	patterns []string
-	region   string // Current pod's region
+	client *redis.Client
+	ttl    time.Duration
+	region string // Current pod's region
 }
 
-func NewRedisQueue(addr, password string, db int, ttl int, patterns []string, region string) *RedisQueue {
+func NewRedisQueue(addr, password string, db int, ttl int, region string) *RedisQueue {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     addr,
 		Password: password,
@@ -61,10 +60,9 @@ func NewRedisQueue(addr, password string, db int, ttl int, patterns []string, re
 	})
 
 	return &RedisQueue{
-		client:   rdb,
-		ttl:      time.Duration(ttl) * time.Second,
-		patterns: patterns,
-		region:   region,
+		client: rdb,
+		ttl:    time.Duration(ttl) * time.Second,
+		region: region,
 	}
 }
 
@@ -89,13 +87,6 @@ func (rq *RedisQueue) buildRegionalQueueKey(region, taskType, channel string) st
 // BuildRegionalQueueKey builds a region-specific queue key (public)
 func (rq *RedisQueue) BuildRegionalQueueKey(region, taskType, channel string) string {
 	return rq.buildRegionalQueueKey(region, taskType, channel)
-}
-
-// parseRegionFromIP extracts region from IP address (fake implementation for now)
-func parseRegionFromIP(ip string) string {
-	// TODO: Implement real IP-to-region mapping
-	// For now, return empty region (global)
-	return ""
 }
 
 func (rq *RedisQueue) BuildQueueKey(taskType, channel string) string {
@@ -135,10 +126,6 @@ func (rq *RedisQueue) GetRegion() string {
 	return rq.region
 }
 
-func (rq *RedisQueue) PublishTask(ctx context.Context, taskType, action, channel, requestID string, payload map[string]interface{}) (*Task, error) {
-	return rq.PublishTaskToRegion(ctx, taskType, action, channel, requestID, payload, "")
-}
-
 // PublishTaskToRegion publishes a task to a specific region queue
 func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, taskType, action, channel, requestID string, payload map[string]interface{}, region string) (*Task, error) {
 	dedupeKey := rq.buildDedupeKey(taskType, channel, requestID)
@@ -172,13 +159,19 @@ func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, taskType, action,
 
 	pipe := rq.client.TxPipeline()
 
-	// Use regional queue if region is specified
-	var queueKey string
-	if region != "" {
-		queueKey = rq.buildRegionalQueueKey(region, taskType, channel)
-	} else {
-		queueKey = rq.buildRegionalQueueKey("", taskType, channel) // Use global queue
+	// Determine queue routing based on layout in payload
+
+	layout := "flat" // default
+	if payload != nil {
+		if layoutVal, ok := payload["layout"]; ok {
+			if layoutStr, isStr := layoutVal.(string); isStr && layoutStr != "" {
+				layout = layoutStr
+			}
+		}
 	}
+
+	queueKey := rq.getQueueKey(layout, taskType, channel, region)
+
 	taskKey := rq.buildTaskKey(taskID)
 
 	pipe.LPush(ctx, queueKey, taskID)
@@ -196,67 +189,22 @@ func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, taskType, action,
 	return task, nil
 }
 
-func (rq *RedisQueue) SubscribeToTasks(ctx context.Context, workerID string, patterns []string, taskChan chan<- *Task) error {
-	if len(patterns) == 0 {
-		patterns = rq.patterns
-	}
-
-	log.Printf("Worker %s subscribing to patterns: %v", workerID, patterns)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			task, err := rq.fetchNextTask(ctx, workerID, patterns)
-			if err != nil {
-				log.Printf("Error fetching task for worker %s: %v", workerID, err)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			if task != nil {
-				taskChan <- task
-			} else {
-				time.Sleep(100 * time.Millisecond)
-			}
+func (rq *RedisQueue) getQueueKey(layout, cmd, channel, region string) string {
+	if layout == "freestyle" {
+		// Route to flexible-recorder pods - matches patterns "web:*" and "*:web:*"
+		if region != "" {
+			return fmt.Sprintf("egress:%s:web:channel:%s", region, channel)
+		} else {
+			return fmt.Sprintf("egress:web:channel:%s", channel)
+		}
+	} else {
+		// Route to native egress pods - matches patterns "egress:snapshot:*" etc.
+		if region != "" {
+			return fmt.Sprintf("egress:%s:%s:channel:%s", region, cmd, channel)
+		} else {
+			return fmt.Sprintf("egress:%s:channel:%s", cmd, channel)
 		}
 	}
-}
-
-func (rq *RedisQueue) fetchNextTask(ctx context.Context, workerID string, patterns []string) (*Task, error) {
-	// Get prioritized queues: regional queues first, then global queues
-	queues := rq.getPrioritizedQueues(ctx, patterns)
-	if len(queues) == 0 {
-		return nil, nil
-	}
-
-	processingQueue := rq.buildProcessingQueueKey(workerID)
-
-	// Try BRPOPLPUSH for each queue to atomically move task to processing queue
-	// Regional queues are checked first due to prioritized order
-	for _, queue := range queues {
-		taskID, err := rq.client.BRPopLPush(ctx, queue, processingQueue, 1*time.Second).Result()
-		if err != nil {
-			if err == redis.Nil {
-				continue // Try next queue
-			}
-			return nil, fmt.Errorf("failed to pop from queue %s: %v", queue, err)
-		}
-
-		// Successfully got a task, now update its state and create lease
-		task, err := rq.ClaimTaskWithLease(ctx, taskID, workerID)
-		if err != nil {
-			// If we can't claim the task, push it back to the original queue
-			rq.client.LRem(ctx, processingQueue, 1, taskID)
-			rq.client.LPush(ctx, queue, taskID)
-			return nil, fmt.Errorf("failed to claim task %s: %v", taskID, err)
-		}
-
-		log.Printf("Worker %s fetched task %s from queue %s", workerID, taskID, queue)
-		return task, nil
-	}
-
-	return nil, nil // No tasks available
 }
 
 // ClaimTaskWithLease updates task state and creates a lease
