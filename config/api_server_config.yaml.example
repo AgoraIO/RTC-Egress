@@ -1,0 +1,23 @@
+# API Server Configuration - Task Publisher Only
+# This service receives HTTP requests and publishes tasks to Redis queues
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+server:
+  port: 8080          # Main API port
+  health_port: 8181   # Health check port
+
+# Task routing configuration
+task_routing:
+  default_region: "" // empty for global
+  task_ttl: 172800           # Task TTL in seconds (48 hours)
+
+# Layout-based queue routing:
+# - freestyle → egress:web:record:*, egress:web:snapshot:*  
+# - flat/spotlight/customized → egress:record:*, egress:snapshot:*
+
+# Environment variable overrides:
+# REDIS_ADDR, REDIS_PASSWORD, API_PORT, HEALTH_PORT, POD_REGION

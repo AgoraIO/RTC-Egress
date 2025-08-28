@@ -1,0 +1,180 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-recorder
+  namespace: rtc-egress
+  labels:
+    app: web-recorder
+    component: web-service
+spec:
+  # Fixed number of web recorder instances
+  replicas: 6
+  selector:
+    matchLabels:
+      app: web-recorder
+      component: web-service
+  template:
+    metadata:
+      labels:
+        app: web-recorder
+        component: web-service
+    spec:
+      containers:
+      - name: web-recorder
+        image: your-web-recorder:latest  # Replace with your 3rd-party web recorder image
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: NODE_ENV
+          value: "production"
+        # Add any environment variables required by your web recorder
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health  # Adjust to your web recorder's health endpoint
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health  # Adjust to your web recorder's health endpoint
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-recorder
+  namespace: rtc-egress
+  labels:
+    app: web-recorder
+    component: web-service
+spec:
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: http
+  selector:
+    app: web-recorder
+    component: web-service
+  type: ClusterIP
+---
+# Web Dispatch - Fixed scaling, no HPA
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flexible-recorder
+  namespace: rtc-egress
+  labels:
+    app: flexible-recorder
+    component: flexible-recorderer
+spec:
+  # Fixed replica count - intentionally NOT managed by HPA
+  replicas: 6
+  selector:
+    matchLabels:
+      app: flexible-recorder
+      component: flexible-recorderer
+  template:
+    metadata:
+      labels:
+        app: flexible-recorder
+        component: flexible-recorderer
+    spec:
+      containers:
+      - name: flexible-recorder
+        image: rtc-egress/flexible-recorder:latest
+        command: ["/app/bin/flexible-recorder"]
+        ports:
+        - containerPort: 8183  # Health check (different port from egress)
+          name: health
+        env:
+        - name: APP_ID
+          valueFrom:
+            secretKeyRef:
+              name: agora-secrets
+              key: app-id
+        - name: REDIS_ADDR
+          value: "redis:6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secrets
+              key: password
+              optional: true
+        - name: REDIS_DB
+          value: "0"
+        - name: POD_REGION
+          value: "us-west-1"  # Adjust per region
+        - name: WEB_RECORDER_BASE_URL
+          value: "http://web-recorder:3000"
+        - name: WEB_RECORDER_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: web-recorder-secrets
+              key: auth-token
+              optional: true
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+        - name: logs-volume
+          mountPath: /app/logs
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8183
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8183
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
+      volumes:
+      - name: config-volume
+        configMap:
+          name: flexible-recorder-config
+      - name: logs-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flexible-recorder
+  namespace: rtc-egress
+  labels:
+    app: flexible-recorder
+    component: flexible-recorderer
+spec:
+  ports:
+  - port: 8182
+    targetPort: 8182
+    name: health
+  selector:
+    app: flexible-recorder
+    component: flexible-recorderer
+  type: ClusterIP

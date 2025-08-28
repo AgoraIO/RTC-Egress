@@ -1,0 +1,459 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/AgoraIO/RTC-Egress/pkg/egress"
+	"github.com/AgoraIO/RTC-Egress/pkg/queue"
+	"github.com/gin-gonic/gin"
+	"github.com/spf13/viper"
+)
+
+// parseRegionFromIP extracts region from IP address (fake implementation for now)
+func parseRegionFromIP(ip string) string {
+	// TODO: Implement real IP-to-region mapping
+	// For now, return empty region (global)
+	return ""
+}
+
+type APIServer struct {
+	redisQueue *queue.RedisQueue
+	config     *Config
+}
+
+type Config struct {
+	Redis struct {
+		Addr     string `mapstructure:"addr"`
+		Password string `mapstructure:"password"`
+		DB       int    `mapstructure:"db"`
+	} `mapstructure:"redis"`
+	Server struct {
+		Port       int `mapstructure:"port"`
+		HealthPort int `mapstructure:"health_port"`
+	} `mapstructure:"server"`
+	TaskRouting struct {
+		DefaultRegion string `mapstructure:"default_region"`
+		TaskTTL       int    `mapstructure:"task_ttl"`
+	} `mapstructure:"task_routing"`
+}
+
+type Task struct {
+	TaskID      string                 `json:"task_id"`
+	ChannelName string                 `json:"channel_name"`
+	Token       string                 `json:"token"`
+	Mode        string                 `json:"mode"` // "record" or "snapshot"
+	Output      map[string]interface{} `json:"output"`
+	WebRecorder map[string]interface{} `json:"web_recorder,omitempty"`
+	Region      string                 `json:"region"`
+	CreatedAt   time.Time              `json:"created_at"`
+	ExpiresAt   time.Time              `json:"expires_at"`
+}
+
+type TaskResponse struct {
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+}
+
+func NewAPIServer(config *Config) *APIServer {
+	// Initialize RedisQueue
+	redisQueue := queue.NewRedisQueue(
+		config.Redis.Addr,
+		config.Redis.Password,
+		config.Redis.DB,
+		config.TaskRouting.TaskTTL,
+		config.TaskRouting.DefaultRegion,
+	)
+
+	return &APIServer{
+		redisQueue: redisQueue,
+		config:     config,
+	}
+}
+
+func (s *APIServer) startTask(c *gin.Context) {
+	appID := c.Param("app_id")
+	if appID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "app_id is required"})
+		return
+	}
+
+	var taskReq egress.TaskRequest
+	if err := c.ShouldBindJSON(&taskReq); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "request_id": taskReq.RequestID})
+		return
+	}
+
+	// Payload is required
+	if taskReq.Payload == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      "payload is required",
+			"request_id": taskReq.RequestID,
+		})
+		return
+	}
+
+	// Add app_id to payload
+	taskReq.Payload["app_id"] = appID
+
+	// Set action to "start" since this is the start endpoint
+	taskReq.Action = "start"
+
+	// Validate layout in payload
+	layout := "flat" // default
+	if layoutVal, ok := taskReq.Payload["layout"]; ok {
+		if layoutStr, isStr := layoutVal.(string); isStr && layoutStr != "" {
+			layout = layoutStr
+		}
+	}
+	validLayouts := []string{"flat", "spotlight", "customized", "freestyle"}
+	layoutValid := false
+	for _, validLayout := range validLayouts {
+		if layout == validLayout {
+			layoutValid = true
+			break
+		}
+	}
+	if !layoutValid {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      fmt.Sprintf("invalid layout: %s", layout),
+			"request_id": taskReq.RequestID,
+		})
+		return
+	}
+
+	// Validate freestyle layout has web_recorder config
+	if layout == "freestyle" {
+		if webRecorder, ok := taskReq.Payload["web_recorder"]; !ok || webRecorder == nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":      "freestyle layout requires web_recorder configuration in payload",
+				"request_id": taskReq.RequestID,
+			})
+			return
+		}
+	}
+
+	// Validate request parameters before Redis publishing
+	if err := egress.ValidateStartTaskRequest(&taskReq); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      fmt.Sprintf("validation failed: %v", err),
+			"request_id": taskReq.RequestID,
+		})
+		return
+	}
+
+	// Redis is required for task management
+	if s.redisQueue == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "Redis queue not configured",
+			"request_id": taskReq.RequestID,
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Extract channel from payload
+	channel := ""
+	if ch, ok := taskReq.Payload["channel"].(string); ok && ch != "" {
+		channel = ch
+	}
+	if channel == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      "channel is required in payload",
+			"request_id": taskReq.RequestID,
+		})
+		return
+	}
+
+	// Parse region from client IP
+	clientIP := c.ClientIP()
+	region := parseRegionFromIP(clientIP)
+	log.Printf("Client IP: %s, Parsed region: %s", clientIP, region)
+
+	task, err := s.redisQueue.PublishTaskToRegion(ctx, taskReq.Cmd, "start", channel, taskReq.RequestID, taskReq.Payload, region)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      err.Error(),
+			"request_id": taskReq.RequestID,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"request_id": taskReq.RequestID,
+		"task_id":    task.ID,
+		"status":     "enqueued",
+	})
+}
+
+func (s *APIServer) stopTask(c *gin.Context) {
+	appID := c.Param("app_id")
+	taskID := c.Param("task_id")
+	if appID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "app_id is required"})
+		return
+	}
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "task_id is required"})
+		return
+	}
+
+	var req struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate request parameters
+	if err := egress.ValidateStopTaskRequest(req.RequestID, taskID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      fmt.Sprintf("validation failed: %v", err),
+			"request_id": req.RequestID,
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Get the existing task
+	task, err := s.redisQueue.GetTaskStatus(ctx, taskID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"request_id": req.RequestID,
+			"task_id":    taskID,
+			"status":     "rejected",
+			"error":      fmt.Sprintf("Task %s not found", taskID),
+		})
+		return
+	}
+
+	// Check if task is already completed
+	if task.State == queue.TaskStateSuccess || task.State == queue.TaskStateFailed || task.State == queue.TaskStateTimeout {
+		c.JSON(http.StatusOK, gin.H{
+			"request_id": req.RequestID,
+			"task_id":    taskID,
+			"status":     "completed",
+			"message":    fmt.Sprintf("Task already in state: %s", task.State),
+		})
+		return
+	}
+
+	// Create stop task in Redis with original task_id in payload
+	stopPayload := map[string]interface{}{
+		"task_id": taskID,
+		"app_id":  appID,
+	}
+
+	// Parse region from client IP for stop task as well
+	clientIP := c.ClientIP()
+	region := parseRegionFromIP(clientIP)
+	log.Printf("Stop task - Client IP: %s, Parsed region: %s", clientIP, region)
+
+	stopTask, err := s.redisQueue.PublishTaskToRegion(ctx, task.Type, "stop", task.Channel, req.RequestID, stopPayload, region)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      fmt.Sprintf("Failed to create stop task: %v", err),
+			"request_id": req.RequestID,
+			"task_id":    taskID,
+		})
+		return
+	}
+
+	log.Printf("Created stop task %s for original task %s", stopTask.ID, taskID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"request_id": req.RequestID,
+		"task_id":    stopTask.ID,
+		"status":     "enqueued",
+	})
+}
+
+func (s *APIServer) getTaskStatus(c *gin.Context) {
+	appID := c.Param("app_id")
+	taskID := c.Param("task_id")
+	if appID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "app_id is required"})
+		return
+	}
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "task_id is required"})
+		return
+	}
+
+	var req struct {
+		RequestID string `json:"request_id"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate request parameters
+	if err := egress.ValidateStatusTaskRequest(req.RequestID, taskID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      fmt.Sprintf("validation failed: %v", err),
+			"request_id": req.RequestID,
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	task, err := s.redisQueue.GetTaskStatus(ctx, taskID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":      err.Error(),
+			"request_id": req.RequestID,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"request_id": req.RequestID,
+		"task_id":    task.ID,
+		"state":      task.State,
+		"action":     task.Action,
+		"created_at": task.CreatedAt,
+		"error":      task.Error,
+		"worker_id":  task.WorkerID,
+	})
+}
+
+func (s *APIServer) validateTask(task *Task) error {
+	// Validate mode
+	if task.Mode != "record" && task.Mode != "snapshot" {
+		return fmt.Errorf("invalid mode: %s", task.Mode)
+	}
+
+	return nil
+}
+
+func (s *APIServer) healthCheck(c *gin.Context) {
+	// Check Redis connection
+	ctx := context.Background()
+	err := s.redisQueue.Ping(ctx)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status": "unhealthy",
+			"error":  "Redis connection failed",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":    "healthy",
+		"service":   "api-server",
+		"timestamp": time.Now().Unix(),
+	})
+}
+
+func getRegion() string {
+	region := os.Getenv("POD_REGION")
+	if region == "" {
+		return "us-west-1"
+	}
+	return region
+}
+
+func generateRandomString(length int) string {
+	// Simple random string generation
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+	}
+	return string(b)
+}
+
+func loadConfig() *Config {
+	viper.SetConfigName("api_server_config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath("/opt/config")
+	viper.AddConfigPath("./config")
+
+	// Environment variable overrides
+	viper.SetEnvPrefix("API_SERVER")
+	viper.AutomaticEnv()
+
+	config := &Config{}
+
+	if err := viper.ReadInConfig(); err != nil {
+		log.Printf("Config file not found, using environment variables and defaults: %v", err)
+	}
+
+	// Set defaults
+	viper.SetDefault("redis.addr", "localhost:6379")
+	viper.SetDefault("redis.password", "")
+	viper.SetDefault("redis.db", 0)
+	viper.SetDefault("server.port", 8080)
+	viper.SetDefault("server.health_port", 8182)
+
+	// Override with environment variables
+	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+		viper.Set("redis.addr", addr)
+	}
+	if password := os.Getenv("REDIS_PASSWORD"); password != "" {
+		viper.Set("redis.password", password)
+	}
+	if port := os.Getenv("API_PORT"); port != "" {
+		viper.Set("server.port", port)
+	}
+	if healthPort := os.Getenv("HEALTH_PORT"); healthPort != "" {
+		viper.Set("server.health_port", healthPort)
+	}
+
+	if err := viper.Unmarshal(config); err != nil {
+		log.Fatalf("Failed to unmarshal config: %v", err)
+	}
+
+	return config
+}
+
+func main() {
+	config := loadConfig()
+	server := NewAPIServer(config)
+
+	// Main API router
+	r := gin.Default()
+
+	// API routes
+	v1 := r.Group("/egress/v1")
+	{
+		v1.POST("/:app_id/tasks", server.startTask)
+		v1.POST("/:app_id/tasks/:task_id/stop", server.stopTask)
+		v1.POST("/:app_id/tasks/:task_id/status", server.getTaskStatus)
+	}
+
+	// Health check router (separate port)
+	healthRouter := gin.New()
+	healthRouter.GET("/health", server.healthCheck)
+
+	// Start health server
+	go func() {
+		healthAddr := fmt.Sprintf(":%d", config.Server.HealthPort)
+		log.Printf("Health server starting on %s", healthAddr)
+		if err := healthRouter.Run(healthAddr); err != nil {
+			log.Fatalf("Health server failed: %v", err)
+		}
+	}()
+
+	// Start main API server
+	addr := fmt.Sprintf(":%d", config.Server.Port)
+	log.Printf("API server starting on %s", addr)
+	log.Printf("Connected to Redis: %s", config.Redis.Addr)
+
+	if err := r.Run(addr); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
+}

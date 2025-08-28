@@ -1,5 +1,41 @@
 # Task Dispatching Design
 
+  Rules
+  
+  ✅ Web/Native Shared Dispatch Logic
+
+  - Created TaskDispatcher interface that abstracts the Redis polling, lease management, and regional prioritization
+  - Both native and web recorder systems use the same dispatch logic
+  - Implemented TaskProcessor interface for pluggable task handling
+
+  ✅ WorkerManagerWebRecorderProxy
+
+  - Created HTTP client that delegates tasks to external web recorder service
+  - Implements retry logic, timeout handling, and proper error propagation
+  - Supports authentication via bearer tokens
+  - Handles start/stop/status operations via RESTful API
+
+  ✅ Standalone Flexible Recorder
+
+  - Built as cmd/flexible-recorder with streamlined naming convention
+  - Integrated with existing build.sh system
+  - Uses same configuration patterns as native egress service
+  - Supports both YAML config files and environment variables
+
+  ✅ Proper Task Segregation
+
+  - Native tasks: egress:record:*, egress:snapshot:*
+  - Web tasks: egress:web:record:*, egress:web:snapshot:*
+  - Different workers automatically handle their respective task types
+
+  ✅ Full Feature Parity
+
+  - Redis-based task queuing and processing
+  - Lease management and automatic failover
+  - Regional task prioritization
+  - Health monitoring and pod registration
+  - Graceful shutdown and error handling
+
 ## Concepts
   1. State Definition
 	- TaskStateEnqueued    = "ENQUEUED"    // Task waiting in queue (can timeout after TaskTimeout)

@@ -1,0 +1,33 @@
+# Webhook Notifier Configuration - Redis Keyspace Listener → HTTP Notifications
+# This service listens to Redis keyspace events and sends HTTP webhook notifications
+
+# Redis Configuration
+redis:
+  addr: "localhost:6379" # Redis server address
+  password: ""               # Redis password (leave empty if no password)
+  db: 0                      # Redis database number
+
+server:
+  health_port: 8185   # Health check port (different from other services)
+
+pod:
+  region: "us-west-1" # Pod region identifier
+
+# Webhook notification configuration
+webhook:
+  url: "https://your-webhook-endpoint.com/notifications"  # Webhook endpoint URL
+  timeout: 30                    # HTTP request timeout in seconds
+  max_retries: 5                # Maximum retry attempts
+  base_retry_interval: 15       # Base retry interval in seconds (exponential backoff)
+  max_retry_interval: 300       # Maximum retry interval in seconds
+  auth_token: ""                # Optional Bearer token for authentication
+  
+  # Which task states trigger notifications
+  notify_states:
+    - "PROCESSING"              # Task started processing(Every LeaseRenewalInterval)
+    - "SUCCESS"                 # Task completed successfully(Once)
+    - "FAILED"                  # Task failed(Once)
+    - "TIMEOUT"                 # Task timed out(Once)
+
+# Environment variable overrides:
+# REDIS_ADDR, REDIS_PASSWORD, POD_REGION, WEBHOOK_URL, WEBHOOK_AUTH_TOKEN

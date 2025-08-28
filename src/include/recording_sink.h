@@ -83,6 +83,10 @@ class RecordingSink {
         std::string channel = "";  // Channel name for metadata
     };
 
+    // Callback type for task completion notification
+    using CompletionCallback = std::function<void(
+        const std::string& taskId, const std::string& status, const std::string& message)>;
+
     RecordingSink();
     ~RecordingSink();
 
@@ -91,6 +95,11 @@ class RecordingSink {
     void stop();
     bool isRecording() const {
         return isRecording_.load() && !stopRequested_.load();
+    }
+
+    // Set callback for task completion notifications
+    void setCompletionCallback(CompletionCallback callback) {
+        completionCallback_ = callback;
     }
 
     // Video frame input
@@ -280,6 +289,9 @@ class RecordingSink {
 
     // Timing
     std::chrono::steady_clock::time_point startTime_;
+
+    // Task completion callback
+    CompletionCallback completionCallback_;
 };
 
 }  // namespace rtc

@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,18 +17,9 @@ import (
 	"github.com/AgoraIO/RTC-Egress/pkg/health"
 	"github.com/AgoraIO/RTC-Egress/pkg/queue"
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
-	"github.com/gin-gonic/gin"
 )
 
 var egressConfigPath string
-var requestIdRegexp = regexp.MustCompile(`^[0-9a-zA-Z]{1,32}$`)
-
-// parseRegionFromIP extracts region from IP address (fake implementation for now)
-func parseRegionFromIP(ip string) string {
-	// TODO: Implement real IP-to-region mapping
-	// For now, return empty region (global)
-	return ""
-}
 
 // Worker states
 const (
@@ -80,36 +69,55 @@ type TaskResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// WorkerManagerMode defines the operational mode of the worker manager
+type WorkerManagerMode int
+
+const (
+	ModeNative WorkerManagerMode = iota // Handles native recording tasks only
+	ModeWeb                             // Handles web recording tasks only
+)
+
 type WorkerManager struct {
-	Workers        []*Worker
-	NumWorkers     int
-	BinPath        string
-	Mutex          sync.Mutex
-	ChannelWorkers map[string]int                 // Maps channel name to worker ID (0,1,2,3)
-	WorkerChannels map[int]string                 // Maps worker ID to channel name
-	ChannelTasks   map[string]map[string][]string // Maps channel -> task type -> []task_ids
-	RedisQueue     *queue.RedisQueue              // Redis queue for task management
-	PodID          string                         // Unique pod identifier
-	ActiveTasks    map[string]string              // Maps task_id -> pod_id for lease renewal
-	TasksMutex     sync.RWMutex                   // Protects ActiveTasks map
-	HealthManager  *health.HealthManager          // Health monitoring (optional)
+	Workers           []*Worker
+	NumWorkers        int
+	BinPath           string
+	Mutex             sync.Mutex
+	ChannelWorkers    map[string]int                 // Maps channel name to worker ID (0,1,2,3)
+	WorkerChannels    map[int]string                 // Maps worker ID to channel name
+	ChannelTasks      map[string]map[string][]string // Maps channel -> task type -> []task_ids
+	RedisQueue        *queue.RedisQueue              // Redis queue for task management
+	PodID             string                         // Unique pod identifier
+	ActiveTasks       map[string]string              // Maps task_id -> pod_id for lease renewal
+	TasksMutex        sync.RWMutex                   // Protects ActiveTasks map
+	HealthManager     *health.HealthManager          // Health monitoring (optional)
+	webRecorderProxy  *WorkerManagerWebRecorderProxy // Web recorder proxy for web tasks
+	mode              WorkerManagerMode              // Operational mode of this manager
+	webRecorderConfig *WebRecorderConfig             // Web recorder configuration
+	patterns          []string                       // Task patterns this manager handles
 }
 
 // Global worker manager instance for cleanup
 var globalWorkerManager *WorkerManager
 
 func NewWorkerManagerWithHealth(binPath string, num int, redisQueue *queue.RedisQueue, podID string, healthManager *health.HealthManager) *WorkerManager {
+	return NewWorkerManagerWithMode(binPath, num, redisQueue, podID, healthManager, ModeNative, nil, []string{})
+}
+
+func NewWorkerManagerWithMode(binPath string, num int, redisQueue *queue.RedisQueue, podID string, healthManager *health.HealthManager, mode WorkerManagerMode, webConfig *WebRecorderConfig, patterns []string) *WorkerManager {
 	wm := &WorkerManager{
-		Workers:        make([]*Worker, num),
-		NumWorkers:     num,
-		BinPath:        binPath,
-		ChannelWorkers: make(map[string]int),
-		WorkerChannels: make(map[int]string),
-		ChannelTasks:   make(map[string]map[string][]string),
-		RedisQueue:     redisQueue,
-		PodID:          podID,
-		ActiveTasks:    make(map[string]string),
-		HealthManager:  healthManager,
+		Workers:           make([]*Worker, num),
+		NumWorkers:        num,
+		BinPath:           binPath,
+		ChannelWorkers:    make(map[string]int),
+		WorkerChannels:    make(map[int]string),
+		ChannelTasks:      make(map[string]map[string][]string),
+		RedisQueue:        redisQueue,
+		PodID:             podID,
+		ActiveTasks:       make(map[string]string),
+		HealthManager:     healthManager,
+		mode:              mode,
+		webRecorderConfig: webConfig,
+		patterns:          patterns,
 	}
 
 	// Start health heartbeat if HealthManager is available
@@ -141,6 +149,21 @@ func (wm *WorkerManager) StartAll() {
 func (wm *WorkerManager) startWorker(i int) {
 	wm.Mutex.Lock()
 	defer wm.Mutex.Unlock()
+
+	// In ModeWeb, we don't spawn eg_worker processes - web tasks are handled via HTTP API calls
+	if wm.mode == ModeWeb {
+		log.Printf("Worker %d: Web recording uses external API", i)
+		// TODO: should check the web recorder status with probe asynchronously
+		wm.Workers[i] = &Worker{
+			ID:  i,
+			Cmd: nil,
+			Status: WorkerStatus{
+				ID:    i,
+				State: WORKER_RUNNING, // Mark as running since web mode doesn't need C++ workers
+			},
+		}
+		return
+	}
 
 	// Clean up old socket if exists
 	sockPath := fmt.Sprintf("/tmp/agora/eg_worker_%d.sock", i)
@@ -245,6 +268,13 @@ func (wm *WorkerManager) startWorker(i int) {
 }
 
 func (wm *WorkerManager) monitorWorkers() {
+	// In ModeWeb, there are no eg_worker processes to monitor
+	// WebRecorder is managerd by k8s or other external system
+	if wm.mode == ModeWeb {
+		log.Printf("Worker monitoring disabled in web/flexible recorder mode")
+		return
+	}
+
 	for {
 		time.Sleep(2 * time.Second)
 		for i, w := range wm.Workers {
@@ -652,17 +682,18 @@ func (wm *WorkerManager) moveTaskBackToMainQueue(ctx context.Context, taskID str
 func (wm *WorkerManager) startRedisSubscriber() {
 	log.Printf("Starting Redis task subscriber for pod %s", wm.PodID)
 
+	// Validate that patterns were provided during construction
+	if len(wm.patterns) == 0 {
+		log.Fatalf("Worker patterns not configured - cannot start Redis subscriber")
+		return
+	}
+
+	log.Printf("Using configured patterns: %v", wm.patterns)
+
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
-		// Use regional queue patterns that match our new structure
-		patterns := []string{"egress:snapshot:channel:*", "egress:record:channel:*"}
-		if wm.RedisQueue != nil {
-			// Include web:record pattern for compatibility
-			patterns = []string{"egress:snapshot:channel:*", "egress:record:channel:*", "egress:web:record:channel:*"}
-		}
-
-		task, err := wm.fetchTaskFromRedis(ctx, patterns)
+		task, err := wm.fetchTaskFromRedis(ctx, wm.patterns)
 		cancel()
 
 		if err != nil {
@@ -862,7 +893,18 @@ func (wm *WorkerManager) processRedisTask(task *queue.Task) {
 
 // startTask starts a task from Redis queue directly
 func (wm *WorkerManager) startTask(task *queue.Task) error {
-	// Create UDS message directly from task
+	isWebTask := strings.Contains(task.Type, ":web:")
+
+	if isWebTask {
+		return wm.startWebRecorderTask(task)
+	} else {
+		return wm.startNativeRecorderTask(task)
+	}
+}
+
+// startNativeRecorderTask starts a native recording task using eg_workers
+func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
+	// Create UDS message directly from task for native tasks
 	udsMsg := &UDSMessage{
 		TaskID:  task.ID,
 		Cmd:     task.Type,
@@ -940,6 +982,36 @@ func (wm *WorkerManager) startTask(task *queue.Task) error {
 	return nil
 }
 
+func (wm *WorkerManager) startWebRecorderTask(task *queue.Task) error {
+	log.Printf("Starting web recording task %s (type: %s, channel: %s)", task.ID, task.Type, task.Channel)
+
+	// Create web recorder proxy if not exists (lazy initialization)
+	if wm.webRecorderProxy == nil {
+		var webConfig WebRecorderConfig
+		if wm.webRecorderConfig != nil {
+			webConfig = *wm.webRecorderConfig
+		} else {
+			// Default web recorder configuration
+			webConfig = WebRecorderConfig{
+				BaseURL:    "http://localhost:8001",
+				Timeout:    30,
+				AuthToken:  "",
+				MaxRetries: 3,
+			}
+		}
+		wm.webRecorderProxy = NewWorkerManagerWebRecorderProxy(webConfig, wm.PodID)
+	}
+
+	// Process the web task using the proxy
+	err := wm.webRecorderProxy.ProcessRedisTask(task)
+	if err != nil {
+		return fmt.Errorf("failed to start web recording task: %v", err)
+	}
+
+	log.Printf("Successfully started web recording task %s", task.ID)
+	return nil
+}
+
 // stopTask stops a task from Redis queue directly - always succeeds
 // Returns a special error to prevent post-processing
 func (wm *WorkerManager) stopTask(task *queue.Task) error {
@@ -972,7 +1044,31 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 		wm.TasksMutex.Unlock()
 	}()
 
-	// 2. Find which worker is running the original task
+	// 2. Check if original task was a web recording task
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	originalTask, err := wm.RedisQueue.GetTaskStatus(ctx, originalTaskID)
+	cancel()
+
+	if err == nil && (strings.HasPrefix(originalTask.Type, "web:") || strings.Contains(originalTask.Type, ":web:")) {
+		// This is a web task - use web recorder proxy to stop it
+		if wm.webRecorderProxy != nil {
+			log.Printf("Stopping web recording task %s via web recorder proxy", originalTaskID)
+			err := wm.webRecorderProxy.ProcessRedisTask(task)
+			if err != nil {
+				log.Printf("Failed to stop web recording task %s: %v", originalTaskID, err)
+			} else {
+				log.Printf("Successfully stopped web recording task %s", originalTaskID)
+			}
+		}
+
+		// Mark original task as SUCCESS
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		wm.RedisQueue.UpdateTaskResult(ctx, originalTaskID, queue.TaskStateSuccess, "Stopped by user via web recorder")
+		return nil
+	}
+
+	// 3. Find which worker is running the original native task
 	var targetWorker *Worker
 	var targetWorkerID int
 	wm.Mutex.Lock()
@@ -1322,6 +1418,29 @@ func (wm *WorkerManager) isUnrecoverableError(errorMsg string) bool {
 
 // getTaskStatus gets status of a task from Redis queue directly
 func (wm *WorkerManager) getTaskStatus(task *queue.Task) error {
+	isWebTask := strings.HasPrefix(task.Type, "web:") || strings.Contains(task.Type, ":web:")
+
+	// Route based on manager mode and task type
+	switch wm.mode {
+	case ModeNative:
+		if isWebTask {
+			return fmt.Errorf("native-only manager cannot handle web task status: %s", task.Type)
+		}
+		return wm.getNativeTaskStatus(task)
+
+	case ModeWeb:
+		if !isWebTask {
+			return fmt.Errorf("web-only manager cannot handle native task status: %s", task.Type)
+		}
+		return wm.getWebTaskStatus(task)
+
+	default:
+		return fmt.Errorf("unknown manager mode: %d", wm.mode)
+	}
+}
+
+// getNativeTaskStatus gets status of a native task from eg_workers
+func (wm *WorkerManager) getNativeTaskStatus(task *queue.Task) error {
 	udsMsg := &UDSMessage{
 		TaskID:  task.ID,
 		Cmd:     task.Type,
@@ -1355,6 +1474,14 @@ func (wm *WorkerManager) getTaskStatus(task *queue.Task) error {
 
 	log.Printf("Pod %s get status of task %s on worker %d", wm.PodID, task.ID, workerID)
 	return nil
+}
+
+// getWebTaskStatus gets status of a web recording task using the web recorder proxy
+func (wm *WorkerManager) getWebTaskStatus(task *queue.Task) error {
+	if wm.webRecorderProxy != nil {
+		return wm.webRecorderProxy.ProcessRedisTask(task)
+	}
+	return fmt.Errorf("web recorder proxy not available for task %s", task.ID)
 }
 
 // findWorkerForChannel finds worker for channel (reuse existing or find free)
@@ -1642,7 +1769,7 @@ func (wm *WorkerManager) sendUDSMessageToWorker(worker *Worker, taskID string, u
 	return nil
 }
 
-func ManagerMainWithRedisAndHealth(redisQueue *queue.RedisQueue, healthManager *health.HealthManager, numWorkers int) {
+func ManagerMainWithRedisAndHealth(redisQueue *queue.RedisQueue, healthManager *health.HealthManager, numWorkers int, patterns []string) {
 	binPath := "./bin/eg_worker" // Adjust if needed
 	egressConfigPath = ""
 	for i, arg := range os.Args {
@@ -1657,212 +1784,14 @@ func ManagerMainWithRedisAndHealth(redisQueue *queue.RedisQueue, healthManager *
 	// Generate unique 12-character pod ID
 	podID := utils.GenerateRandomID(12)
 
-	wm := NewWorkerManagerWithHealth(binPath, numWorkers, redisQueue, podID, healthManager)
+	wm := NewWorkerManagerWithMode(binPath, numWorkers, redisQueue, podID, healthManager, ModeNative, nil, patterns)
 	globalWorkerManager = wm // Store for cleanup
 	wm.StartAll()
 
-	r := gin.Default()
+	log.Printf("Native egress worker manager started, listening for Redis tasks with patterns: %v", patterns)
 
-	// New API endpoint for automatic task start via Redis
-	r.POST("/egress/v1/task/start", func(c *gin.Context) {
-		var taskReq TaskRequest
-		if err := c.ShouldBindJSON(&taskReq); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "request_id": taskReq.RequestID})
-			return
-		}
-
-		// Set action to "start" since this is the start endpoint
-		taskReq.Action = "start"
-
-		// Validate request parameters before Redis publishing
-		if err := ValidateStartTaskRequest(&taskReq); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error":      fmt.Sprintf("validation failed: %v", err),
-				"request_id": taskReq.RequestID,
-			})
-			return
-		}
-
-		// Redis is required for task management
-		if wm.RedisQueue == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":      "Redis queue not configured",
-				"request_id": taskReq.RequestID,
-			})
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		// Extract channel from payload
-		channel := "default"
-		if taskReq.Payload != nil {
-			if ch, ok := taskReq.Payload["channel"].(string); ok && ch != "" {
-				channel = ch
-			}
-		}
-
-		// Parse region from client IP
-		clientIP := c.ClientIP()
-		region := parseRegionFromIP(clientIP)
-		log.Printf("Client IP: %s, Parsed region: %s", clientIP, region)
-
-		task, err := wm.RedisQueue.PublishTaskToRegion(ctx, taskReq.Cmd, "start", channel, taskReq.RequestID, taskReq.Payload, region)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":      err.Error(),
-				"request_id": taskReq.RequestID,
-			})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"request_id": taskReq.RequestID,
-			"task_id":    task.ID,
-			"status":     "enqueued",
-		})
-	})
-
-	// API endpoint to stop a worker from a task
-	r.POST("/egress/v1/task/stop", func(c *gin.Context) {
-		var req struct {
-			RequestID string `json:"request_id"`
-			TaskID    string `json:"task_id"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-
-		// Validate request parameters
-		if err := ValidateStopTaskRequest(req.RequestID, req.TaskID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error":      fmt.Sprintf("validation failed: %v", err),
-				"request_id": req.RequestID,
-			})
-			return
-		}
-
-		// Redis is required for task management
-		if wm.RedisQueue == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":      "Redis queue not configured",
-				"request_id": req.RequestID,
-			})
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		// Get the existing task
-		task, err := wm.RedisQueue.GetTaskStatus(ctx, req.TaskID)
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"request_id": req.RequestID,
-				"task_id":    req.TaskID,
-				"status":     "rejected",
-				"error":      fmt.Sprintf("Task %s not found", req.TaskID),
-			})
-			return
-		}
-
-		// Check if task is already completed
-		if task.State == queue.TaskStateSuccess || task.State == queue.TaskStateFailed || task.State == queue.TaskStateTimeout {
-			c.JSON(http.StatusOK, gin.H{
-				"request_id": req.RequestID,
-				"task_id":    req.TaskID,
-				"status":     "completed",
-				"message":    fmt.Sprintf("Task already in state: %s", task.State),
-			})
-			return
-		}
-
-		// Create stop task in Redis with original task_id in payload
-		stopPayload := map[string]interface{}{
-			"task_id": req.TaskID, // Include the original task_id so worker can find it
-		}
-
-		// Parse region from client IP for stop task as well
-		clientIP := c.ClientIP()
-		region := parseRegionFromIP(clientIP)
-		log.Printf("Stop task - Client IP: %s, Parsed region: %s", clientIP, region)
-
-		stopTask, err := wm.RedisQueue.PublishTaskToRegion(ctx, task.Type, "stop", task.Channel, req.RequestID, stopPayload, region)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":      fmt.Sprintf("Failed to create stop task: %v", err),
-				"request_id": req.RequestID,
-				"task_id":    req.TaskID,
-			})
-			return
-		}
-
-		log.Printf("Created stop task %s for original task %s", stopTask.ID, req.TaskID)
-
-		c.JSON(http.StatusOK, gin.H{
-			"request_id": req.RequestID,
-			"task_id":    stopTask.ID,
-			"status":     "enqueued",
-		})
-	})
-
-	// API endpoint for task status (checks Redis first, then worker status)
-	r.POST("/egress/v1/task/status", func(c *gin.Context) {
-		var req struct {
-			RequestID string `json:"request_id"`
-			TaskID    string `json:"task_id"`
-		}
-
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-
-		// Validate request parameters
-		if err := ValidateStatusTaskRequest(req.RequestID, req.TaskID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error":      fmt.Sprintf("validation failed: %v", err),
-				"request_id": req.RequestID,
-			})
-			return
-		}
-
-		// Redis is required for task management
-		if wm.RedisQueue == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":      "Redis queue not configured",
-				"request_id": req.RequestID,
-			})
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		task, err := wm.RedisQueue.GetTaskStatus(ctx, req.TaskID)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error":      err.Error(),
-				"request_id": req.RequestID,
-			})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"request_id": req.RequestID,
-			"task_id":    task.ID,
-			"state":      task.State,
-			"action":     task.Action,
-			"created_at": task.CreatedAt,
-			"error":      task.Error,
-			"worker_id":  task.WorkerID,
-		})
-	})
-
-	log.Println("Manager API server running on :8090")
-	r.Run(":8090")
+	// Keep running to process Redis tasks
+	select {}
 }
 
 // getActiveTaskCount returns the number of currently active tasks

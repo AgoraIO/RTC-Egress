@@ -195,12 +195,6 @@ void TaskPipe::setRecordingConfig(const agora::rtc::RecordingSink::Config& confi
     recording_config_ = config;
 }
 
-int TaskPipe::getChannelRefCount(const std::string& channel) const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    auto it = channel_states_.find(channel);
-    return it != channel_states_.end() ? it->second.ref_count : 0;
-}
-
 // Command Handlers
 void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage& msg) {
     if (msg.channel.empty()) {
@@ -223,7 +217,6 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
             auto& state = channel_states_[msg.channel];
             state.active_tasks[msg.task_id] = "snapshot";
             if (msg.interval_in_ms > 0) {
-                state.snapshot_interval = msg.interval_in_ms;
                 snapshot_sink_->setIntervalInMs(msg.interval_in_ms);
                 logInfo("Set snapshot interval to: " + std::to_string(msg.interval_in_ms) + "ms",
                         instance_id_);
@@ -233,7 +226,7 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
         if (snapshot_sink_ && !snapshot_sink_->isCapturing()) {
             if (!snapshot_sink_->start()) {
                 logError("Failed to start snapshot sink", instance_id_);
-                releaseConnection(msg.channel);
+                releaseConnection(msg.channel, msg.task_id);
                 return;
             }
         }
@@ -273,7 +266,7 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
                 }
             }
 
-            if (completed_task_id.empty()) {
+            if (completed_task_id.empty() || found_channel.empty()) {
                 logInfo("No matching snapshot task to stop (task_id: " + msg.task_id +
                             ", channel: " + msg.channel + ")",
                         instance_id_);
@@ -289,13 +282,12 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
             }
         }
 
+        // Release connection for this completed snapshot task
+        releaseConnection(found_channel, completed_task_id);
+
         // Send completion message
-        if (!completed_task_id.empty()) {
-            sendCompletionMessage(completed_task_id, "success", "",
-                                  "Snapshot task completed successfully");
-        }
-        // Use ref counting to determine if we should disconnect from channel
-        releaseConnection(msg.channel);
+        sendCompletionMessage(completed_task_id, "success", "",
+            "Snapshot task completed successfully");
         logInfo("Stopped snapshot for channel: " + msg.channel, instance_id_);
     } else if (action == "status") {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -308,9 +300,8 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
                 if (task_type == "snapshot") snapshot_count++;
             }
             logInfo("Status - Channel: " + msg.channel +
-                        ", Refs: " + std::to_string(state.ref_count) +
-                        ", Snapshots: " + std::to_string(snapshot_count) + " active" +
-                        ", Interval: " + std::to_string(state.snapshot_interval) + "ms",
+                        ", Tasks: " + std::to_string(state.active_tasks.size()) +
+                        ", Snapshots: " + std::to_string(snapshot_count) + " active",
                     instance_id_);
         } else {
             logInfo("Status - Channel: " + msg.channel + " (not active)", instance_id_);
@@ -333,8 +324,9 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
             return;
         }
 
-        // Update configs with channel information
+        // Update configs with channel and task information
         recording_config_.channel = msg.channel;
+        recording_config_.taskId = msg.task_id;
 
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto& state = channel_states_[msg.channel];
@@ -353,14 +345,38 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
 
         // Start recording sink if not already running
         if (!recording_active && recording_sink_) {
+            // Set up callback for max duration completion
+            recording_sink_->setCompletionCallback([this](const std::string& taskId,
+                                                          const std::string& status,
+                                                          const std::string& message) {
+                // Find the channel for this task and release connection
+                // releaseConnection will handle removing the task from active_tasks
+                std::string completed_channel;
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+                    for (auto& [channel, state] : channel_states_) {
+                        auto task_it = state.active_tasks.find(taskId);
+                        if (task_it != state.active_tasks.end()) {
+                            completed_channel = channel;
+                            break;
+                        }
+                    }
+                }
+
+                if (!completed_channel.empty()) {
+                    releaseConnection(completed_channel, taskId);
+                }
+
+                sendCompletionMessage(taskId, status, "", message);
+            });
+
             if (recording_sink_->initialize(recording_config_) && recording_sink_->start()) {
                 logInfo("Started recording for channel: " + msg.channel + " to " +
                             recording_config_.outputDir,
                         instance_id_);
             } else {
                 logError("Failed to start recording for channel: " + msg.channel, instance_id_);
-                state.active_tasks.erase(msg.task_id);
-                releaseConnection(msg.channel);
+                releaseConnection(msg.channel, msg.task_id);
                 sendCompletionMessage(msg.task_id, "failed", "Failed to start recording sink");
                 return;
             }
@@ -375,11 +391,10 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
 
-            // Search for the specific task_id across all channels
+            // Search for the specific task_id across all channels (don't remove yet)
             if (!msg.task_id.empty()) {
                 for (auto& [channel, state] : channel_states_) {
                     if (state.active_tasks.count(msg.task_id)) {
-                        state.active_tasks.erase(msg.task_id);
                         completed_task_id = msg.task_id;
                         found_channel = channel;
                         break;
@@ -393,7 +408,6 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
                     // Find first recording task
                     for (const auto& [task_id, task_type] : state.active_tasks) {
                         if (task_type == "record") {
-                            state.active_tasks.erase(task_id);
                             completed_task_id = task_id;
                             found_channel = msg.channel;
                             break;
@@ -402,7 +416,7 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
                 }
             }
 
-            if (completed_task_id.empty()) {
+            if (completed_task_id.empty() || found_channel.empty()) {
                 logInfo("No matching recording task to stop (task_id: " + msg.task_id +
                             ", channel: " + msg.channel + ")",
                         instance_id_);
@@ -418,16 +432,14 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
             }
         }
 
+        // Release the connection for this completed task
+        releaseConnection(found_channel, completed_task_id);
+
         // Send completion message
-        if (!completed_task_id.empty()) {
-            sendCompletionMessage(completed_task_id, "success", "",
-                                  "Recording task completed successfully");
-        }
+        sendCompletionMessage(completed_task_id, "success", "",
+            "Recording task completed successfully");
 
-        logInfo("Stopped recording for channel: " + msg.channel, instance_id_);
-
-        // Release the connection if no other tasks are using it
-        releaseConnection(msg.channel);
+        logInfo("Stopped recording for channel: " + found_channel, instance_id_);
     } else if (action == "status") {
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto it = channel_states_.find(msg.channel);
@@ -463,7 +475,6 @@ void TaskPipe::handleWhipCommand(const std::string& action, const UDSMessage& ms
 bool TaskPipe::ensureConnected(const std::string& channel, const std::string& token) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     auto& state = channel_states_[channel];
-    state.ref_count++;
 
     if (!state.is_connected) {
         logInfo("Connecting to channel: " + channel, instance_id_);
@@ -475,7 +486,7 @@ bool TaskPipe::ensureConnected(const std::string& channel, const std::string& to
 
         if (!rtc_client_->connect()) {
             logError("Failed to connect to channel: " + channel, instance_id_);
-            if (--state.ref_count <= 0) {
+            if (state.active_tasks.empty()) {
                 channel_states_.erase(channel);
             }
             return false;
@@ -484,12 +495,12 @@ bool TaskPipe::ensureConnected(const std::string& channel, const std::string& to
         state.is_connected = true;
     }
 
-    logDebug("Channel " + channel + " reference count: " + std::to_string(state.ref_count),
+    logDebug("Channel " + channel + " task count: " + std::to_string(state.active_tasks.size()),
              instance_id_);
     return true;
 }
 
-void TaskPipe::releaseConnection(const std::string& channel) {
+void TaskPipe::releaseConnection(const std::string& channel, const std::string& task_id) {
     bool should_cleanup = false;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -500,12 +511,22 @@ void TaskPipe::releaseConnection(const std::string& channel) {
         }
 
         auto& state = it->second;
-        if (--state.ref_count <= 0) {
+
+        // Remove the specific task (if it exists)
+        auto task_it = state.active_tasks.find(task_id);
+        if (task_it != state.active_tasks.end()) {
+            state.active_tasks.erase(task_it);
+            logDebug("Removed task " + task_id + " from channel " + channel, instance_id_);
+        }
+
+        // Check if channel should be cleaned up (no tasks remaining)
+        if (state.active_tasks.empty()) {
             should_cleanup = true;
             // Don't erase the state yet - cleanupConnection needs it
         } else {
-            logDebug("Channel " + channel + " reference count: " + std::to_string(state.ref_count),
-                     instance_id_);
+            logDebug(
+                "Channel " + channel + " task count: " + std::to_string(state.active_tasks.size()),
+                instance_id_);
         }
     }
 
@@ -556,7 +577,7 @@ void TaskPipe::cleanupConnection(const std::string& channel) {
     }
 
     // Remove the channel state if no active tasks
-    if (state.ref_count <= 0) {
+    if (state.active_tasks.empty()) {
         channel_states_.erase(it);
     }
 

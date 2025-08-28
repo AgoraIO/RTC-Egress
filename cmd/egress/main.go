@@ -22,28 +22,13 @@ import (
 )
 
 type Config struct {
-	AppID        string `mapstructure:"app_id"`
-	AccessToken  string `mapstructure:"access_token"`
-	HealthPort   int    `mapstructure:"health_port"`
-	APIPort      int    `mapstructure:"api_port"`
-	TemplatePort int    `mapstructure:"template_port"`
-	Snapshots    struct {
-		OutputDir string `mapstructure:"output_dir"`
-		Layout    string `mapstructure:"layout"`
-	} `mapstructure:"snapshots"`
-	Recording struct {
-		OutputDir string `mapstructure:"output_dir"`
-		Layout    string `mapstructure:"layout"`
-		Format    string `mapstructure:"format"`
-		Video     struct {
-			Enabled bool   `mapstructure:"enabled"`
-			Codec   string `mapstructure:"codec"`
-		} `mapstructure:"video"`
-		Audio struct {
-			Enabled bool   `mapstructure:"enabled"`
-			Codec   string `mapstructure:"codec"`
-		} `mapstructure:"audio"`
-	} `mapstructure:"recording"`
+	Pod struct {
+		Region     string `mapstructure:"region"`
+		NumWorkers int    `mapstructure:"workers"`
+	} `mapstructure:"pod"`
+	Server struct {
+		HealthPort int `mapstructure:"health_port"`
+	} `mapstructure:"server"`
 	Redis struct {
 		Addr           string   `mapstructure:"addr"`
 		Password       string   `mapstructure:"password"`
@@ -51,10 +36,51 @@ type Config struct {
 		TaskTTL        int      `mapstructure:"task_ttl"`
 		WorkerPatterns []string `mapstructure:"worker_patterns"`
 	} `mapstructure:"redis"`
-	Pod struct {
-		Region     string `mapstructure:"region"`
-		NumWorkers int    `mapstructure:"workers"`
-	} `mapstructure:"pod"`
+	Agora struct {
+		AppID       string `mapstructure:"app_id"`
+		ChannelName string `mapstructure:"channel_name"`
+		AccessToken string `mapstructure:"access_token"`
+		EgressUID   string `mapstructure:"egress_uid"`
+		RTCTimeout  int    `mapstructure:"rtc_timeout"`
+	} `mapstructure:"agora"`
+	Snapshots struct {
+		OutputDir    string `mapstructure:"output_dir"`
+		Width        int    `mapstructure:"width"`
+		Height       int    `mapstructure:"height"`
+		Users        string `mapstructure:"users"`
+		Layout       string `mapstructure:"layout"`
+		IntervalInMs int    `mapstructure:"interval_in_ms"`
+		Quality      int    `mapstructure:"quality"`
+	} `mapstructure:"snapshots"`
+	Recording struct {
+		OutputDir          string `mapstructure:"output_dir"`
+		Users              string `mapstructure:"users"`
+		Layout             string `mapstructure:"layout"`
+		Format             string `mapstructure:"format"`
+		MaxDurationSeconds int    `mapstructure:"max_duration_seconds"`
+		Video              struct {
+			Enabled    bool   `mapstructure:"enabled"`
+			Width      int    `mapstructure:"width"`
+			Height     int    `mapstructure:"height"`
+			FPS        int    `mapstructure:"fps"`
+			Bitrate    int    `mapstructure:"bitrate"`
+			Codec      string `mapstructure:"codec"`
+			BufferSize int    `mapstructure:"buffer_size"`
+		} `mapstructure:"video"`
+		Audio struct {
+			Enabled    bool   `mapstructure:"enabled"`
+			SampleRate int    `mapstructure:"sample_rate"`
+			Channels   int    `mapstructure:"channels"`
+			Bitrate    int    `mapstructure:"bitrate"`
+			Codec      string `mapstructure:"codec"`
+			BufferSize int    `mapstructure:"buffer_size"`
+		} `mapstructure:"audio"`
+		TS struct {
+			SegmentDuration        int  `mapstructure:"segment_duration"`
+			GeneratePlaylist       bool `mapstructure:"generate_playlist"`
+			KeepIncompleteSegments bool `mapstructure:"keep_incomplete_segments"`
+		} `mapstructure:"ts"`
+	} `mapstructure:"recording"`
 	S3 struct {
 		Bucket    string `mapstructure:"bucket"`
 		Region    string `mapstructure:"region"`
@@ -62,6 +88,19 @@ type Config struct {
 		SecretKey string `mapstructure:"secret_key"`
 		Endpoint  string `mapstructure:"endpoint"`
 	} `mapstructure:"s3"`
+	Log struct {
+		Level      string `mapstructure:"level"`
+		Path       string `mapstructure:"path"`
+		MaxSize    int    `mapstructure:"max_size"`
+		MaxBackups int    `mapstructure:"max_backups"`
+		MaxAge     int    `mapstructure:"max_age"`
+	} `mapstructure:"log"`
+	Advanced struct {
+		VideoBufferSize int  `mapstructure:"video_buffer_size"`
+		AudioBufferSize int  `mapstructure:"audio_buffer_size"`
+		GPUAcceleration bool `mapstructure:"gpu_acceleration"`
+		ThreadPoolSize  int  `mapstructure:"thread_pool_size"`
+	} `mapstructure:"advanced"`
 }
 
 var (
@@ -83,7 +122,7 @@ func loadConfig() error {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	// Set environment variable bindings for key configuration
-	viper.BindEnv("app_id", "APP_ID")
+	viper.BindEnv("agora.app_id", "APP_ID")
 	viper.BindEnv("redis.addr", "REDIS_ADDR")
 	viper.BindEnv("redis.password", "REDIS_PASSWORD")
 	viper.BindEnv("redis.db", "REDIS_DB")
@@ -101,12 +140,12 @@ func loadConfig() error {
 	}
 
 	// Validate mandatory APP_ID (managed mode - ACCESS_TOKEN comes from requests)
-	if strings.TrimSpace(config.AppID) == "" {
-		return fmt.Errorf("app_id is required (set via environment variable APP_ID or in egress_config.yaml)")
+	if strings.TrimSpace(config.Agora.AppID) == "" {
+		return fmt.Errorf("agora.app_id is required (set via environment variable APP_ID or in egress_config.yaml)")
 	}
 
 	log.Printf("Configuration loaded for managed mode:")
-	log.Printf("  APP_ID: %s", config.AppID)
+	log.Printf("  APP_ID: %s", config.Agora.AppID)
 
 	// Validate required fields
 	if strings.TrimSpace(config.Snapshots.OutputDir) == "" {
@@ -193,7 +232,6 @@ func initRedisQueue() error {
 		config.Redis.Password,
 		config.Redis.DB,
 		config.Redis.TaskTTL,
-		config.Redis.WorkerPatterns,
 		config.Pod.Region,
 	)
 
@@ -216,7 +254,7 @@ func initRedisQueue() error {
 
 func startWorkerManager() {
 	go func() {
-		egress.ManagerMainWithRedisAndHealth(redisQueue, healthManager, config.Pod.NumWorkers)
+		egress.ManagerMainWithRedisAndHealth(redisQueue, healthManager, config.Pod.NumWorkers, config.Redis.WorkerPatterns)
 	}()
 }
 
@@ -266,7 +304,7 @@ func startHealthCheckServer() {
 
 	go func() {
 		srv := &http.Server{
-			Addr:    fmt.Sprintf(":%d", config.HealthPort),
+			Addr:    fmt.Sprintf(":%d", config.Server.HealthPort),
 			Handler: r,
 		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -277,19 +315,7 @@ func startHealthCheckServer() {
 	_, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	log.Printf("Health server started on port %d", config.HealthPort)
-}
-
-func startTemplateServer() {
-	r := gin.Default()
-	r.Static("/template", "./web/template")
-
-	// Start the server in a goroutine
-	go func() {
-		if err := r.Run(fmt.Sprintf(":%d", config.TemplatePort)); err != nil {
-			log.Fatalf("Failed to start template server: %v", err)
-		}
-	}()
+	log.Printf("Health server started on port %d", config.Server.HealthPort)
 }
 
 func startUploader() {
@@ -365,9 +391,6 @@ func main() {
 
 	// Start worker manager in background in a separate goroutine
 	startWorkerManager()
-
-	// Start template server
-	startTemplateServer()
 
 	// Start uploader if configured
 	startUploader()

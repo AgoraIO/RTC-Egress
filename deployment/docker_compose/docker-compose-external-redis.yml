@@ -3,6 +3,8 @@ services:
     # Production image from GitHub Container Registry
     image: ghcr.io/AgoraIO/RTC-Egress:latest
     container_name: rtc-egress-service
+    depends_on:
+      - web_recorder
     ports:
       - "8080:8080"    # API port
       - "8182:8182"    # Health check port
@@ -47,6 +49,34 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  web_recorder:
+    # Agora Web Recorder Engine for freestyle layout recording
+    image: hub-master.agoralab.co/uap/cloud_recording/cloud_recording-web_recorder_engine:test_20250818024350_v2.13.8
+    container_name: web-recorder-engine-external
+    restart: unless-stopped
+    ports:
+      - "8001:8001"    # RESTful API port
+      - "8002:8002"    # Probe port
+    volumes:
+      # Mount upload directory - replace with your actual path
+      - ./web_recordings:/opt2
+      - ./logs:/var/log/web_recorder
+    command: ["/usr/src/cloud_recording/run_default.sh", "--daemon", "--restful", "8001", "--probe-port", "8002"]
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # Add any additional web recorder specific env vars here
+      - WEB_RECORDER_CONFIG=${WEB_RECORDER_CONFIG:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # Web recorder takes longer to start
+    # Allocate 2GB shared memory as per your requirements
+    shm_size: "2g"
+    networks:
+      - ag_rtc_egress_external_network
 
 networks:
   default:

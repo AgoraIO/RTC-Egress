@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rtc-egress
+  labels:
+    name: rtc-egress
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: rtc-egress
+data:
+  redis.conf: |
+    # Enable keyspace notifications for webhook_notifier
+    notify-keyspace-events Kg$
+    # Other Redis configurations
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
