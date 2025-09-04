@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -30,7 +29,7 @@ const (
 
 type Task struct {
 	ID          string                 `json:"id"`
-	Type        string                 `json:"type"`    // "snapshot", "record", "web:record"
+	Cmd         string                 `json:"cmd"`     // "snapshot", "record", "web:record"
 	Action      string                 `json:"action"`  // "start", "stop", "status"
 	Channel     string                 `json:"channel"` // channel name
 	RequestID   string                 `json:"request_id"`
@@ -73,15 +72,15 @@ func (rq *RedisQueue) generateTaskID(taskType, channel, requestID string) string
 }
 
 func (rq *RedisQueue) buildQueueKey(taskType, channel string) string {
-	return fmt.Sprintf("egress:%s:channel:%s", taskType, channel)
+	return fmt.Sprintf("egress:%s:%s", taskType, channel)
 }
 
 // buildRegionalQueueKey builds a region-specific queue key
 func (rq *RedisQueue) buildRegionalQueueKey(region, taskType, channel string) string {
 	if region == "" {
-		return fmt.Sprintf("egress:%s:channel:%s", taskType, channel)
+		return fmt.Sprintf("egress:%s:%s", taskType, channel)
 	}
-	return fmt.Sprintf("egress:%s:%s:channel:%s", region, taskType, channel)
+	return fmt.Sprintf("egress:%s:%s:%s", region, taskType, channel)
 }
 
 // BuildRegionalQueueKey builds a region-specific queue key (public)
@@ -142,7 +141,7 @@ func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, taskType, action,
 	now := time.Now()
 	task := &Task{
 		ID:         taskID,
-		Type:       taskType,
+		Cmd:        taskType,
 		Action:     action,
 		Channel:    channel,
 		RequestID:  requestID,
@@ -193,16 +192,16 @@ func (rq *RedisQueue) getQueueKey(layout, cmd, channel, region string) string {
 	if layout == "freestyle" {
 		// Route to flexible-recorder pods - matches patterns "web:*" and "*:web:*"
 		if region != "" {
-			return fmt.Sprintf("egress:%s:web:channel:%s", region, channel)
+			return fmt.Sprintf("egress:%s:web:%s:%s", region, cmd, channel)
 		} else {
-			return fmt.Sprintf("egress:web:channel:%s", channel)
+			return fmt.Sprintf("egress:web:%s:%s", cmd, channel)
 		}
 	} else {
 		// Route to native egress pods - matches patterns "egress:snapshot:*" etc.
 		if region != "" {
-			return fmt.Sprintf("egress:%s:%s:channel:%s", region, cmd, channel)
+			return fmt.Sprintf("egress:%s:%s:%s", region, cmd, channel)
 		} else {
-			return fmt.Sprintf("egress:%s:channel:%s", cmd, channel)
+			return fmt.Sprintf("egress:%s:%s", cmd, channel)
 		}
 	}
 }
@@ -273,74 +272,6 @@ func (rq *RedisQueue) getMatchingQueues(ctx context.Context, patterns []string) 
 	return result
 }
 
-// getPrioritizedQueues returns queues with regional priority
-// If pod has a region: regional queues first, then global queues
-// If pod has no region: all queues (regional and global)
-func (rq *RedisQueue) getPrioritizedQueues(ctx context.Context, patterns []string) []string {
-	var regionalQueues []string
-	var globalQueues []string
-
-	for _, pattern := range patterns {
-		// Look for regional queues if pod has a region
-		if rq.region != "" {
-			regionalPattern := fmt.Sprintf("egress:%s:%s", rq.region, pattern)
-			keys, err := rq.client.Keys(ctx, regionalPattern).Result()
-			if err != nil {
-				log.Printf("Error getting regional keys for pattern %s: %v", regionalPattern, err)
-			} else {
-				regionalQueues = append(regionalQueues, keys...)
-			}
-		}
-
-		// Look for global queues
-		globalPattern := fmt.Sprintf("egress:global:%s", pattern)
-		keys, err := rq.client.Keys(ctx, globalPattern).Result()
-		if err != nil {
-			log.Printf("Error getting global keys for pattern %s: %v", globalPattern, err)
-		} else {
-			globalQueues = append(globalQueues, keys...)
-		}
-
-		// If pod has no region, also check all regional queues
-		if rq.region == "" {
-			allRegionalPattern := fmt.Sprintf("egress:*:%s", pattern)
-			keys, err := rq.client.Keys(ctx, allRegionalPattern).Result()
-			if err != nil {
-				log.Printf("Error getting all regional keys for pattern %s: %v", allRegionalPattern, err)
-			} else {
-				// Filter out global queues (already added above)
-				for _, key := range keys {
-					if !strings.Contains(key, ":global:") {
-						regionalQueues = append(regionalQueues, key)
-					}
-				}
-			}
-		}
-	}
-
-	// Combine with priority: regional first, then global
-	var result []string
-	uniqueQueues := make(map[string]bool)
-
-	// Add regional queues first (higher priority)
-	for _, queue := range regionalQueues {
-		if !uniqueQueues[queue] {
-			uniqueQueues[queue] = true
-			result = append(result, queue)
-		}
-	}
-
-	// Add global queues second (lower priority)
-	for _, queue := range globalQueues {
-		if !uniqueQueues[queue] {
-			uniqueQueues[queue] = true
-			result = append(result, queue)
-		}
-	}
-
-	return result
-}
-
 func (rq *RedisQueue) UpdateTaskWorker(ctx context.Context, taskID string, workerID int) error {
 	taskKey := rq.buildTaskKey(taskID)
 
@@ -401,7 +332,7 @@ func (rq *RedisQueue) UpdateTaskResult(ctx context.Context, taskID, state, error
 	}
 
 	if state == TaskStateSuccess || state == TaskStateFailed || state == TaskStateTimeout {
-		dedupeKey := rq.buildDedupeKey(task.Type, task.Channel, task.RequestID)
+		dedupeKey := rq.buildDedupeKey(task.Cmd, task.Channel, task.RequestID)
 		rq.client.Del(ctx, dedupeKey)
 	}
 
@@ -562,7 +493,7 @@ func (rq *RedisQueue) checkAndRecoverTask(ctx context.Context, taskID, processin
 	task.EnqueuedAt = &now
 
 	// Move back to original queue
-	originalQueue := rq.buildQueueKey(task.Type, task.Channel)
+	originalQueue := rq.buildQueueKey(task.Cmd, task.Channel)
 
 	// Atomic operation: update task + move to original queue + remove from processing
 	pipe := rq.client.TxPipeline()

@@ -258,7 +258,7 @@ func (s *APIServer) stopTask(c *gin.Context) {
 	region := parseRegionFromIP(clientIP)
 	log.Printf("Stop task - Client IP: %s, Parsed region: %s", clientIP, region)
 
-	stopTask, err := s.redisQueue.PublishTaskToRegion(ctx, task.Type, "stop", task.Channel, req.RequestID, stopPayload, region)
+	stopTask, err := s.redisQueue.PublishTaskToRegion(ctx, task.Cmd, "stop", task.Channel, req.RequestID, stopPayload, region)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":      fmt.Sprintf("Failed to create stop task: %v", err),

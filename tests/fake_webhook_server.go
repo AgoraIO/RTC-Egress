@@ -12,7 +12,7 @@ import (
 type WebhookPayload struct {
 	TaskID    string                 `json:"taskId"`
 	RequestID string                 `json:"requestId"`
-	Type      string                 `json:"type"`
+	Cmd       string                 `json:"cmd"`
 	Action    string                 `json:"action"`
 	Channel   string                 `json:"channel"`
 	State     string                 `json:"state"`
@@ -58,7 +58,7 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("📊 Webhook Details:")
 	log.Printf("  Task ID: %s", payload.TaskID)
 	log.Printf("  Request ID: %s", payload.RequestID)
-	log.Printf("  Type: %s", payload.Type)
+	log.Printf("  Cmd: %s", payload.Cmd)
 	log.Printf("  Action: %s", payload.Action)
 	log.Printf("  Channel: %s", payload.Channel)
 	log.Printf("  State: %s", payload.State)

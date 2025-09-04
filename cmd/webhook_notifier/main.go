@@ -230,7 +230,7 @@ func startHealthServer() {
 			testPayload := webhook.WebhookPayload{
 				TaskID:    fmt.Sprintf("test_%s", utils.GenerateRandomID(8)),
 				RequestID: fmt.Sprintf("req_%s", utils.GenerateRandomID(8)),
-				Type:      "test",
+				Cmd:       "test",
 				Action:    "start",
 				Channel:   "test_channel",
 				State:     queue.TaskStateProcessing,

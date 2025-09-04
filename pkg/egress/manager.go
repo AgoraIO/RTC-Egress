@@ -652,7 +652,7 @@ func (wm *WorkerManager) moveTaskBackToMainQueue(ctx context.Context, taskID str
 	task.RetryCount++
 
 	// Update task and move back to main queue
-	originalQueue := wm.RedisQueue.BuildQueueKey(task.Type, task.Channel)
+	originalQueue := wm.RedisQueue.BuildQueueKey(task.Cmd, task.Channel)
 	processingQueue := wm.RedisQueue.BuildProcessingQueueKey(wm.PodID)
 	taskKey := wm.RedisQueue.BuildTaskKey(taskID)
 	leaseKey := wm.RedisQueue.BuildLeaseKey(taskID)
@@ -726,6 +726,19 @@ func (wm *WorkerManager) fetchTaskFromRedis(ctx context.Context, patterns []stri
 
 	// Try BRPOPLPUSH for each queue in priority order
 	for _, queue := range queues {
+		// Check if this consumer should yield for regional tasks
+		shouldYield := wm.shouldYieldForRegionalTask(queue)
+		if shouldYield {
+			// Yield 3 times (200ms each) to allow regional consumers priority
+			for i := 0; i < 3; i++ {
+				time.Sleep(200 * time.Millisecond)
+				// Check if we have available workers during yield period
+				if wm.getIdleWorkerCount() == 0 {
+					break // Stop yielding if no workers available anyway
+				}
+			}
+		}
+
 		taskID, err := wm.RedisQueue.Client().BRPopLPush(ctx, queue, processingQueue, 1*time.Second).Result()
 		if err != nil {
 			if err.Error() == "redis: nil" {
@@ -743,11 +756,39 @@ func (wm *WorkerManager) fetchTaskFromRedis(ctx context.Context, patterns []stri
 			return nil, fmt.Errorf("failed to claim task %s with lease: %v", taskID, err)
 		}
 
-		log.Printf("Pod %s fetched task %s from queue %s", wm.PodID, taskID, queue)
+		if shouldYield {
+			log.Printf("Pod %s (non-regional) fetched regional task %s from queue %s after yielding", wm.PodID, taskID, queue)
+		} else {
+			log.Printf("Pod %s fetched task %s from queue %s", wm.PodID, taskID, queue)
+		}
 		return task, nil
 	}
 
 	return nil, nil // No tasks available
+}
+
+// isValidQueueKey validates that a key follows expected queue structure
+func isValidQueueKey(keyParts []string) bool {
+	if len(keyParts) < 3 || keyParts[0] != "egress" {
+		return false
+	}
+
+	validCmds := map[string]bool{"snapshot": true, "record": true, "rtmp": true, "whip": true}
+
+	// Global queue: egress:cmd:channel OR egress:web:cmd:channel
+	if len(keyParts) == 3 {
+		return validCmds[keyParts[1]]
+	} else if len(keyParts) == 4 && keyParts[1] == "web" {
+		return validCmds[keyParts[2]]
+	} else if len(keyParts) == 4 {
+		// Regional queue: egress:region:cmd:channel
+		return validCmds[keyParts[2]]
+	} else if len(keyParts) == 5 && keyParts[2] == "web" {
+		// Regional web queue: egress:region:web:cmd:channel
+		return validCmds[keyParts[3]]
+	}
+
+	return false
 }
 
 // getPrioritizedQueues returns queues with regional priority
@@ -764,46 +805,56 @@ func (wm *WorkerManager) getPrioritizedQueues(ctx context.Context, patterns []st
 	podRegion := wm.getRedisQueueRegion()
 
 	for _, basePattern := range patterns {
-		// Extract task type from pattern like "egress:record:channel:*"
-		parts := strings.Split(basePattern, ":")
-		if len(parts) < 3 {
+		// Use the original pattern directly for Redis KEYS command
+		keys, err := client.Keys(ctx, basePattern).Result()
+		if err != nil {
+			log.Printf("Error getting keys for pattern %s: %v", basePattern, err)
 			continue
 		}
-		taskType := parts[1] // "record", "snapshot", etc.
 
-		// If pod has a region, prioritize regional queues first
-		if podRegion != "" {
-			regionalPattern := fmt.Sprintf("egress:%s:%s:channel:*", podRegion, taskType)
-			keys, err := client.Keys(ctx, regionalPattern).Result()
-			if err != nil {
-				log.Printf("Error getting regional keys for pattern %s: %v", regionalPattern, err)
-			} else {
-				regionalQueues = append(regionalQueues, keys...)
+		// Categorize queues based on regional matching priority
+		for _, key := range keys {
+			keyParts := strings.Split(key, ":")
+			if len(keyParts) < 3 {
+				continue
 			}
-		}
 
-		// Always check global/no-region queues as fallback
-		globalPattern := fmt.Sprintf("egress:%s:channel:*", taskType)
-		keys, err := client.Keys(ctx, globalPattern).Result()
-		if err != nil {
-			log.Printf("Error getting global keys for pattern %s: %v", globalPattern, err)
-		} else {
-			globalQueues = append(globalQueues, keys...)
-		}
+			// Validate queue key structure - must match expected formats:
+			// Global: egress:cmd:channel OR egress:web:cmd:channel
+			// Regional: egress:region:cmd:channel OR egress:region:web:cmd:channel
+			if !isValidQueueKey(keyParts) {
+				continue
+			}
 
-		// Also check other regions if pod has no specific region
-		if podRegion == "" {
-			otherRegionalPattern := fmt.Sprintf("egress:*:%s:channel:*", taskType)
-			keys, err := client.Keys(ctx, otherRegionalPattern).Result()
-			if err != nil {
-				log.Printf("Error getting other regional keys for pattern %s: %v", otherRegionalPattern, err)
-			} else {
-				// Filter out the basic pattern we already got
-				for _, key := range keys {
-					if !strings.HasPrefix(key, fmt.Sprintf("egress:%s:channel:", taskType)) {
-						regionalQueues = append(regionalQueues, key)
-					}
+			// Parse queue key format:
+			// Global: egress:record:channelName, egress:web:record:channelName
+			// Regional: egress:region:record:channelName, egress:region:web:record:channelName
+
+			var taskRegion string
+			isRegionalTask := false
+
+			// Detect if this is a regional task by checking key structure
+			if len(keyParts) >= 4 {
+				// Could be: egress:region:record:channelName or egress:region:web:record:channelName
+				possibleRegion := keyParts[1]
+				if possibleRegion != "record" && possibleRegion != "snapshot" && possibleRegion != "web" && possibleRegion != "cmd" {
+					taskRegion = possibleRegion
+					isRegionalTask = true
 				}
+			}
+
+			// Priority assignment:
+			if isRegionalTask {
+				if podRegion == taskRegion {
+					// Highest priority: regional match
+					regionalQueues = append(regionalQueues, key)
+				} else {
+					// Lower priority: different/no region (will yield before taking)
+					globalQueues = append(globalQueues, key)
+				}
+			} else {
+				// Global task: any consumer can take immediately
+				globalQueues = append(globalQueues, key)
 			}
 		}
 	}
@@ -831,6 +882,54 @@ func (wm *WorkerManager) getPrioritizedQueues(ctx context.Context, patterns []st
 	return result
 }
 
+// shouldYieldForRegionalTask determines if this consumer should yield to regional consumers
+func (wm *WorkerManager) shouldYieldForRegionalTask(queueKey string) bool {
+	podRegion := wm.getRedisQueueRegion()
+
+	// Parse queue key to determine if it's a regional task
+	keyParts := strings.Split(queueKey, ":")
+	if len(keyParts) < 4 {
+		return false // Not a valid queue format
+	}
+
+	// Detect if this is a regional task
+	var taskRegion string
+	isRegionalTask := false
+
+	if len(keyParts) >= 5 && keyParts[3] == "channel" {
+		// Format: egress:region:record:channel:* or egress:region:snapshot:channel:*
+		possibleRegion := keyParts[1]
+		if possibleRegion != "record" && possibleRegion != "snapshot" && possibleRegion != "web" && possibleRegion != "cmd" {
+			taskRegion = possibleRegion
+			isRegionalTask = true
+		}
+	} else if len(keyParts) >= 6 && keyParts[4] == "channel" {
+		// Format: egress:region:web:record:channel:* or egress:region:web:snapshot:channel:*
+		possibleRegion := keyParts[1]
+		if possibleRegion != "record" && possibleRegion != "snapshot" && possibleRegion != "web" && possibleRegion != "cmd" {
+			taskRegion = possibleRegion
+			isRegionalTask = true
+		}
+	}
+
+	// Yield if: regional task AND (consumer has no region OR different region)
+	return isRegionalTask && (podRegion == "" || podRegion != taskRegion)
+}
+
+// getIdleWorkerCount returns the number of idle workers
+func (wm *WorkerManager) getIdleWorkerCount() int {
+	wm.Mutex.Lock()
+	defer wm.Mutex.Unlock()
+
+	idleCount := 0
+	for _, worker := range wm.Workers {
+		if worker != nil && worker.Status.State == WORKER_IDLE {
+			idleCount++
+		}
+	}
+	return idleCount
+}
+
 // getRedisQueueRegion returns the region for this pod from RedisQueue config
 func (wm *WorkerManager) getRedisQueueRegion() string {
 	if wm.RedisQueue == nil {
@@ -841,7 +940,7 @@ func (wm *WorkerManager) getRedisQueueRegion() string {
 
 // processRedisTask processes Redis task directly using queue.Task
 func (wm *WorkerManager) processRedisTask(task *queue.Task) {
-	log.Printf("Processing Redis task %s (type: %s, channel: %s)", task.ID, task.Type, task.Channel)
+	log.Printf("Processing Redis task %s (cmd: %s, channel: %s)", task.ID, task.Cmd, task.Channel)
 
 	// Validate Redis task before processing
 	if err := ValidateRedisTask(task); err != nil {
@@ -893,7 +992,7 @@ func (wm *WorkerManager) processRedisTask(task *queue.Task) {
 
 // startTask starts a task from Redis queue directly
 func (wm *WorkerManager) startTask(task *queue.Task) error {
-	isWebTask := strings.Contains(task.Type, ":web:")
+	isWebTask := strings.Contains(task.Cmd, ":web:")
 
 	if isWebTask {
 		return wm.startWebRecorderTask(task)
@@ -907,7 +1006,7 @@ func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
 	// Create UDS message directly from task for native tasks
 	udsMsg := &UDSMessage{
 		TaskID:  task.ID,
-		Cmd:     task.Type,
+		Cmd:     task.Cmd,
 		Action:  task.Action,
 		Channel: task.Channel,
 		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
@@ -937,13 +1036,13 @@ func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
 	}
 
 	channel := task.Channel
-	taskType := task.Type
+	taskCmd := task.Cmd
 
 	wm.Mutex.Lock()
 	defer wm.Mutex.Unlock()
 
 	// Find worker for this channel (reuse if exists, find free if new)
-	worker, err, _ := wm.findWorkerForChannel(channel, taskType)
+	worker, err, _ := wm.findWorkerForChannel(channel, taskCmd)
 	if err != nil {
 		return err
 	}
@@ -954,7 +1053,7 @@ func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
 	if wm.ChannelTasks[channel] == nil {
 		wm.ChannelTasks[channel] = make(map[string][]string)
 	}
-	wm.ChannelTasks[channel][taskType] = append(wm.ChannelTasks[channel][taskType], task.ID)
+	wm.ChannelTasks[channel][taskCmd] = append(wm.ChannelTasks[channel][taskCmd], task.ID)
 
 	// Send task to worker
 	worker.Mutex.Lock()
@@ -962,7 +1061,7 @@ func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
 	if err != nil {
 		worker.Mutex.Unlock()
 		// Clean up on failure
-		wm.removeTaskFromChannel(channel, taskType, task.ID)
+		wm.removeTaskFromChannel(channel, taskCmd, task.ID)
 		return fmt.Errorf("failed to send task to worker: %v", err)
 	}
 
@@ -972,7 +1071,7 @@ func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
 	worker.TaskID = task.ID
 	worker.Mutex.Unlock()
 
-	log.Printf("Pod %s assigned task %s (%s:%s) to worker %d", wm.PodID, task.ID, channel, taskType, worker.ID)
+	log.Printf("Pod %s assigned task %s (%s:%s) to worker %d", wm.PodID, task.ID, channel, taskCmd, worker.ID)
 
 	// Update worker ID in Redis for this task
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -983,7 +1082,7 @@ func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
 }
 
 func (wm *WorkerManager) startWebRecorderTask(task *queue.Task) error {
-	log.Printf("Starting web recording task %s (type: %s, channel: %s)", task.ID, task.Type, task.Channel)
+	log.Printf("Starting web recording task %s (cmd: %s, channel: %s)", task.ID, task.Cmd, task.Channel)
 
 	// Create web recorder proxy if not exists (lazy initialization)
 	if wm.webRecorderProxy == nil {
@@ -1049,7 +1148,7 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 	originalTask, err := wm.RedisQueue.GetTaskStatus(ctx, originalTaskID)
 	cancel()
 
-	if err == nil && (strings.HasPrefix(originalTask.Type, "web:") || strings.Contains(originalTask.Type, ":web:")) {
+	if err == nil && (strings.HasPrefix(originalTask.Cmd, "web:") || strings.Contains(originalTask.Cmd, ":web:")) {
 		// This is a web task - use web recorder proxy to stop it
 		if wm.webRecorderProxy != nil {
 			log.Printf("Stopping web recording task %s via web recorder proxy", originalTaskID)
@@ -1118,7 +1217,7 @@ func (wm *WorkerManager) stopOriginalTaskWithRetries(targetWorker *Worker, targe
 	// Create UDS message to stop the original task
 	udsMsg := &UDSMessage{
 		TaskID:  originalTaskID,
-		Cmd:     stopTask.Type,
+		Cmd:     stopTask.Cmd,
 		Action:  "stop",
 		Channel: stopTask.Channel,
 		Uid:     []string{},
@@ -1135,7 +1234,7 @@ func (wm *WorkerManager) stopOriginalTaskWithRetries(targetWorker *Worker, targe
 
 		if err == nil {
 			// Success - clean up and mark as completed
-			wm.cleanupStoppedTask(stopTask.Channel, stopTask.Type, originalTaskID)
+			wm.cleanupStoppedTask(stopTask.Channel, stopTask.Cmd, originalTaskID)
 			return true
 		}
 
@@ -1150,7 +1249,7 @@ func (wm *WorkerManager) stopOriginalTaskWithRetries(targetWorker *Worker, targe
 
 	// All graceful attempts failed - force kill worker
 	log.Printf("Graceful stop failed after %d attempts, force killing worker %d for task %s", maxRetries, targetWorkerID, originalTaskID)
-	wm.forceKillWorker(targetWorkerID, originalTaskID, stopTask.Channel, stopTask.Type)
+	wm.forceKillWorker(targetWorkerID, originalTaskID, stopTask.Channel, stopTask.Cmd)
 
 	return false
 }
@@ -1285,7 +1384,7 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 	// Send stop command to worker first
 	udsMsg := &UDSMessage{
 		TaskID:  task.ID,
-		Cmd:     task.Type,
+		Cmd:     task.Cmd,
 		Action:  "stop",
 		Channel: task.Channel,
 		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
@@ -1294,7 +1393,7 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 	// NOTE: Worker mutex is already locked by the caller (handleTaskCompletion)
 	// Do not lock again to avoid deadlock
 	// Try to send stop command to worker (best effort)
-	log.Printf("Sending stop command to worker %d for FAILED task %s (channel: %s, type: %s)", workerID, task.ID, task.Channel, task.Type)
+	log.Printf("Sending stop command to worker %d for FAILED task %s (channel: %s, cmd: %s)", workerID, task.ID, task.Channel, task.Cmd)
 	err := wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
 	if err != nil {
 		log.Printf("Failed to send stop command to worker %d for FAILED task %s: %v", workerID, task.ID, err)
@@ -1307,7 +1406,7 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 	worker.Status.TaskID = ""
 
 	// Clean up task from channel tracking
-	wm.removeTaskFromChannel(task.Channel, task.Type, task.ID)
+	wm.removeTaskFromChannel(task.Channel, task.Cmd, task.ID)
 
 	// Mark task as FAILED in Redis and clean up
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1343,7 +1442,7 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 	wm.TasksMutex.Unlock()
 
 	log.Printf("Pod %s marked task %s (%s:%s) as FAILED and stopped worker %d: %s",
-		wm.PodID, task.ID, task.Channel, task.Type, workerID, reason)
+		wm.PodID, task.ID, task.Channel, task.Cmd, workerID, reason)
 	return nil
 }
 
@@ -1418,19 +1517,19 @@ func (wm *WorkerManager) isUnrecoverableError(errorMsg string) bool {
 
 // getTaskStatus gets status of a task from Redis queue directly
 func (wm *WorkerManager) getTaskStatus(task *queue.Task) error {
-	isWebTask := strings.HasPrefix(task.Type, "web:") || strings.Contains(task.Type, ":web:")
+	isWebTask := strings.HasPrefix(task.Cmd, "web:") || strings.Contains(task.Cmd, ":web:")
 
 	// Route based on manager mode and task type
 	switch wm.mode {
 	case ModeNative:
 		if isWebTask {
-			return fmt.Errorf("native-only manager cannot handle web task status: %s", task.Type)
+			return fmt.Errorf("native-only manager cannot handle web task status: %s", task.Cmd)
 		}
 		return wm.getNativeTaskStatus(task)
 
 	case ModeWeb:
 		if !isWebTask {
-			return fmt.Errorf("web-only manager cannot handle native task status: %s", task.Type)
+			return fmt.Errorf("web-only manager cannot handle native task status: %s", task.Cmd)
 		}
 		return wm.getWebTaskStatus(task)
 
@@ -1443,7 +1542,7 @@ func (wm *WorkerManager) getTaskStatus(task *queue.Task) error {
 func (wm *WorkerManager) getNativeTaskStatus(task *queue.Task) error {
 	udsMsg := &UDSMessage{
 		TaskID:  task.ID,
-		Cmd:     task.Type,
+		Cmd:     task.Cmd,
 		Action:  task.Action,
 		Channel: task.Channel,
 		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization

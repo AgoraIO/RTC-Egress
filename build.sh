@@ -203,14 +203,16 @@ create_dirs() {
     mkdir -p logs/rtc_egress
     mkdir -p recordings
     mkdir -p snapshots
+    mkdir -p web_recorder
 
     # Set permissions
     chmod 755 logs/rtc_egress
     chmod 755 recordings
     chmod 755 snapshots
+    chmod 755 web_recorder
 
-    echo -e "${YELLOW}Note: Using local 'logs' and 'recordings' directories in the project folder.${NC}"
-    echo -e "${YELLOW}For production, you may want to use system directories like /var/log/rtc_egress and /recordings${NC}"
+    echo -e "${YELLOW}Note: Using local 'logs', 'recordings', 'snapshots', 'web_recorder' directories in the project folder.${NC}"
+    echo -e "${YELLOW}For production, you may want to use system directories like /var/log/rtc_egress, /recordings, /snapshots, /web_recorder${NC}"
 }
 
 create_dirs_docker() {
