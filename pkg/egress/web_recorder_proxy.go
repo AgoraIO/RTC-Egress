@@ -236,8 +236,8 @@ func (proxy *WorkerManagerWebRecorderProxy) getTaskStatus(task *queue.Task) erro
 
 // ProcessRedisTask processes a Redis task by delegating to the web recorder service
 func (proxy *WorkerManagerWebRecorderProxy) ProcessRedisTask(task *queue.Task) error {
-	log.Printf("Processing web recorder task %s (type: %s, channel: %s, action: %s)",
-		task.ID, task.Type, task.Channel, task.Action)
+	log.Printf("Processing web recorder task %s (cmd: %s, channel: %s, action: %s)",
+		task.ID, task.Cmd, task.Channel, task.Action)
 
 	// Validate Redis task before processing
 	if err := ValidateRedisTask(task); err != nil {

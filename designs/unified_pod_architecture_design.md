@@ -42,9 +42,9 @@
   - ✅ Health checks
   - ❌ No actual processing
 
-  Egress Pod:
+  Egress Pod(Pattern: egress:consumer:cmd:* or egress:region:consumer:cmd:*):
 
-  - ✅ Redis consumer (egress:record:*, egress:snapshot:*)
+  - ✅ Redis consumer (egress:record:*, egress:snapshot:* or egress:us-east-1:record:*, egress:us-east-1:snapshot:*)
   - ✅ Native recording (flat/spotlight/customized layouts)
   - ✅ 4x eg_worker processes
   - ✅ S3 uploader for completed recordings(optional, in some case we need to deploy a separated uploader pod)
@@ -52,7 +52,7 @@
 
   Flexible-Recorder Pod:
 
-  - ✅ Redis consumer (egress:web:record:*, egress:web:snapshot:*)
+  - ✅ Redis consumer (egress:web:record:*, egress:web:snapshot:* or egress:us-east-1:web:record:*, egress:us-east-1:web:snapshot:*)
   - ✅ Web recording (freestyle layout)
   - ✅ Web dispatch + web recorder engine
   - ✅ S3 uploader for completed web recordings

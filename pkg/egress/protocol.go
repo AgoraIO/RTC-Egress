@@ -367,8 +367,8 @@ func ValidateRedisTask(task *queue.Task) error {
 
 	// Validate basic task fields
 	validTypes := map[string]bool{"snapshot": true, "record": true, "rtmp": true, "whip": true}
-	if !validTypes[task.Type] {
-		return fmt.Errorf("task type %s is not supported", task.Type)
+	if !validTypes[task.Cmd] {
+		return fmt.Errorf("task cmd %s is not supported", task.Cmd)
 	}
 
 	validActions := map[string]bool{"start": true, "stop": true, "status": true}
@@ -399,7 +399,7 @@ func ValidateRedisTask(task *queue.Task) error {
 		// Convert task.Payload to TaskRequest format for reusing existing validation
 		taskReq := &TaskRequest{
 			RequestID: task.RequestID,
-			Cmd:       task.Type,
+			Cmd:       task.Cmd,
 			Action:    task.Action,
 			TaskID:    task.ID,
 			Payload:   task.Payload,

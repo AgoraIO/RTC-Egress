@@ -287,7 +287,7 @@ void TaskPipe::handleSnapshotCommand(const std::string& action, const UDSMessage
 
         // Send completion message
         sendCompletionMessage(completed_task_id, "success", "",
-            "Snapshot task completed successfully");
+                              "Snapshot task completed successfully");
         logInfo("Stopped snapshot for channel: " + msg.channel, instance_id_);
     } else if (action == "status") {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -437,7 +437,7 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
 
         // Send completion message
         sendCompletionMessage(completed_task_id, "success", "",
-            "Recording task completed successfully");
+                              "Recording task completed successfully");
 
         logInfo("Stopped recording for channel: " + found_channel, instance_id_);
     } else if (action == "status") {

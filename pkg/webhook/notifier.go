@@ -30,7 +30,7 @@ type NotificationState struct {
 type WebhookPayload struct {
 	TaskID      string                 `json:"task_id"`
 	RequestID   string                 `json:"request_id"`
-	Type        string                 `json:"type"`    // "snapshot", "record", "web:record"
+	Cmd         string                 `json:"cmd"`     // "snapshot", "record", "web:record"
 	Action      string                 `json:"action"`  // "start", "stop", "status"
 	Channel     string                 `json:"channel"` // channel name
 	State       string                 `json:"state"`   // ENQUEUED, PROCESSING, SUCCESS, FAILED, TIMEOUT
@@ -260,7 +260,7 @@ func (wn *WebhookNotifier) processTaskNotification(task *queue.Task) {
 	payload := WebhookPayload{
 		TaskID:      task.ID,
 		RequestID:   task.RequestID,
-		Type:        task.Type,
+		Cmd:         task.Cmd,
 		Action:      task.Action,
 		Channel:     task.Channel,
 		State:       task.State,
@@ -507,7 +507,7 @@ func (wn *WebhookNotifier) processRetries() {
 			payload := WebhookPayload{
 				TaskID:      task.ID,
 				RequestID:   task.RequestID,
-				Type:        task.Type,
+				Cmd:         task.Cmd,
 				Action:      task.Action,
 				Channel:     task.Channel,
 				State:       task.State,
