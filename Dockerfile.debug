@@ -7,7 +7,8 @@ ENV TZ=UTC
 ENV AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y \
+RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y \
     build-essential \
     cmake \
     curl \

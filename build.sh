@@ -848,6 +848,11 @@ case "$1" in
         build_service_image "flexible-recorder"
         build_service_image "uploader"
         build_service_image "webhook-notifier"
+
+        # Build monolithic image
+        echo -e "${GREEN}Building monolithic production image...${NC}"
+        docker build -f Dockerfile.prod -t rtc-egress:latest .
+        echo -e "${GREEN}Successfully built rtc-egress:latest${NC}"
         ;;
 
     images-debug)
@@ -858,6 +863,11 @@ case "$1" in
         build_debug_image "flexible-recorder"
         build_debug_image "uploader"
         build_debug_image "webhook-notifier"
+
+        # Build monolithic debug image
+        echo -e "${GREEN}Building monolithic debug image...${NC}"
+        docker build -f Dockerfile.debug -t rtc-egress:debug .
+        echo -e "${GREEN}Successfully built rtc-egress:debug${NC}"
         ;;
 
     image)
