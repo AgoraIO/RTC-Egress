@@ -1,52 +1,10 @@
-# Production Dockerfile - Only binaries and configs
-FROM ubuntu:24.04 AS builder
+# Production Dockerfile - Use pre-built binaries from GitHub Actions
 
-# Set timezone and avoid interactive prompts during build
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=UTC
-ENV AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    curl \
-    pkg-config \
-    git \
-    ca-certificates \
-    libssl-dev \
-    libavcodec-dev \
-    libavformat-dev \
-    libavutil-dev \
-    libswscale-dev \
-    libswresample-dev \
-    libyaml-cpp-dev \
-    golang-go \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create build directory
-WORKDIR /build
-
-# Copy only build-required files
-COPY CMakeLists.txt ./
-COPY build.sh ./
-COPY prettifier.sh ./
-COPY src/ ./src/
-COPY cmd/ ./cmd/
-COPY pkg/ ./pkg/
-COPY go.mod ./
-COPY go.sum ./
-COPY config/ ./config/
-
-# Build the application
-RUN ./build.sh local
-
-# Production runtime stage
 FROM ubuntu:24.04
 
 # Set timezone and avoid interactive prompts
-ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
 ENV GIN_MODE=release
 
 # Install runtime dependencies only
@@ -80,12 +38,12 @@ RUN mkdir -p /opt/rtc_egress \
 # Set working directory
 WORKDIR /opt/rtc_egress
 
-# Copy ONLY binaries, libraries and configs (NO source code)
-COPY --from=builder --chown=rtc_egress:rtc_egress /build/bin ./bin
-COPY --from=builder --chown=rtc_egress:rtc_egress /build/config ./config
+# Copy pre-built binaries from GitHub Actions (NO source code)
+COPY --chown=rtc_egress:rtc_egress bin/ ./bin/
+COPY --chown=rtc_egress:rtc_egress config/ ./config/
 
-# Copy shared libraries to system library path
-COPY --from=builder /build/bin/*.so /usr/local/lib/
+# Copy Agora SDK shared libraries to system library path
+COPY agora_sdk/*.so /usr/local/lib/
 RUN ldconfig
 
 # Copy entrypoint script

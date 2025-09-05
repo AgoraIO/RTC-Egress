@@ -1,6 +1,10 @@
 # API Server - Production Image (Pre-built binary)
 FROM ubuntu:24.04
 
+# Set timezone and avoid interactive prompts
+ENV TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
+
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     curl \

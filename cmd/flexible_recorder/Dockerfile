@@ -1,6 +1,10 @@
 # Flexible Recorder - Production Image (Pre-built binary)
 FROM ubuntu:24.04
 
+# Set timezone and avoid interactive prompts
+ENV TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
+
 # Install runtime dependencies
 RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list && \
     apt-get update && apt-get install -y \

@@ -730,7 +730,7 @@ if [[ $2 == http* ]]; then
 fi
 
 # Set default URL if not provided (skip for commands that don't need SDK)
-if [ -z "$AGORA_SDK_URL" ] && [ "$1" != "clean" ] && [ "$1" != "go" ] && [ "$1" != "launch_web_recorder" ] && [ "$1" != "format" ] && [ "$1" != "stop" ] && [ "$1" != "force-kill" ] && [ "$1" != "run" ] && [ "$1" != "images" ] && [ "$1" != "images-debug" ] && [ "$1" != "image" ] && [ "$1" != "image-debug" ] && [ "$1" != "bump_version" ] && [ "$1" != "ci" ]; then
+if [ -z "$AGORA_SDK_URL" ] && [ "$1" != "clean" ] && [ "$1" != "go" ] && [ "$1" != "launch_web_recorder" ] && [ "$1" != "format" ] && [ "$1" != "stop" ] && [ "$1" != "force-kill" ] && [ "$1" != "run" ] && [ "$1" != "images" ] && [ "$1" != "images-debug" ] && [ "$1" != "image" ] && [ "$1" != "image-debug" ] && [ "$1" != "bump_version" ]; then
     AGORA_SDK_URL="$DEFAULT_AGORA_SDK_URL"
     echo -e "${YELLOW}Using default Agora SDK URL: $AGORA_SDK_URL${NC}"
     echo -e "${YELLOW}To use a different URL, you can:${NC}"
