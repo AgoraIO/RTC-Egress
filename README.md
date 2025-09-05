@@ -197,10 +197,10 @@ For development or customization:
 
 ```bash
 # Build production image
-docker build -f Dockerfile.prod -t ag_rtc_egress:latest .
+docker build -f Dockerfile.prod -t rtc-egress:latest .
 
 # Build debug image
-docker build -f Dockerfile.debug -t ag_rtc_egress:debug .
+docker build -f Dockerfile.debug -t rtc-egress:debug .
 ```
 
 ### Available Images
