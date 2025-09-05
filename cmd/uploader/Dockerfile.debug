@@ -34,9 +34,10 @@ WORKDIR /opt
 # Copy Go binary with debug symbols
 COPY --from=builder /app/uploader ./bin/
 
-# Copy source code for debugging
+# Copy source code and config for debugging
 COPY --from=builder /app/cmd/ ./cmd/
 COPY --from=builder /app/pkg/ ./pkg/
+COPY config/ ./config/
 
 # Create directory structure
 RUN mkdir -p /opt/config /opt/logs /recordings /snapshots /web_recorder

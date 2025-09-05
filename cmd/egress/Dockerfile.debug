@@ -72,11 +72,12 @@ COPY --from=go_builder /app/egress ./bin/
 COPY --from=cpp_builder /app/build/eg_worker ./bin/
 COPY --from=cpp_builder /app/agora_sdk/*.so ./lib/
 
-# Copy source code for debugging
+# Copy source code and config for debugging
 COPY --from=cpp_builder /app/src/ ./src/
 COPY --from=cpp_builder /app/include/ ./include/
 COPY --from=go_builder /app/cmd/ ./cmd/
 COPY --from=go_builder /app/pkg/ ./pkg/
+COPY config/ ./config/
 
 # Create directory structure
 RUN mkdir -p /opt/config /opt/logs /recordings /snapshots /web_recorder

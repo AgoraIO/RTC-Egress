@@ -34,9 +34,10 @@ WORKDIR /opt
 # Copy the API server binary with debug symbols
 COPY --from=builder /app/api_server ./bin/
 
-# Copy source code for debugging
+# Copy source code and config for debugging
 COPY --from=builder /app/cmd/ ./cmd/
 COPY --from=builder /app/pkg/ ./pkg/
+COPY config/ ./config/
 
 # Create non-root user
 RUN groupadd -r rtc_egress && \

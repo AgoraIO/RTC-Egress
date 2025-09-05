@@ -13,8 +13,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /opt
 
-# Copy pre-built binary from local build
+# Copy pre-built binary and config
 COPY bin/api-server ./bin/
+COPY config/ ./config/
 
 # Create non-root user
 RUN groupadd -r rtc_egress && \

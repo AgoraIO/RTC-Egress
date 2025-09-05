@@ -17,9 +17,10 @@ RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/s
 
 WORKDIR /opt
 
-# Copy pre-built binaries from local build
+# Copy pre-built binaries and config
 COPY bin/egress ./bin/
 COPY bin/eg_worker ./bin/
+COPY config/ ./config/
 
 # Copy Agora SDK runtime libraries
 COPY bin/*.so ./lib/

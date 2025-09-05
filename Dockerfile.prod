@@ -1,5 +1,51 @@
-# Production Dockerfile - Use pre-built binaries from GitHub Actions
+# Production Dockerfile - Build stripped binaries (no symbols, no source code)
+FROM ubuntu:24.04 AS builder
 
+# Set timezone and avoid interactive prompts during build
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install build dependencies
+RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    curl \
+    pkg-config \
+    git \
+    ca-certificates \
+    libssl-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libswscale-dev \
+    libswresample-dev \
+    libyaml-cpp-dev \
+    golang-go \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create build directory
+WORKDIR /build
+
+# Copy only build-required files
+COPY CMakeLists.txt ./
+COPY build.sh ./
+COPY prettifier.sh ./
+COPY src/ ./src/
+COPY cmd/ ./cmd/
+COPY pkg/ ./pkg/
+COPY go.mod ./
+COPY go.sum ./
+COPY config/ ./config/
+
+# Build the application (no prettifier for CI)
+RUN ./build.sh ci
+
+# Strip debug symbols from binaries for production
+RUN find bin/ -type f -executable -exec strip {} \;
+
+# Production runtime stage
 FROM ubuntu:24.04
 
 # Set timezone and avoid interactive prompts
@@ -38,12 +84,12 @@ RUN mkdir -p /opt/rtc_egress \
 # Set working directory
 WORKDIR /opt/rtc_egress
 
-# Copy pre-built binaries from GitHub Actions (NO source code)
-COPY --chown=rtc_egress:rtc_egress bin/ ./bin/
-COPY --chown=rtc_egress:rtc_egress config/ ./config/
+# Copy ONLY stripped binaries and configs (NO source code, NO symbols)
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/bin ./bin
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/config ./config
 
 # Copy Agora SDK shared libraries to system library path
-COPY agora_sdk/*.so /usr/local/lib/
+COPY --from=builder /build/agora_sdk/*.so /usr/local/lib/
 RUN ldconfig
 
 # Copy entrypoint script
