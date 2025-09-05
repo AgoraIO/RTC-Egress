@@ -730,7 +730,7 @@ if [[ $2 == http* ]]; then
 fi
 
 # Set default URL if not provided (skip for commands that don't need SDK)
-if [ -z "$AGORA_SDK_URL" ] && [ "$1" != "clean" ] && [ "$1" != "go" ] && [ "$1" != "launch_web_recorder" ] && [ "$1" != "format" ] && [ "$1" != "stop" ] && [ "$1" != "force-kill" ] && [ "$1" != "run" ] && [ "$1" != "images" ] && [ "$1" != "images-debug" ] && [ "$1" != "image" ] && [ "$1" != "image-debug" ] && [ "$1" != "bump_version" ]; then
+if [ -z "$AGORA_SDK_URL" ] && [ "$1" != "clean" ] && [ "$1" != "go" ] && [ "$1" != "launch_web_recorder" ] && [ "$1" != "format" ] && [ "$1" != "stop" ] && [ "$1" != "force-kill" ] && [ "$1" != "run" ] && [ "$1" != "images" ] && [ "$1" != "images-debug" ] && [ "$1" != "image" ] && [ "$1" != "image-debug" ] && [ "$1" != "bump_version" ] && [ "$1" != "ci" ]; then
     AGORA_SDK_URL="$DEFAULT_AGORA_SDK_URL"
     echo -e "${YELLOW}Using default Agora SDK URL: $AGORA_SDK_URL${NC}"
     echo -e "${YELLOW}To use a different URL, you can:${NC}"
@@ -752,6 +752,13 @@ case "$1" in
         echo -e "${GREEN}Building for local execution (no Docker)...${NC}"
         ./prettifier.sh
         create_dirs
+        build_cpp
+        build_go
+        ;;
+
+    ci)
+        echo -e "${GREEN}Building for CI/Docker (no formatting, no deps install)...${NC}"
+        create_dirs_docker
         build_cpp
         build_go
         ;;
@@ -900,6 +907,7 @@ case "$1" in
         echo "  cpp   - Build only C++ components"
         echo "  go    - Build only Go server"
         echo "  local - Build all services for local execution (no Docker)"
+        echo "  ci    - Build for CI/Docker (no formatting, no deps install)"
         echo "  run [service|all] - Run service(s) locally"
         echo "  stop  - Stop all local services"
         echo "  force-kill - Force kill all egress processes with confirmation"

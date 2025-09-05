@@ -21,7 +21,7 @@ jobs:
 
     - name: Build local binaries
       run: |
-        ./build.sh full https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
+        ./build.sh ci https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
 
     - name: Upload binaries as artifacts
       uses: actions/upload-artifact@v4
