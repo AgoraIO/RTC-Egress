@@ -99,13 +99,13 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image_name }}
+        images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image_name }}
         tags: |
           type=ref,event=branch,suffix=-debug
           type=ref,event=pr,suffix=-debug
-          type=semver,pattern={{version}},suffix=-debug
-          type=semver,pattern={{major}}.{{minor}},suffix=-debug
-          type=semver,pattern={{major}},suffix=-debug
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{version}},suffix=-debug
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}.{{minor}},suffix=-debug
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}},suffix=-debug
           type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},suffix=-debug,enable={{is_default_branch}}
           type=raw,value=debug,enable={{is_default_branch}}
 
@@ -164,9 +164,9 @@ jobs:
         tags: |
           type=ref,event=branch,suffix=-debug
           type=ref,event=pr,suffix=-debug
-          type=semver,pattern={{version}},suffix=-debug
-          type=semver,pattern={{major}}.{{minor}},suffix=-debug
-          type=semver,pattern={{major}},suffix=-debug
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{version}},suffix=-debug
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}.{{minor}},suffix=-debug
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}},suffix=-debug
           type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},suffix=-debug,enable={{is_default_branch}}
           type=raw,value=debug,enable={{is_default_branch}}
 
