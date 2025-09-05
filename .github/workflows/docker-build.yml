@@ -38,7 +38,18 @@ jobs:
       packages: write
     strategy:
       matrix:
-        service: [api-server, egress, flexible-recorder, uploader, webhook-notifier]
+        service: [api_server, egress, flexible_recorder, uploader, webhook_notifier]
+        include:
+          - service: api_server
+            image_name: api-server
+          - service: egress
+            image_name: egress
+          - service: flexible_recorder
+            image_name: flexible-recorder
+          - service: uploader
+            image_name: uploader
+          - service: webhook_notifier
+            image_name: webhook-notifier
 
     steps:
     - name: Checkout repository
@@ -64,7 +75,7 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.service }}
+        images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image_name }}
         tags: |
           # Branch-based tags
           type=ref,event=branch
@@ -89,8 +100,8 @@ jobs:
         push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha,key=${{ matrix.service }}
-        cache-to: type=gha,mode=max,key=${{ matrix.service }}
+        cache-from: type=gha,key=${{ matrix.image_name }}
+        cache-to: type=gha,mode=max,key=${{ matrix.image_name }}
 
   build-monolithic-image:
     runs-on: ubuntu-latest

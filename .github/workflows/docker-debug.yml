@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       services:
-        description: 'Services to build (comma-separated: api-server,egress,flexible-recorder,uploader,webhook-notifier,monolithic or "all")'
+        description: 'Services to build (comma-separated: api_server,egress,flexible_recorder,uploader,webhook_notifier,monolithic or "all")'
         required: true
         default: 'all'
         type: string
@@ -40,7 +40,18 @@ jobs:
       packages: write
     strategy:
       matrix:
-        service: [api-server, egress, flexible-recorder, uploader, webhook-notifier]
+        service: [api_server, egress, flexible_recorder, uploader, webhook_notifier]
+        include:
+          - service: api_server
+            image_name: api-server
+          - service: egress
+            image_name: egress
+          - service: flexible_recorder
+            image_name: flexible-recorder
+          - service: uploader
+            image_name: uploader
+          - service: webhook_notifier
+            image_name: webhook-notifier
 
     steps:
     - name: Check if service should be built
@@ -81,7 +92,7 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.service }}
+        images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image_name }}
         tags: |
           type=ref,event=branch,suffix=-debug
           type=ref,event=pr,suffix=-debug
@@ -101,8 +112,8 @@ jobs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha,key=${{ matrix.service }}-debug
-        cache-to: type=gha,mode=max,key=${{ matrix.service }}-debug
+        cache-from: type=gha,key=${{ matrix.image_name }}-debug
+        cache-to: type=gha,mode=max,key=${{ matrix.image_name }}-debug
 
   build-monolithic-debug-image:
     runs-on: ubuntu-latest

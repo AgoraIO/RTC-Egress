@@ -17,6 +17,7 @@ import (
 	"github.com/AgoraIO/RTC-Egress/pkg/queue"
 	"github.com/AgoraIO/RTC-Egress/pkg/uploader"
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
+	"github.com/AgoraIO/RTC-Egress/pkg/version"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
 )
@@ -261,7 +262,7 @@ func startWorkerManager() {
 func healthCheckHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "ok",
-		"version": "1.0.0",
+		"version": version.GetVersion(),
 	})
 }
 
@@ -273,9 +274,9 @@ func initHealthManager() error {
 
 	// Generate unique 12-character pod ID
 	podID := utils.GenerateRandomID(12)
-	version := "v1.0.0" // Could be from build flags
+	appVersion := version.GetVersion()
 
-	healthManager = health.NewHealthManager(redisQueue.Client(), podID, config.Pod.Region, version)
+	healthManager = health.NewHealthManager(redisQueue.Client(), podID, config.Pod.Region, appVersion)
 
 	// Register this pod
 	if err := healthManager.RegisterPod(config.Pod.NumWorkers); err != nil {

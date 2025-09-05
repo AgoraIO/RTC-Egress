@@ -15,6 +15,7 @@ import (
 
 	"github.com/AgoraIO/RTC-Egress/pkg/queue"
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
+	"github.com/AgoraIO/RTC-Egress/pkg/version"
 	"github.com/AgoraIO/RTC-Egress/pkg/webhook"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/viper"
@@ -208,7 +209,7 @@ func startHealthServer() {
 
 			response := map[string]interface{}{
 				"status":        status,
-				"version":       "1.0.0",
+				"version":       version.GetVersion(),
 				"service":       "webhook-notifier",
 				"redis_status":  redisStatus,
 				"webhook_url":   config.Webhook.URL,

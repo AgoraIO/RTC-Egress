@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AgoraIO/RTC-Egress/pkg/uploader"
+	"github.com/AgoraIO/RTC-Egress/pkg/version"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
 )
@@ -408,7 +409,7 @@ func healthCheckHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":            status,
 		"service":           "uploader",
-		"version":           "1.0.0",
+		"version":           version.GetVersion(),
 		"uptime":            time.Since(startTime).String(),
 		"watchers":          watcherInfo,
 		"s3_bucket":         config.S3.Bucket,
