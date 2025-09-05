@@ -119,8 +119,8 @@ jobs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha,key=${{ matrix.image_name }}-debug
-        cache-to: type=gha,mode=max,key=${{ matrix.image_name }}-debug
+        provenance: false
+        sbom: false
 
   build-monolithic-debug-image:
     runs-on: ubuntu-latest
@@ -180,7 +180,7 @@ jobs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha,key=monolithic-debug
-        cache-to: type=gha,mode=max,key=monolithic-debug
+        provenance: false
+        sbom: false
         build-args: |
           AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz

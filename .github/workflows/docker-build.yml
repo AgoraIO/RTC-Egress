@@ -107,8 +107,8 @@ jobs:
         push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha,key=${{ matrix.image_name }}
-        cache-to: type=gha,mode=max,key=${{ matrix.image_name }}
+        provenance: false
+        sbom: false
 
   build-monolithic-image:
     runs-on: ubuntu-latest
@@ -160,5 +160,5 @@ jobs:
         push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha,key=monolithic
-        cache-to: type=gha,mode=max,key=monolithic
+        provenance: false
+        sbom: false
