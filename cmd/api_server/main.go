@@ -10,6 +10,7 @@ import (
 
 	"github.com/AgoraIO/RTC-Egress/pkg/egress"
 	"github.com/AgoraIO/RTC-Egress/pkg/queue"
+	"github.com/AgoraIO/RTC-Egress/pkg/version"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
 )
@@ -354,6 +355,7 @@ func (s *APIServer) healthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "healthy",
 		"service":   "api-server",
+		"version":   version.GetVersion(),
 		"timestamp": time.Now().Unix(),
 	})
 }
