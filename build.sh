@@ -20,7 +20,7 @@ download_agora_sdk() {
     local url=$1
     if [ -z "$url" ]; then
         echo -e "${RED}Error: No Agora SDK URL provided.${NC}"
-        echo -e "Usage: $0 [full|docker|build|cpp|go|deps|clean] [AGORA_SDK_URL]"
+        echo -e "Usage: $0 [full|build|cpp|go|deps|clean] [AGORA_SDK_URL]"
         echo -e "Example: $0 full https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz"
         exit 1
     fi
@@ -655,7 +655,7 @@ if [[ $2 == http* ]]; then
 fi
 
 # Set default URL if not provided (skip for commands that don't need SDK)
-if [ -z "$AGORA_SDK_URL" ] && [ "$1" != "clean" ] && [ "$1" != "go" ] && [ "$1" != "launch_web_recorder" ] && [ "$1" != "format" ] && [ "$1" != "stop" ] && [ "$1" != "force-kill" ] && [ "$1" != "run" ]; then
+if [ -z "$AGORA_SDK_URL" ] && [ "$1" != "clean" ] && [ "$1" != "go" ] && [ "$1" != "launch_web_recorder" ] && [ "$1" != "format" ] && [ "$1" != "stop" ] && [ "$1" != "force-kill" ] && [ "$1" != "run" ] && [ "$1" != "images" ] && [ "$1" != "images-debug" ] && [ "$1" != "image" ] && [ "$1" != "image-debug" ]; then
     AGORA_SDK_URL="$DEFAULT_AGORA_SDK_URL"
     echo -e "${YELLOW}Using default Agora SDK URL: $AGORA_SDK_URL${NC}"
     echo -e "${YELLOW}To use a different URL, you can:${NC}"
@@ -765,6 +765,46 @@ case "$1" in
         echo -e "  To stop: docker stop \$(docker ps -q --filter ancestor=${AGORA_WEB_RECORDER_IMAGE})"
         ;;
 
+    images)
+        echo -e "${GREEN}Building all standard service images...${NC}"
+        create_dirs_docker
+        build_service_image "api-server"
+        build_service_image "egress"
+        build_service_image "flexible-recorder"
+        build_service_image "uploader"
+        build_service_image "webhook-notifier"
+        ;;
+
+    images-debug)
+        echo -e "${GREEN}Building all debug service images...${NC}"
+        create_dirs_docker
+        build_debug_image "api-server"
+        build_debug_image "egress"
+        build_debug_image "flexible-recorder"
+        build_debug_image "uploader"
+        build_debug_image "webhook-notifier"
+        ;;
+
+    image)
+        if [ -z "$2" ]; then
+            echo -e "${RED}Error: Service name required${NC}"
+            echo -e "Usage: $0 image [api-server|egress|flexible-recorder|uploader|webhook-notifier]"
+            exit 1
+        fi
+        create_dirs_docker
+        build_service_image "$2"
+        ;;
+
+    image-debug)
+        if [ -z "$2" ]; then
+            echo -e "${RED}Error: Service name required${NC}"
+            echo -e "Usage: $0 image-debug [api-server|egress|flexible-recorder|uploader|webhook-notifier]"
+            exit 1
+        fi
+        create_dirs_docker
+        build_debug_image "$2"
+        ;;
+
     *)
         echo "Usage: $0 {all|build|cpp|go|deps|clean|launch_web_recorder} [AGORA_SDK_URL|WEB_RECORDER_VERSION]"
         echo "  all   - Install dependencies and build all services/components"
@@ -804,46 +844,6 @@ case "$1" in
         echo "1. Environment variable: export AGORA_WEB_RECORDER_VERSION=YOUR_Agora_WEB_RECORDER_VERSION"
         echo "2. Second argument: $0 launch_web_recorder YOUR_Agora_WEB_RECORDER_VERSION"
         exit 1
-        ;;
-
-    images)
-        echo -e "${GREEN}Building all standard service images...${NC}"
-        create_dirs_docker
-        build_service_image "api-server"
-        build_service_image "egress"
-        build_service_image "flexible-recorder"
-        build_service_image "uploader"
-        build_service_image "webhook-notifier"
-        ;;
-
-    images-debug)
-        echo -e "${GREEN}Building all debug service images...${NC}"
-        create_dirs_docker
-        build_debug_image "api-server"
-        build_debug_image "egress"
-        build_debug_image "flexible-recorder"
-        build_debug_image "uploader"
-        build_debug_image "webhook-notifier"
-        ;;
-
-    image)
-        if [ -z "$2" ]; then
-            echo -e "${RED}Error: Service name required${NC}"
-            echo -e "Usage: $0 image [api-server|egress|flexible-recorder|uploader|webhook-notifier]"
-            exit 1
-        fi
-        create_dirs_docker
-        build_service_image "$2"
-        ;;
-
-    image-debug)
-        if [ -z "$2" ]; then
-            echo -e "${RED}Error: Service name required${NC}"
-            echo -e "Usage: $0 image-debug [api-server|egress|flexible-recorder|uploader|webhook-notifier]"
-            exit 1
-        fi
-        create_dirs_docker
-        build_debug_image "$2"
         ;;
 
 esac

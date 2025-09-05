@@ -1,0 +1,168 @@
+name: Build and Push Debug Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      services:
+        description: 'Services to build (comma-separated: api-server,egress,flexible-recorder,uploader,webhook-notifier,monolithic or "all")'
+        required: true
+        default: 'all'
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-binaries:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Build local binaries
+      run: |
+        ./build.sh full https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
+
+    - name: Upload binaries as artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries
+        path: |
+          bin/
+          agora_sdk/
+        retention-days: 1
+
+  build-service-debug-images:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [api-server, egress, flexible-recorder, uploader, webhook-notifier]
+
+    steps:
+    - name: Check if service should be built
+      id: should_build
+      run: |
+        SERVICES="${{ github.event.inputs.services }}"
+        SERVICE="${{ matrix.service }}"
+        if [[ "$SERVICES" == "all" ]] || [[ "$SERVICES" == *"$SERVICE"* ]]; then
+          echo "build=true" >> $GITHUB_OUTPUT
+        else
+          echo "build=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Checkout repository
+      if: steps.should_build.outputs.build == 'true'
+      uses: actions/checkout@v4
+
+    - name: Download binaries
+      if: steps.should_build.outputs.build == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: binaries
+
+    - name: Set up Docker Buildx
+      if: steps.should_build.outputs.build == 'true'
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      if: steps.should_build.outputs.build == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      if: steps.should_build.outputs.build == 'true'
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.service }}
+        tags: |
+          type=ref,event=branch,suffix=-debug
+          type=ref,event=pr,suffix=-debug
+          type=semver,pattern={{version}},suffix=-debug
+          type=semver,pattern={{major}}.{{minor}},suffix=-debug
+          type=semver,pattern={{major}},suffix=-debug
+          type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},suffix=-debug,enable={{is_default_branch}}
+          type=raw,value=debug,enable={{is_default_branch}}
+
+    - name: Build and push service debug Docker image
+      if: steps.should_build.outputs.build == 'true'
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: cmd/${{ matrix.service }}/Dockerfile.debug
+        platforms: linux/amd64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,key=${{ matrix.service }}-debug
+        cache-to: type=gha,mode=max,key=${{ matrix.service }}-debug
+
+  build-monolithic-debug-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Check if monolithic should be built
+      id: should_build
+      run: |
+        SERVICES="${{ github.event.inputs.services }}"
+        if [[ "$SERVICES" == "all" ]] || [[ "$SERVICES" == *"monolithic"* ]]; then
+          echo "build=true" >> $GITHUB_OUTPUT
+        else
+          echo "build=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Checkout repository
+      if: steps.should_build.outputs.build == 'true'
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      if: steps.should_build.outputs.build == 'true'
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      if: steps.should_build.outputs.build == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      if: steps.should_build.outputs.build == 'true'
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository }}
+        tags: |
+          type=ref,event=branch,suffix=-debug
+          type=ref,event=pr,suffix=-debug
+          type=semver,pattern={{version}},suffix=-debug
+          type=semver,pattern={{major}}.{{minor}},suffix=-debug
+          type=semver,pattern={{major}},suffix=-debug
+          type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},suffix=-debug,enable={{is_default_branch}}
+          type=raw,value=debug,enable={{is_default_branch}}
+
+    - name: Build and push monolithic debug Docker image
+      if: steps.should_build.outputs.build == 'true'
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile.debug
+        platforms: linux/amd64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,key=monolithic-debug
+        cache-to: type=gha,mode=max,key=monolithic-debug
+        build-args: |
+          AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz

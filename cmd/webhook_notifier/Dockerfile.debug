@@ -34,14 +34,14 @@ COPY --from=builder /app/cmd/ ./cmd/
 COPY --from=builder /app/pkg/ ./pkg/
 
 # Create non-root user
-RUN addgroup --gid 1000 rtcegress && \
-    adduser --disabled-password --gecos '' --uid 1000 --gid 1000 rtcegress
+RUN groupadd -r rtc_egress && \
+    useradd -r -g rtc_egress -s /bin/bash rtc_egress
 
 # Create directories
 RUN mkdir -p /opt/config /var/log/webhook_notifier && \
-    chown -R rtcegress:rtcegress /opt /var/log/webhook_notifier
+    chown -R rtc_egress:rtc_egress /opt /var/log/webhook_notifier
 
-USER rtcegress
+USER rtc_egress
 
 # Expose ports (dynamic from config)
 EXPOSE 8195

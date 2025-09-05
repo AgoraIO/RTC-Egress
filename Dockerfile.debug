@@ -31,7 +31,7 @@ WORKDIR /build
 COPY . .
 
 # Build the application
-RUN ./build.sh docker
+RUN ./build.sh local
 
 # Debug runtime stage
 FROM ubuntu:24.04
@@ -67,7 +67,7 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean
 
 # Create egress user and group
-RUN groupadd -r egress && useradd -r -g egress -d /opt/rtc_egress -s /bin/bash egress
+RUN groupadd -r rtc_egress && useradd -r -g rtc_egress -d /opt/rtc_egress -s /bin/bash rtc_egress
 
 # Create necessary directories with proper permissions
 RUN mkdir -p /opt/rtc_egress \
@@ -80,33 +80,33 @@ RUN mkdir -p /opt/rtc_egress \
     /recordings \
     /snapshots \
     /tmp/egress \
-    && chown -R egress:egress /opt/rtc_egress /var/log/rtc_egress /recordings /snapshots /tmp/egress
+    && chown -R rtc_egress:rtc_egress /opt/rtc_egress /var/log/rtc_egress /recordings /snapshots /tmp/egress
 
 # Set working directory
 WORKDIR /opt/rtc_egress
 
 # Copy binaries, libraries, configs AND source code for debugging
-COPY --from=builder --chown=egress:egress /build/bin ./bin
-COPY --from=builder --chown=egress:egress /build/agora_sdk ./agora_sdk
-COPY --from=builder --chown=egress:egress /build/config ./config
-COPY --from=builder --chown=egress:egress /build/src ./src
-COPY --from=builder --chown=egress:egress /build/cmd ./cmd
-COPY --from=builder --chown=egress:egress /build/pkg ./pkg
-COPY --from=builder --chown=egress:egress /build/CMakeLists.txt ./
-COPY --from=builder --chown=egress:egress /build/build.sh ./
-COPY --from=builder --chown=egress:egress /build/go.mod ./
-COPY --from=builder --chown=egress:egress /build/go.sum ./
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/bin ./bin
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/agora_sdk ./agora_sdk
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/config ./config
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/src ./src
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/cmd ./cmd
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/pkg ./pkg
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/CMakeLists.txt ./
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/build.sh ./
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/go.mod ./
+COPY --from=builder --chown=rtc_egress:rtc_egress /build/go.sum ./
 
 # Copy shared libraries to system library path
 COPY --from=builder /build/bin/*.so /usr/local/lib/
 RUN ldconfig
 
 # Copy entrypoint script
-COPY --chown=egress:egress docker-entrypoint.sh /usr/local/bin/
+COPY --chown=rtc_egress:rtc_egress docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Switch to egress user
-USER egress
+USER rtc_egress
 
 # Create volume mount points for configuration and data
 VOLUME ["/opt/rtc_egress/config", "/recordings", "/snapshots", "/var/log/rtc_egress"]
@@ -121,5 +121,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Use entrypoint script
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
-# Default command
-CMD ["./bin/egress", "--config", "/opt/rtc_egress/config/egress_config.yaml"]
+# No CMD - entrypoint will auto-detect monolithic mode and start all 5 services

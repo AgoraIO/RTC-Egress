@@ -13,8 +13,8 @@ WORKDIR /opt
 COPY bin/api-server ./bin/
 
 # Create non-root user
-RUN addgroup --gid 1000 rtc_egress && \
-    adduser --disabled-password --gecos '' --uid 1000 --gid 1000 rtc_egress
+RUN groupadd -r rtc_egress && \
+    useradd -r -g rtc_egress -s /bin/false rtc_egress
 
 # Create directories
 RUN mkdir -p /opt/config /var/log/api_server && \

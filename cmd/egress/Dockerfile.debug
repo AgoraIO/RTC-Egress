@@ -37,16 +37,11 @@ FROM base AS cpp_builder
 
 WORKDIR /app
 
-# Copy C++ source
-COPY src/ ./src/
-COPY include/ ./include/
-COPY CMakeLists.txt .
-COPY agora_sdk/ ./agora_sdk/
+# Copy all source code
+COPY . .
 
-# Build C++ components with debug symbols
-RUN mkdir build && cd build && \
-    cmake .. -DCMAKE_BUILD_TYPE=Debug && \
-    make -j$(nproc)
+# Build everything (including downloading Agora SDK)
+RUN ./build.sh local
 
 # Final debug image
 FROM ubuntu:24.04
@@ -85,11 +80,11 @@ RUN mkdir -p /opt/config /opt/logs /recordings /snapshots /web_recorder
 ENV LD_LIBRARY_PATH=/opt/lib:$LD_LIBRARY_PATH
 
 # Create non-root user
-RUN addgroup --gid 1000 egress && \
-    adduser --disabled-password --gecos '' --uid 1000 --gid 1000 egress && \
+RUN groupadd -r rtc_egress && \
+    useradd -r -g rtc_egress -s /bin/bash rtc_egress && \
     chown -R rtc_egress:rtc_egress /opt /recordings /snapshots /web_recorder
 
-USER egress
+USER rtc_egress
 
 # Expose ports (dynamic from config)
 EXPOSE 8182
