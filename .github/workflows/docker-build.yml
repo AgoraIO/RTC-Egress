@@ -82,15 +82,15 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image_name }}
+        images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image_name }}
         tags: |
           # Branch-based tags
           type=ref,event=branch
           type=ref,event=pr
-          # Release tags (when pushing git tags like v1.2.3)
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=semver,pattern={{major}}
+          # Release tags with date and short SHA (when pushing git tags like v1.2.3)
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{version}}
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}.{{minor}}
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}
           # Date-based tags for development builds
           type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},enable={{is_default_branch}}
           # Always tag latest for main branch
@@ -140,10 +140,10 @@ jobs:
           # Branch-based tags
           type=ref,event=branch
           type=ref,event=pr
-          # Release tags (when pushing git tags like v1.2.3)
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=semver,pattern={{major}}
+          # Release tags with date and short SHA (when pushing git tags like v1.2.3)
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{version}}
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}.{{minor}}
+          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}
           # Date-based tags for development builds
           type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},enable={{is_default_branch}}
           # Always tag latest for main branch
