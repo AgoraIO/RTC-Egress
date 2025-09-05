@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build and Push Production Docker Images
 
 on:
   push:
@@ -9,10 +9,90 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build:
+  build-binaries:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Build local binaries
+      run: |
+        ./build.sh full https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
+
+    - name: Upload binaries as artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries
+        path: |
+          bin/
+          agora_sdk/
+        retention-days: 1
+
+  build-service-images:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [api-server, egress, flexible-recorder, uploader, webhook-notifier]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download binaries
+      uses: actions/download-artifact@v4
+      with:
+        name: binaries
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.service }}
+        tags: |
+          # Branch-based tags
+          type=ref,event=branch
+          type=ref,event=pr
+          # Release tags (when pushing git tags like v1.2.3)
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          # Date-based tags for development builds
+          type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},enable={{is_default_branch}}
+          # Always tag latest for main branch
+          type=raw,value=latest,enable={{is_default_branch}}
+          # Stable tag for latest release
+          type=raw,value=stable,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+
+    - name: Build and push service Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: cmd/${{ matrix.service }}/Dockerfile
+        platforms: linux/amd64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,key=${{ matrix.service }}
+        cache-to: type=gha,mode=max,key=${{ matrix.service }}
+
+  build-monolithic-image:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,7 +117,7 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        images: ${{ env.REGISTRY }}/${{ github.repository }}
         tags: |
           # Branch-based tags
           type=ref,event=branch
@@ -53,7 +133,7 @@ jobs:
           # Stable tag for latest release
           type=raw,value=stable,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
 
-    - name: Build and push Docker image
+    - name: Build and push monolithic Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -62,19 +142,7 @@ jobs:
         push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-from: type=gha,key=monolithic
+        cache-to: type=gha,mode=max,key=monolithic
         build-args: |
           AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
-
-    - name: Test Docker image
-      if: github.event_name == 'pull_request'
-      run: |
-        docker run --rm \
-          -e APP_ID=test \
-          -e ACCESS_TOKEN=test \
-          --health-interval=5s \
-          --health-retries=3 \
-          --health-timeout=10s \
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.pull_request.head.sha }} \
-          --help

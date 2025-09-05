@@ -62,7 +62,7 @@ class RecordingSink {
         std::string audioCodec = "aac";
 
         // Recording settings
-        int maxDurationSeconds = 3600;  // 1 hour max
+        int maxDurationSeconds = 3600 * 8;  // 8 hours max
         bool recordVideo = true;
         bool recordAudio = true;
 

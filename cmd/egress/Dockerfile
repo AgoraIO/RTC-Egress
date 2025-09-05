@@ -26,8 +26,8 @@ RUN mkdir -p /opt/config /opt/logs /recordings /snapshots /web_recorder
 ENV LD_LIBRARY_PATH=/opt/lib:$LD_LIBRARY_PATH
 
 # Create non-root user
-RUN addgroup --gid 1000 rtc_egress && \
-    adduser --disabled-password --gecos '' --uid 1000 --gid 1000 rtc_egress && \
+RUN groupadd -r rtc_egress && \
+    useradd -r -g rtc_egress -s /bin/false rtc_egress && \
     chown -R rtc_egress:rtc_egress /opt /recordings /snapshots /web_recorder
 
 USER rtc_egress
