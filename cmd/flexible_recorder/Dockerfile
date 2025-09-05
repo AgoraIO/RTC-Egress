@@ -14,8 +14,9 @@ RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/s
 
 WORKDIR /opt
 
-# Copy pre-built binary from local build
+# Copy pre-built binary and config
 COPY bin/flexible-recorder ./bin/
+COPY config/ ./config/
 
 # Create non-root user
 RUN groupadd -r rtc_egress && \

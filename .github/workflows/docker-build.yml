@@ -162,5 +162,3 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha,key=monolithic
         cache-to: type=gha,mode=max,key=monolithic
-        build-args: |
-          AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz

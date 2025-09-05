@@ -14,8 +14,9 @@ RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/s
 
 WORKDIR /opt
 
-# Copy pre-built binary from local build
+# Copy pre-built binary and config
 COPY bin/uploader ./bin/
+COPY config/ ./config/
 
 # Create directory structure
 RUN mkdir -p /opt/config /opt/logs /recordings /snapshots /web_recorder
