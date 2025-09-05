@@ -608,6 +608,81 @@ stop_local_services() {
     fi
 }
 
+# Function to bump version
+bump_version() {
+    local new_version=$1
+    local current_version
+
+    # Read current version from VERSION file
+    if [ -f "VERSION" ]; then
+        current_version=$(cat VERSION | tr -d '\n\r' | sed 's/^v//')
+    else
+        echo -e "${RED}Error: VERSION file not found${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Current version: v$current_version${NC}"
+
+    if [ -z "$new_version" ]; then
+        # Auto-increment patch version (third number)
+        IFS='.' read -r major minor patch <<< "$current_version"
+
+        # Validate version format
+        if ! [[ "$major" =~ ^[0-9]+$ ]] || ! [[ "$minor" =~ ^[0-9]+$ ]] || ! [[ "$patch" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}Error: Invalid version format in VERSION file: $current_version${NC}"
+            echo -e "${YELLOW}Expected format: x.y.z (e.g., 1.0.0)${NC}"
+            exit 1
+        fi
+
+        # Increment patch version
+        patch=$((patch + 1))
+        new_version="$major.$minor.$patch"
+        echo -e "${GREEN}Auto-incrementing to: v$new_version${NC}"
+    else
+        # Remove 'v' prefix if provided
+        new_version=$(echo "$new_version" | sed 's/^v//')
+
+        # Validate provided version format
+        if ! [[ "$new_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo -e "${RED}Error: Invalid version format: $new_version${NC}"
+            echo -e "${YELLOW}Expected format: x.y.z (e.g., 1.2.0)${NC}"
+            exit 1
+        fi
+
+        echo -e "${GREEN}Setting version to: v$new_version${NC}"
+    fi
+
+    # Update VERSION file
+    echo "v$new_version" > VERSION
+    echo -e "${GREEN}Updated VERSION file${NC}"
+
+    # Commit version changes
+    git add VERSION
+    git commit -m "Chore: Bump version to v$new_version"
+    echo -e "${GREEN}Committed version bump${NC}"
+
+    # Create git tag
+    local tag_name="v$new_version"
+
+    # Check if tag already exists
+    if git rev-parse "$tag_name" >/dev/null 2>&1; then
+        echo -e "${YELLOW}Warning: Tag $tag_name already exists${NC}"
+        read -p "Do you want to delete and recreate the tag? (y/N): " confirm
+        if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+            git tag -d "$tag_name"
+            echo -e "${YELLOW}Deleted existing tag $tag_name${NC}"
+        else
+            echo -e "${YELLOW}Skipping tag creation${NC}"
+            return
+        fi
+    fi
+
+    # Create new tag
+    git tag -a "$tag_name" -m "Release version $tag_name"
+    echo -e "${GREEN}Created git tag: $tag_name${NC}"
+    echo -e "${YELLOW}To push the tag to remote, run: git push origin $tag_name${NC}"
+}
+
 # Function to force kill all egress processes
 force_kill_services() {
     echo -e "${GREEN}Force killing all egress processes...${NC}"
@@ -655,7 +730,7 @@ if [[ $2 == http* ]]; then
 fi
 
 # Set default URL if not provided (skip for commands that don't need SDK)
-if [ -z "$AGORA_SDK_URL" ] && [ "$1" != "clean" ] && [ "$1" != "go" ] && [ "$1" != "launch_web_recorder" ] && [ "$1" != "format" ] && [ "$1" != "stop" ] && [ "$1" != "force-kill" ] && [ "$1" != "run" ] && [ "$1" != "images" ] && [ "$1" != "images-debug" ] && [ "$1" != "image" ] && [ "$1" != "image-debug" ]; then
+if [ -z "$AGORA_SDK_URL" ] && [ "$1" != "clean" ] && [ "$1" != "go" ] && [ "$1" != "launch_web_recorder" ] && [ "$1" != "format" ] && [ "$1" != "stop" ] && [ "$1" != "force-kill" ] && [ "$1" != "run" ] && [ "$1" != "images" ] && [ "$1" != "images-debug" ] && [ "$1" != "image" ] && [ "$1" != "image-debug" ] && [ "$1" != "bump_version" ]; then
     AGORA_SDK_URL="$DEFAULT_AGORA_SDK_URL"
     echo -e "${YELLOW}Using default Agora SDK URL: $AGORA_SDK_URL${NC}"
     echo -e "${YELLOW}To use a different URL, you can:${NC}"
@@ -805,8 +880,12 @@ case "$1" in
         build_debug_image "$2"
         ;;
 
+    bump_version)
+        bump_version "$2"
+        ;;
+
     *)
-        echo "Usage: $0 {all|build|cpp|go|deps|clean|launch_web_recorder} [AGORA_SDK_URL|WEB_RECORDER_VERSION]"
+        echo "Usage: $0 {all|build|cpp|go|deps|clean|launch_web_recorder|bump_version} [AGORA_SDK_URL|WEB_RECORDER_VERSION|VERSION]"
         echo "  all   - Install dependencies and build all services/components"
         echo "  cpp   - Build only C++ components"
         echo "  go    - Build only Go server"
@@ -819,6 +898,10 @@ case "$1" in
         echo "  clean - Clean build artifacts"
         echo ""
         echo "  launch_web_recorder [version] - Launch Web Recorder Engine container for testing"
+        echo ""
+        echo "  bump_version [version] - Bump version and create git tag"
+        echo "    Without version: auto-increment patch version (x.y.z -> x.y.z+1)"
+        echo "    With version: set specific version (e.g., 1.2.0)"
         echo ""
         echo "  images - Build all production service images (requires ./build.sh local first)"
         echo "  images-debug - Build all debug service images (with source code and symbols)"
