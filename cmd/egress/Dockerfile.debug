@@ -40,11 +40,15 @@ WORKDIR /app
 # Copy all source code
 COPY . .
 
-# Build everything (including downloading Agora SDK)
-RUN ./build.sh local
+# Build everything (including downloading Agora SDK) - CI build without prettifier
+RUN ./build.sh ci
 
 # Final debug image
 FROM ubuntu:24.04
+
+# Set timezone and avoid interactive prompts
+ENV TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime and debug dependencies
 RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list && \

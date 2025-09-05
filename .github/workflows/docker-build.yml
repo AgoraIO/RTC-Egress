@@ -17,9 +17,16 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Build local binaries
+    - name: Build binaries in Docker
       run: |
-        ./build.sh ci https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
+        # Build using the builder stage from Dockerfile.prod
+        docker build --target builder -t temp-builder -f Dockerfile.prod \
+          --build-arg AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz \
+          .
+
+        # Extract built binaries and SDK from the container
+        docker run --rm -v $PWD:/output temp-builder \
+          bash -c "cp -r /build/bin /output/ && cp -r /build/agora_sdk /output/"
 
     - name: Upload binaries as artifacts
       uses: actions/upload-artifact@v4

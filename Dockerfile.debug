@@ -1,10 +1,10 @@
 # Debug Dockerfile - Include source code and debugging tools
 FROM ubuntu:24.04 AS builder
 
-# Set timezone and avoid interactive prompts during build
-ENV DEBIAN_FRONTEND=noninteractive
+# Set timezone and avoid interactive prompts
 ENV TZ=UTC
-ENV AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
+ENV DEBIAN_FRONTEND=noninteractive
+ENV GIN_MODE=debug
 
 # Install build dependencies
 RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list && \
@@ -32,15 +32,10 @@ WORKDIR /build
 COPY . .
 
 # Build the application
-RUN ./build.sh local
+RUN ./build.sh ci
 
 # Debug runtime stage
 FROM ubuntu:24.04
-
-# Set timezone and avoid interactive prompts
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=UTC
-ENV GIN_MODE=debug
 
 # Install runtime dependencies + debugging tools
 RUN apt-get update && apt-get install -y \
