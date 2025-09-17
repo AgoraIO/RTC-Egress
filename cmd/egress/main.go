@@ -276,7 +276,7 @@ func initHealthManager() error {
 	podID := utils.GenerateRandomID(12)
 	appVersion := version.GetVersion()
 
-	healthManager = health.NewHealthManager(redisQueue.Client(), podID, config.Pod.Region, appVersion)
+	healthManager = health.NewHealthManager(redisQueue.Client(), podID, config.Pod.Region, appVersion, int(egress.ModeNative))
 
 	// Register this pod
 	if err := healthManager.RegisterPod(config.Pod.NumWorkers); err != nil {

@@ -23,6 +23,7 @@ const (
 type PodInfo struct {
 	PodID          string    `json:"pod_id"`
 	Region         string    `json:"region"`
+	Mode           int       `json:"mode"` // WorkerManagerMode value
 	MaxWorkers     int       `json:"max_workers"`
 	CurrentWorkers int       `json:"current_workers"`
 	Status         string    `json:"status"` // "healthy", "degraded", "unhealthy"
@@ -46,6 +47,7 @@ type RegionalStats struct {
 	TotalPods         int       `json:"total_pods"`
 	HealthyPods       int       `json:"healthy_pods"`
 	TotalWorkers      int       `json:"total_workers"`
+	NativeWorkers     int       `json:"native_workers"`
 	ActiveTasks       int       `json:"active_tasks"`
 	AvailableCapacity int       `json:"available_capacity"`
 	QueueBacklog      int       `json:"queue_backlog"`
@@ -68,15 +70,17 @@ type HealthManager struct {
 	region    string
 	version   string
 	startTime time.Time
+	mode      int // egress.WorkerManagerMode as int
 }
 
-func NewHealthManager(redisClient *redis.Client, podID, region, version string) *HealthManager {
+func NewHealthManager(redisClient *redis.Client, podID, region, version string, mode int) *HealthManager {
 	return &HealthManager{
 		client:    redisClient,
 		podID:     podID,
 		region:    region,
 		version:   version,
 		startTime: time.Now(),
+		mode:      mode,
 	}
 }
 
@@ -85,6 +89,7 @@ func (hm *HealthManager) RegisterPod(maxWorkers int) error {
 	podInfo := PodInfo{
 		PodID:          hm.podID,
 		Region:         hm.region,
+		Mode:           hm.mode,
 		MaxWorkers:     maxWorkers,
 		CurrentWorkers: maxWorkers, // Assume all workers are running initially
 		Status:         "healthy",
@@ -143,6 +148,7 @@ func (hm *HealthManager) sendHeartbeat(maxWorkers int, getActiveTaskCount func()
 	podInfo := PodInfo{
 		PodID:          hm.podID,
 		Region:         hm.region,
+		Mode:           hm.mode,
 		MaxWorkers:     maxWorkers,
 		CurrentWorkers: maxWorkers,
 		Status:         hm.calculatePodStatus(cpuPercent[0], memInfo.UsedPercent),
@@ -264,6 +270,7 @@ func (hm *HealthManager) calculateRegionalStats() error {
 			TotalPods:         len(pods),
 			HealthyPods:       0,
 			TotalWorkers:      0,
+			NativeWorkers:     0,
 			ActiveTasks:       0,
 			AvailableCapacity: 0,
 			QueueBacklog:      0,
@@ -280,6 +287,10 @@ func (hm *HealthManager) calculateRegionalStats() error {
 			}
 
 			stats.TotalWorkers += pod.MaxWorkers
+			// ModeNative is 0 by definition; default zero value also treated as native
+			if pod.Mode == 0 {
+				stats.NativeWorkers += pod.MaxWorkers
+			}
 
 			if i < len(capacity) {
 				cap := capacity[i]

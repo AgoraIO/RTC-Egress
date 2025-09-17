@@ -161,7 +161,6 @@ build_go() {
     if [ -d "cmd/flexible_recorder" ]; then
         echo -e "${GREEN}Building flexible-recorder service...${NC}"
         go build -o bin/flexible-recorder ./cmd/flexible_recorder
-
         if [ ! -f "bin/flexible-recorder" ]; then
             echo -e "${RED}Build failed - flexible-recorder binary not found${NC}"
             exit 1
@@ -443,7 +442,11 @@ preflight_check() {
     local occupied_ports=""
 
     # Check for running egress processes
-    local processes=$(ps aux | grep -E "(bin/api-server|bin/egress|bin/flexible-recorder|bin/uploader|bin/webhook-notifier|bin/eg_worker)" | grep -v grep | awk '{print $2, $11, $12, $13, $14, $15}')
+    local processes=$(ps aux \
+        | grep -E "(bin/api-server|bin/egress|bin/flexible-recorder|bin/uploader|bin/webhook-notifier|bin/eg_worker)" \
+        | grep -v grep \
+        | grep -v "/agora-web-recorder/" \
+        | awk '{print $2, $11, $12, $13, $14, $15}')
     if [ ! -z "$processes" ]; then
         conflicts_found=true
         running_processes="$processes"
@@ -536,11 +539,12 @@ run_all_services() {
     echo -e "${YELLOW}Logs available in logs/ directory${NC}"
     echo ""
     echo -e "${GREEN}Service Endpoints:${NC}"
-    echo -e "  API Server:       http://localhost:${API_PORT} (health: ${API_HEALTH_PORT})"
-    echo -e "  Egress:          health: http://localhost:${EGRESS_HEALTH_PORT} (native recording)"
+    echo -e "  API Server:        restful: http://localhost:${API_PORT} (restful api)"
+    echo -e "  API Server:        health: http://localhost:${API_HEALTH_PORT} (restful api)"
+    echo -e "  Egress:            health: http://localhost:${EGRESS_HEALTH_PORT} (native recording)"
     echo -e "  Flexible Recorder: health: http://localhost:${FLEXIBLE_HEALTH_PORT} (web recording)"
-    echo -e "  Uploader:        health: http://localhost:${UPLOADER_HEALTH_PORT} (file uploads)"
-    echo -e "  Webhook Notifier: health: http://localhost:${WEBHOOK_HEALTH_PORT} (event notifier)"
+    echo -e "  Uploader:          health: http://localhost:${UPLOADER_HEALTH_PORT} (file uploads)"
+    echo -e "  Webhook Notifier:  health: http://localhost:${WEBHOOK_HEALTH_PORT} (event notifier)"
     echo ""
     echo -e "${YELLOW}To stop all services: ./build.sh stop${NC}"
     echo -e "${YELLOW}To view logs: tail -f logs/*.log${NC}"
@@ -936,6 +940,10 @@ case "$1" in
         echo "Storage Paths:"
         echo "  Local development: ./web_recorder (maps to /opt2 in web recorder engine)"
         echo "  Docker production: /web_recorder (volume mount for consistent paths)"
+        echo ""
+        echo "Notes:"
+        echo "  - Agora Web Recorder Engine is a separate third-party service."
+        echo "    We do not conflict-check it during preflight."
         echo ""
         echo "For build, you can provide the Agora SDK URL either as:"
         echo "1. Environment variable: export AGORA_SDK_URL=YOUR_Agora_SDK_URL"

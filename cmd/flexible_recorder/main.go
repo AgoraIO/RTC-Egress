@@ -165,7 +165,7 @@ func initHealthManager() error {
 	podID := fmt.Sprintf("flex-%s", utils.GenerateRandomID(8))
 	appVersion := version.GetVersion()
 
-	healthManager = health.NewHealthManager(redisQueue.Client(), podID, config.Pod.Region, appVersion)
+	healthManager = health.NewHealthManager(redisQueue.Client(), podID, config.Pod.Region, appVersion, int(egress.ModeWeb))
 
 	// Register this pod as flexible recorder
 	if err := healthManager.RegisterPod(config.Pod.NumWorkers); err != nil {
