@@ -238,28 +238,23 @@ func (s *APIServer) stopTask(c *gin.Context) {
 	}
 
 	// Check if task is already completed
-	if task.State == queue.TaskStateSuccess || task.State == queue.TaskStateFailed || task.State == queue.TaskStateTimeout {
+	if task.State == queue.TaskStateStopped || task.State == queue.TaskStateFailed || task.State == queue.TaskStateTimeout {
 		c.JSON(http.StatusOK, gin.H{
 			"request_id": req.RequestID,
 			"task_id":    taskID,
 			"status":     "completed",
-			"message":    fmt.Sprintf("Task already in state: %s", task.State),
+			"message":    fmt.Sprintf("Task already in terminal state: %s", task.State),
 		})
 		return
 	}
 
-	// Create stop task in Redis with original task_id in payload
-	stopPayload := map[string]interface{}{
-		"task_id": taskID,
-		"app_id":  appID,
-	}
-
-	// Parse region from client IP for stop task as well
+	// Parse region from client IP for stop task routing as well
 	clientIP := c.ClientIP()
 	region := parseRegionFromIP(clientIP)
 	log.Printf("Stop task - Client IP: %s, Parsed region: %s", clientIP, region)
 
-	stopTask, err := s.redisQueue.PublishTaskToRegion(ctx, task.Cmd, "stop", task.Channel, req.RequestID, stopPayload, region)
+	// Publish a stop task derived from original without requiring layout in payload
+	_, err = s.redisQueue.PublishStopTaskFor(ctx, taskID, req.RequestID, region)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":      fmt.Sprintf("Failed to create stop task: %v", err),
@@ -269,12 +264,13 @@ func (s *APIServer) stopTask(c *gin.Context) {
 		return
 	}
 
-	log.Printf("Created stop task %s for original task %s", stopTask.ID, taskID)
+	log.Printf("Stop requested for task %s (request_id=%s)", taskID, req.RequestID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"request_id": req.RequestID,
-		"task_id":    stopTask.ID,
+		"task_id":    taskID,
 		"status":     "enqueued",
+		"message":    fmt.Sprintf("Stop task enqueued for task %s", taskID),
 	})
 }
 

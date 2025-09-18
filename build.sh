@@ -445,7 +445,7 @@ preflight_check() {
     local processes=$(ps aux \
         | grep -E "(bin/api-server|bin/egress|bin/flexible-recorder|bin/uploader|bin/webhook-notifier|bin/eg_worker)" \
         | grep -v grep \
-        | grep -v "/agora-web-recorder/" \
+        | grep -v "agora-web-recorder" \
         | awk '{print $2, $11, $12, $13, $14, $15}')
     if [ ! -z "$processes" ]; then
         conflicts_found=true
@@ -583,7 +583,11 @@ stop_local_services() {
     fi
 
     # Also check for main service processes (exclude eg_worker - let egress handle them)
-    local main_services=$(ps aux | grep -E "(bin/api-server|bin/egress|bin/flexible-recorder|bin/uploader|bin/webhook-notifier)" | grep -v grep | awk '{print $2}')
+    local main_services=$(ps aux \
+        | grep -E "(bin/api-server|bin/egress|bin/flexible-recorder|bin/uploader|bin/webhook-notifier)" \
+        | grep -v grep \
+        | grep -v "agora-web-recorder" \
+        | awk '{print $2}')
 
     if [ ! -z "$main_services" ]; then
         echo -e "${YELLOW}Found additional main service processes...${NC}"
@@ -693,7 +697,10 @@ force_kill_services() {
 
     # Search for processes matching either './bin/eg_worker' or './bin/egress' or './bin/flexible-recorder' or './bin/uploader' or './bin/webhook-notifier' or './bin/api-server' command
     # Includes arguments like --config
-    matches=$(ps -eo pid,command | grep -E '\./bin/(eg_worker|egress|flexible-recorder|uploader|webhook-notifier|api-server)' | grep -v grep)
+    matches=$(ps -eo pid,command \
+        | grep -E '\./bin/(eg_worker|egress|flexible-recorder|uploader|webhook-notifier|api-server)' \
+        | grep -v grep \
+        | grep -v "agora-web-recorder")
 
     if [ -z "$matches" ]; then
       echo -e "${YELLOW}❌ No eg_worker/egress/flexible-recorder/uploader/webhook-notifier/api-server process found.${NC}"

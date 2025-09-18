@@ -388,6 +388,7 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
     } else if (action == "stop") {
         std::string completed_task_id;
         std::string found_channel;
+        bool last_record_task_on_channel = false;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
 
@@ -423,13 +424,26 @@ void TaskPipe::handleRecordingCommand(const std::string& action, const UDSMessag
                 return;
             }
 
-            // Stop recording sink if no more recording tasks are active
-            if (!hasActiveTasksOfType("record", false)) {
-                logInfo("Stopping recording for channel: " + found_channel, instance_id_);
-                if (recording_sink_) {
-                    recording_sink_->stop();
+            // Determine if this is the last recording task on this channel
+            auto it = channel_states_.find(found_channel);
+            if (it != channel_states_.end()) {
+                const auto& state = it->second;
+                bool any_other_record = false;
+                for (const auto& [tid, ttype] : state.active_tasks) {
+                    if (tid != completed_task_id && ttype == "record") {
+                        any_other_record = true;
+                        break;
+                    }
                 }
+                last_record_task_on_channel = !any_other_record;
             }
+        }
+
+        // Proactively stop the recording sink when STOPPING is received and this was the last
+        // recording task on the channel. CleanupConnection remains the last-guaranteed fallback.
+        if (last_record_task_on_channel && recording_sink_) {
+            logInfo("Stopping recording (proactive) for channel: " + found_channel, instance_id_);
+            recording_sink_->stop();
         }
 
         // Release the connection for this completed task
@@ -554,15 +568,17 @@ void TaskPipe::cleanupConnection(const std::string& channel) {
         if (task_type == "record") has_recording_tasks = true;
     }
 
-    // Stop any active snapshot
-    if (has_snapshot_tasks && snapshot_sink_ && snapshot_sink_->isCapturing()) {
-        logInfo("Stopping snapshot for channel: " + channel, instance_id_);
+    if (snapshot_sink_) {
+        logInfo("Always stopping snapshot for channel: " + channel +
+                    " with active tasks: " + std::string(has_snapshot_tasks ? "true" : "false"),
+                instance_id_);
         snapshot_sink_->stop();
     }
 
-    // Stop any active recording
-    if (has_recording_tasks && recording_sink_) {
-        logInfo("Stopping recording for channel: " + channel, instance_id_);
+    if (recording_sink_) {
+        logInfo("Always stopping recording for channel: " + channel +
+                    " with active tasks: " + std::string(has_recording_tasks ? "true" : "false"),
+                instance_id_);
         recording_sink_->stop();
     }
 

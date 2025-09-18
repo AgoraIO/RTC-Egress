@@ -42,6 +42,7 @@ type Config struct {
 		MaxRetryInterval  int      `mapstructure:"max_retry_interval"`  // seconds
 		AuthToken         string   `mapstructure:"auth_token"`
 		NotifyStates      []string `mapstructure:"notify_states"`
+		DeliveredTTL      int      `mapstructure:"delivered_ttl"` // seconds, dedupe retention for terminal states
 	} `mapstructure:"webhook"`
 }
 
@@ -119,7 +120,7 @@ func loadConfig() error {
 		// Default to all important states
 		config.Webhook.NotifyStates = []string{
 			queue.TaskStateProcessing,
-			queue.TaskStateSuccess,
+			queue.TaskStateStopped,
 			queue.TaskStateFailed,
 			queue.TaskStateTimeout,
 		}
@@ -163,6 +164,7 @@ func initWebhookNotifier() error {
 		MaxRetryInterval:  time.Duration(config.Webhook.MaxRetryInterval) * time.Second,
 		AuthToken:         config.Webhook.AuthToken,
 		NotifyStates:      config.Webhook.NotifyStates,
+		DeliveredTTL:      time.Duration(config.Webhook.DeliveredTTL) * time.Second,
 	}
 
 	notifier = webhook.NewWebhookNotifier(webhookConfig, redisClient)

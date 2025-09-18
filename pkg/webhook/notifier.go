@@ -33,7 +33,7 @@ type WebhookPayload struct {
 	Cmd         string                 `json:"cmd"`     // "snapshot", "record", "web:record"
 	Action      string                 `json:"action"`  // "start", "stop", "status"
 	Channel     string                 `json:"channel"` // channel name
-	State       string                 `json:"state"`   // ENQUEUED, PROCESSING, SUCCESS, FAILED, TIMEOUT
+	State       string                 `json:"state"`   // ENQUEUED, PROCESSING, STOPPING, STOPPED, FAILED, TIMEOUT
 	Error       string                 `json:"error,omitempty"`
 	WorkerID    int                    `json:"worker_id,omitempty"`
 	Payload     map[string]interface{} `json:"payload,omitempty"`
@@ -56,6 +56,7 @@ type WebhookConfig struct {
 	IncludePayload    bool          `json:"include_payload"`      // Include task payload in notification
 	BatchSize         int           `json:"batch_size"`           // Batch notifications (0 = disabled)
 	BatchTimeout      time.Duration `json:"batch_timeout"`        // Batch timeout
+	DeliveredTTL      time.Duration `json:"delivered_ttl"`        // TTL for delivered dedupe keys
 }
 
 // DefaultWebhookConfig returns default webhook configuration
@@ -65,10 +66,11 @@ func DefaultWebhookConfig() WebhookConfig {
 		MaxRetries:        5,
 		BaseRetryInterval: queue.LeaseRenewalInterval, // 15 seconds
 		MaxRetryInterval:  5 * time.Minute,
-		NotifyStates:      []string{queue.TaskStateProcessing, queue.TaskStateSuccess, queue.TaskStateFailed, queue.TaskStateTimeout},
+		NotifyStates:      []string{queue.TaskStateProcessing, queue.TaskStateStopped, queue.TaskStateFailed, queue.TaskStateTimeout},
 		IncludePayload:    false,
 		BatchSize:         0, // Disabled by default
 		BatchTimeout:      5 * time.Second,
+		DeliveredTTL:      48 * time.Hour, // 48 hours default
 	}
 }
 
@@ -104,7 +106,10 @@ func NewWebhookNotifier(config WebhookConfig, redisClient *redis.Client) *Webhoo
 		config.Timeout = 30 * time.Second
 	}
 	if len(config.NotifyStates) == 0 {
-		config.NotifyStates = []string{queue.TaskStateProcessing, queue.TaskStateSuccess, queue.TaskStateFailed, queue.TaskStateTimeout}
+		config.NotifyStates = []string{queue.TaskStateProcessing, queue.TaskStateStopped, queue.TaskStateFailed, queue.TaskStateTimeout}
+	}
+	if config.DeliveredTTL == 0 {
+		config.DeliveredTTL = 48 * time.Hour
 	}
 
 	return &WebhookNotifier{
@@ -246,9 +251,16 @@ func (wn *WebhookNotifier) processTaskNotification(task *queue.Task) {
 		wn.notifications[task.ID] = notifState
 	}
 
-	// Check if we already notified about this state successfully
-	if notifState.LastState == task.State && notifState.RetryCount == 0 {
-		return // Already successfully notified
+	// For terminal states, ensure exactly-once across restarts using Redis dedupe key
+	if isTerminalState(task.State) {
+		if wn.hasDelivered(task.ID, task.State) {
+			return
+		}
+	} else {
+		// Non-terminal: in-memory dedupe
+		if notifState.LastState == task.State && notifState.RetryCount == 0 {
+			return // Already successfully notified in this process
+		}
 	}
 
 	// Check if we're in retry backoff period
@@ -348,6 +360,9 @@ func (wn *WebhookNotifier) sendNotification(payload WebhookPayload, notifState *
 		notifState.RetryCount = 0
 		notifState.LastError = ""
 		notifState.NextRetryTime = time.Time{}
+		if isTerminalState(payload.State) {
+			wn.markDelivered(payload.TaskID, payload.State)
+		}
 		log.Printf("Successfully sent webhook notification for task %s (state: %s)", payload.TaskID, payload.State)
 	} else {
 		notifState.RetryCount++
@@ -381,6 +396,9 @@ func (wn *WebhookNotifier) sendBatchNotification(batch []WebhookPayload) {
 				notifState.RetryCount = 0
 				notifState.LastError = ""
 				notifState.NextRetryTime = time.Time{}
+				if isTerminalState(payload.State) {
+					wn.markDelivered(payload.TaskID, payload.State)
+				}
 			}
 		}
 		wn.notifMutex.Unlock()
@@ -572,4 +590,40 @@ func GetNotificationHash(payload WebhookPayload) string {
 	hashInput := fmt.Sprintf("%s:%s:%d", payload.TaskID, payload.State, payload.Timestamp.Unix())
 	hash := sha256.Sum256([]byte(hashInput))
 	return fmt.Sprintf("%x", hash[:8])
+}
+func isTerminalState(state string) bool {
+	return state == queue.TaskStateStopped || state == queue.TaskStateFailed || state == queue.TaskStateTimeout
+}
+
+func (wn *WebhookNotifier) deliveredKey(taskID, state string) string {
+	return fmt.Sprintf("egress:notif:delivered:%s:%s", taskID, state)
+}
+
+func (wn *WebhookNotifier) hasDelivered(taskID, state string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	key := wn.deliveredKey(taskID, state)
+	exists, err := wn.redisClient.Exists(ctx, key).Result()
+	if err != nil {
+		// On Redis error, fall back to sending (at-least-once semantics)
+		log.Printf("Webhook dedupe check failed for %s: %v", key, err)
+		return false
+	}
+	return exists > 0
+}
+
+func (wn *WebhookNotifier) markDelivered(taskID, state string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	key := wn.deliveredKey(taskID, state)
+	// Store minimal metadata; value not used for logic
+	value := map[string]interface{}{
+		"task_id": taskID,
+		"state":   state,
+		"ts":      time.Now().UTC().Format(time.RFC3339),
+	}
+	data, _ := json.Marshal(value)
+	if err := wn.redisClient.Set(ctx, key, data, wn.config.DeliveredTTL).Err(); err != nil {
+		log.Printf("Failed to set delivered dedupe key %s: %v", key, err)
+	}
 }

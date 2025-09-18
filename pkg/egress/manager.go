@@ -2,7 +2,6 @@ package egress
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -39,7 +38,6 @@ type WorkerStatus struct {
 	State   int    `json:"state"` // 0: IDLE, 1: RUNNING, 2: NOT_AVAILABLE
 	Pid     int    `json:"pid"`
 	LastErr string `json:"last_err,omitempty"`
-	TaskID  string `json:"task_id,omitempty"`
 }
 
 type Worker struct {
@@ -49,7 +47,6 @@ type Worker struct {
 	Conn       net.Conn
 	Status     WorkerStatus
 	Mutex      sync.Mutex
-	TaskID     string // Current task ID being processed
 }
 
 type TaskRequest struct {
@@ -411,19 +408,12 @@ func (wm *WorkerManager) listenForCompletionMessages(worker *Worker) {
 	}
 }
 
-// handleTaskCompletion processes task completion from C++ worker
+// handleTaskCompletion processes task completion from C++ worker(sendCompletionMessage)
 func (wm *WorkerManager) handleTaskCompletion(worker *Worker, completion *UDSCompletionMessage) {
 	worker.Mutex.Lock()
 	defer worker.Mutex.Unlock()
 
 	log.Printf("Worker %d completed task %s with status: %s", worker.ID, completion.TaskID, completion.Status)
-
-	// Validate that this worker was actually processing this task
-	if worker.TaskID != completion.TaskID {
-		log.Printf("Warning: Worker %d reported completion for task %s but was processing task %s",
-			worker.ID, completion.TaskID, worker.TaskID)
-		return
-	}
 
 	// Check for unrecoverable errors and auto-stop FAILED tasks
 	if completion.Status != "success" {
@@ -454,12 +444,12 @@ func (wm *WorkerManager) handleTaskCompletion(worker *Worker, completion *UDSCom
 		}
 	}
 
-	// Update Redis task status (normal success/failed processing)
+	// Update Redis task status (normal stopped/failed processing)
 	if wm.RedisQueue != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		status := queue.TaskStateSuccess
+		status := queue.TaskStateStopped
 		errorMsg := ""
 		if completion.Status != "success" {
 			status = queue.TaskStateFailed
@@ -471,41 +461,64 @@ func (wm *WorkerManager) handleTaskCompletion(worker *Worker, completion *UDSCom
 
 		if err := wm.RedisQueue.UpdateTaskResult(ctx, completion.TaskID, status, errorMsg); err != nil {
 			log.Printf("Failed to update Redis status for task %s: %v", completion.TaskID, err)
-		} else {
-			log.Printf("Updated Redis status for task %s: %s", completion.TaskID, status)
 		}
 	}
 
-	// Update worker status - mark as idle and clear task ID
-	worker.Status.State = WORKER_IDLE
-	worker.Status.TaskID = ""
-	worker.TaskID = ""
+	// After handling redis and cleanup below, decide worker state based on remaining tasks
 
 	// Remove from active tasks tracking for lease renewal
 	wm.TasksMutex.Lock()
 	delete(wm.ActiveTasks, completion.TaskID)
 	wm.TasksMutex.Unlock()
 
-	// Clean up channel mappings - find and remove this specific task
-	for channel, workerID := range wm.ChannelWorkers {
-		if workerID == worker.ID {
-			// Find the task type for this task ID and remove it
-			wm.Mutex.Lock()
-			if channelTasks, ok := wm.ChannelTasks[channel]; ok {
-				for taskType, taskIDs := range channelTasks {
+	// Clean up channel mappings - find this worker's channel and remove this specific task
+	var channelFound string
+	var cmdFound string
+	wm.Mutex.Lock()
+	for ch, wid := range wm.ChannelWorkers {
+		if wid == worker.ID {
+			// Identify command type that contains this task ID
+			if channelTasks, ok := wm.ChannelTasks[ch]; ok {
+				for cmd, taskIDs := range channelTasks {
 					for _, taskID := range taskIDs {
 						if taskID == completion.TaskID {
-							wm.Mutex.Unlock()
-							wm.removeTaskFromChannel(channel, taskType, completion.TaskID)
-							return
+							channelFound = ch
+							cmdFound = cmd
+							break
 						}
+					}
+					if channelFound != "" {
+						break
 					}
 				}
 			}
-			wm.Mutex.Unlock()
 			break
 		}
 	}
+	// Remove mapping if found
+	if channelFound != "" && cmdFound != "" {
+		wm.Mutex.Unlock()
+		wm.removeTaskFromChannel(channelFound, cmdFound, completion.TaskID)
+	} else {
+		wm.Mutex.Unlock()
+		log.Printf("Warning: Could not locate task %s in channel/task tracking for worker %d", completion.TaskID, worker.ID)
+		log.Printf("Warning: This is NORMAL if triggered by stop task from user")
+	}
+
+	// Determine if worker should remain RUNNING (other tasks left on its channel)
+	wm.Mutex.Lock()
+	if ch, ok := wm.WorkerChannels[worker.ID]; ok {
+		if tasksByType, exists := wm.ChannelTasks[ch]; exists && len(tasksByType) > 0 {
+			// Still tasks on this channel
+			worker.Status.State = WORKER_RUNNING
+		} else {
+			worker.Status.State = WORKER_IDLE
+		}
+	} else {
+		// No channel assigned; mark idle defensively
+		worker.Status.State = WORKER_IDLE
+	}
+	wm.Mutex.Unlock()
 }
 
 // startLeaseRenewal periodically renews leases for active tasks
@@ -756,6 +769,9 @@ func (wm *WorkerManager) fetchTaskFromRedis(ctx context.Context, patterns []stri
 			return nil, fmt.Errorf("failed to claim task %s with lease: %v", taskID, err)
 		}
 
+		// Record source queue for web/native detection priority
+		task.SourceQueue = queue
+
 		if shouldYield {
 			log.Printf("Pod %s (non-regional) fetched regional task %s from queue %s after yielding", wm.PodID, taskID, queue)
 		} else {
@@ -990,15 +1006,43 @@ func (wm *WorkerManager) processRedisTask(task *queue.Task) {
 	}
 }
 
+// isWebTask determines if a task should be handled by the web recorder path
+func (wm *WorkerManager) isWebTask(task *queue.Task) bool {
+	// 1) Prefer routing by source queue (authoritative)
+	if task != nil && task.SourceQueue != "" {
+		parts := strings.Split(task.SourceQueue, ":")
+		// egress:web:cmd:channel OR egress:region:web:cmd:channel
+		if len(parts) >= 3 && parts[0] == "egress" {
+			if parts[1] == "web" {
+				return true
+			}
+			if len(parts) >= 4 && parts[2] == "web" {
+				return true
+			}
+		}
+	}
+
+	// 2) Fallback to payload layout
+	if task != nil && task.Payload != nil {
+		if v, ok := task.Payload["layout"]; ok {
+			if s, ok2 := v.(string); ok2 {
+				if strings.EqualFold(s, "freestyle") {
+					return true
+				}
+			}
+		}
+	}
+
+	// 3) Fallback to manager mode if payload not informative
+	return wm.mode == ModeWeb
+}
+
 // startTask starts a task from Redis queue directly
 func (wm *WorkerManager) startTask(task *queue.Task) error {
-	isWebTask := strings.Contains(task.Cmd, ":web:")
-
-	if isWebTask {
+	if wm.isWebTask(task) {
 		return wm.startWebRecorderTask(task)
-	} else {
-		return wm.startNativeRecorderTask(task)
 	}
+	return wm.startNativeRecorderTask(task)
 }
 
 // startNativeRecorderTask starts a native recording task using eg_workers
@@ -1036,13 +1080,20 @@ func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
 	}
 
 	channel := task.Channel
-	taskCmd := task.Cmd
+	cmd := task.Cmd
 
 	wm.Mutex.Lock()
 	defer wm.Mutex.Unlock()
 
+	// Enforce only one task per type on a given channel/worker
+	if channelTasks, ok := wm.ChannelTasks[channel]; ok {
+		if existing, typeExists := channelTasks[cmd]; typeExists && len(existing) > 0 {
+			return fmt.Errorf("task of type %s already running on channel %s", cmd, channel)
+		}
+	}
+
 	// Find worker for this channel (reuse if exists, find free if new)
-	worker, err, _ := wm.findWorkerForChannel(channel, taskCmd)
+	worker, err, _ := wm.findWorkerForChannel(channel, cmd)
 	if err != nil {
 		return err
 	}
@@ -1053,7 +1104,7 @@ func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
 	if wm.ChannelTasks[channel] == nil {
 		wm.ChannelTasks[channel] = make(map[string][]string)
 	}
-	wm.ChannelTasks[channel][taskCmd] = append(wm.ChannelTasks[channel][taskCmd], task.ID)
+	wm.ChannelTasks[channel][cmd] = append(wm.ChannelTasks[channel][cmd], task.ID)
 
 	// Send task to worker
 	worker.Mutex.Lock()
@@ -1061,17 +1112,15 @@ func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
 	if err != nil {
 		worker.Mutex.Unlock()
 		// Clean up on failure
-		wm.removeTaskFromChannel(channel, taskCmd, task.ID)
+		wm.removeTaskFromChannel(channel, cmd, task.ID)
 		return fmt.Errorf("failed to send task to worker: %v", err)
 	}
 
-	// Update worker state
+	// Update worker state (may have multiple tasks of different types)
 	worker.Status.State = WORKER_RUNNING
-	worker.Status.TaskID = task.ID
-	worker.TaskID = task.ID
 	worker.Mutex.Unlock()
 
-	log.Printf("Pod %s assigned task %s (%s:%s) to worker %d", wm.PodID, task.ID, channel, taskCmd, worker.ID)
+	log.Printf("Pod %s assigned task %s (%s:%s) to worker %d", wm.PodID, task.ID, channel, cmd, worker.ID)
 
 	// Update worker ID in Redis for this task
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1126,15 +1175,15 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 		return fmt.Errorf("stop task %s missing original task_id in payload", task.ID)
 	}
 
-	// Always mark stop task as SUCCESS at the end
+	// Always mark stop task(not the origial task) as STOPPED at the end
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// Mark stop task as SUCCESS - stop operation always succeeds
-		err := wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateSuccess, "Stop command executed")
+		// Mark stop task as STOPPED - stop operation acknowledged
+		err := wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateStopped, "Stop command executed")
 		if err != nil {
-			log.Printf("Failed to update stop task %s state to SUCCESS: %v", task.ID, err)
+			log.Printf("Failed to update stop task %s state to STOPPED: %v", task.ID, err)
 		}
 
 		// Remove stop task from lease renewal
@@ -1143,12 +1192,17 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 		wm.TasksMutex.Unlock()
 	}()
 
-	// 2. Check if original task was a web recording task
+	// 2. Mark original as STOPPING immediately, then check task type
+	ctxMark, cancelMark := context.WithTimeout(context.Background(), 5*time.Second)
+	wm.RedisQueue.UpdateTaskResult(ctxMark, originalTaskID, queue.TaskStateStopping, "Stop in progress")
+	cancelMark()
+
+	// 3. Check if original task was a web recording task
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	originalTask, err := wm.RedisQueue.GetTaskStatus(ctx, originalTaskID)
 	cancel()
 
-	if err == nil && (strings.HasPrefix(originalTask.Cmd, "web:") || strings.Contains(originalTask.Cmd, ":web:")) {
+	if err == nil && wm.isWebTask(originalTask) {
 		// This is a web task - use web recorder proxy to stop it
 		if wm.webRecorderProxy != nil {
 			log.Printf("Stopping web recording task %s via web recorder proxy", originalTaskID)
@@ -1160,24 +1214,76 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 			}
 		}
 
-		// Mark original task as SUCCESS
+		// Mark original task as STOPPED
 		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		wm.RedisQueue.UpdateTaskResult(ctx, originalTaskID, queue.TaskStateSuccess, "Stopped by user via web recorder")
+		wm.RedisQueue.UpdateTaskResult(ctx, originalTaskID, queue.TaskStateStopped, "Stopped by user via web recorder")
 		return nil
 	}
 
-	// 3. Find which worker is running the original native task
+	// 4. Find which worker is running the original native task
 	var targetWorker *Worker
 	var targetWorkerID int
 	wm.Mutex.Lock()
-	for workerID, worker := range wm.Workers {
-		if worker != nil && worker.TaskID == originalTaskID {
-			targetWorker = worker
-			targetWorkerID = workerID
-			break
+	// Prefer resolution by channel->worker mapping, verifying membership in ChannelTasks
+	if err == nil && originalTask != nil && originalTask.Channel != "" {
+		if wid, ok := wm.ChannelWorkers[originalTask.Channel]; ok {
+			if w := wm.Workers[wid]; w != nil {
+				// Verify the task is tracked on this channel
+				if tasksByType, exists := wm.ChannelTasks[originalTask.Channel]; exists {
+					found := false
+					for _, ids := range tasksByType {
+						for _, id := range ids {
+							if id == originalTaskID {
+								found = true
+								break
+							}
+						}
+						if found {
+							break
+						}
+					}
+					if found {
+						targetWorker = w
+						targetWorkerID = wid
+					}
+				} else {
+					// No tasks tracked but channel maps to worker; use it as best effort
+					targetWorker = w
+					targetWorkerID = wid
+				}
+			}
 		}
 	}
+
+	// If still not found, search ChannelTasks for this task ID to resolve channel -> worker
+	if targetWorker == nil {
+		for ch, tasksByType := range wm.ChannelTasks {
+			found := false
+			for _, ids := range tasksByType {
+				for _, id := range ids {
+					if id == originalTaskID {
+						found = true
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
+			if found {
+				if wid, ok := wm.ChannelWorkers[ch]; ok {
+					if w := wm.Workers[wid]; w != nil {
+						targetWorker = w
+						targetWorkerID = wid
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// No legacy single-task fallback; resolution must use channel/task mappings
 	wm.Mutex.Unlock()
 
 	if targetWorker == nil {
@@ -1189,10 +1295,10 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 		delete(wm.ActiveTasks, originalTaskID)
 		wm.TasksMutex.Unlock()
 
-		// Mark original task as SUCCESS (may already be completed)
+		// Mark original task as STOPPED (may already be completed)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		err := wm.RedisQueue.UpdateTaskResult(ctx, originalTaskID, queue.TaskStateSuccess, "Task already completed or not found")
+		err := wm.RedisQueue.UpdateTaskResult(ctx, originalTaskID, queue.TaskStateStopped, "Task already completed or not found")
 		if err != nil {
 			log.Printf("Failed to update original task %s state: %v", originalTaskID, err)
 		}
@@ -1200,7 +1306,7 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 		return nil
 	}
 
-	// 3. Try to stop original task gracefully with retries
+	// 5. Try to stop original task gracefully with retries
 	stopped := wm.stopOriginalTaskWithRetries(targetWorker, targetWorkerID, originalTaskID, task)
 
 	if stopped {
@@ -1234,7 +1340,7 @@ func (wm *WorkerManager) stopOriginalTaskWithRetries(targetWorker *Worker, targe
 
 		if err == nil {
 			// Success - clean up and mark as completed
-			wm.cleanupStoppedTask(stopTask.Channel, stopTask.Cmd, originalTaskID)
+			wm.cleanupStoppedTask(stopTask.Channel, stopTask.Cmd, originalTaskID, true)
 			return true
 		}
 
@@ -1254,28 +1360,30 @@ func (wm *WorkerManager) stopOriginalTaskWithRetries(targetWorker *Worker, targe
 	return false
 }
 
-// cleanupStoppedTask removes task from all tracking and marks as SUCCESS
-func (wm *WorkerManager) cleanupStoppedTask(channel, taskType, taskID string) {
+// cleanupStoppedTask removes task from all tracking and marks as STOPPED if not a regular stop
+func (wm *WorkerManager) cleanupStoppedTask(channel, cmd, taskID string, regularStop bool) {
 	// Remove from channel tracking
-	wm.removeTaskFromChannel(channel, taskType, taskID)
+	wm.removeTaskFromChannel(channel, cmd, taskID)
 
 	// Remove from active tasks tracking (stop lease renewal)
 	wm.TasksMutex.Lock()
 	delete(wm.ActiveTasks, taskID)
 	wm.TasksMutex.Unlock()
 
-	// Mark original task as SUCCESS and remove from Redis completely
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := wm.RedisQueue.UpdateTaskResult(ctx, taskID, queue.TaskStateSuccess, "Stopped by user")
-	if err != nil {
-		log.Printf("Failed to update task %s state to SUCCESS: %v", taskID, err)
+	// Mark original task as STOPPED and remove from Redis completely
+	// Regular update is handled by handleTaskCompletion
+	if !regularStop {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := wm.RedisQueue.UpdateTaskResult(ctx, taskID, queue.TaskStateStopped, "Stopped by user(abnormal stop)")
+		if err != nil {
+			log.Printf("Failed to update task %s state to STOPPED: %v", taskID, err)
+		}
 	}
-
 }
 
 // forceKillWorker kills worker process and cleans up, WorkerManager handles recovery
-func (wm *WorkerManager) forceKillWorker(workerID int, taskID, channel, taskType string) {
+func (wm *WorkerManager) forceKillWorker(workerID int, taskID, channel, cmd string) {
 	wm.Mutex.Lock()
 	defer wm.Mutex.Unlock()
 
@@ -1314,11 +1422,10 @@ func (wm *WorkerManager) forceKillWorker(workerID int, taskID, channel, taskType
 	}
 
 	// Clean up the stopped task
-	wm.cleanupStoppedTask(channel, taskType, taskID)
+	wm.cleanupStoppedTask(channel, cmd, taskID, false)
 
 	// Mark worker as dead - WorkerManager will handle respawning
 	worker.Status.State = WORKER_NOT_AVAILABLE
-	worker.TaskID = ""
 	worker.Cmd = nil
 
 	// Remove from channel mappings
@@ -1401,9 +1508,6 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 	} else {
 		log.Printf("Successfully sent stop command to worker %d for FAILED task %s", workerID, task.ID)
 	}
-
-	// Clean up worker state
-	worker.Status.TaskID = ""
 
 	// Clean up task from channel tracking
 	wm.removeTaskFromChannel(task.Channel, task.Cmd, task.ID)
@@ -1517,25 +1621,17 @@ func (wm *WorkerManager) isUnrecoverableError(errorMsg string) bool {
 
 // getTaskStatus gets status of a task from Redis queue directly
 func (wm *WorkerManager) getTaskStatus(task *queue.Task) error {
-	isWebTask := strings.HasPrefix(task.Cmd, "web:") || strings.Contains(task.Cmd, ":web:")
-
-	// Route based on manager mode and task type
-	switch wm.mode {
-	case ModeNative:
-		if isWebTask {
-			return fmt.Errorf("native-only manager cannot handle web task status: %s", task.Cmd)
-		}
-		return wm.getNativeTaskStatus(task)
-
-	case ModeWeb:
-		if !isWebTask {
-			return fmt.Errorf("web-only manager cannot handle native task status: %s", task.Cmd)
+	// Route based on payload layout (preferred) or manager mode fallback
+	if wm.isWebTask(task) {
+		if wm.mode != ModeWeb {
+			return fmt.Errorf("native-only manager cannot handle web task status")
 		}
 		return wm.getWebTaskStatus(task)
-
-	default:
-		return fmt.Errorf("unknown manager mode: %d", wm.mode)
 	}
+	if wm.mode != ModeNative {
+		return fmt.Errorf("web-only manager cannot handle native task status")
+	}
+	return wm.getNativeTaskStatus(task)
 }
 
 // getNativeTaskStatus gets status of a native task from eg_workers
@@ -1559,8 +1655,31 @@ func (wm *WorkerManager) getNativeTaskStatus(task *queue.Task) error {
 		return fmt.Errorf("worker %d not found", workerID)
 	}
 
-	if worker.Status.TaskID != task.ID {
-		return fmt.Errorf("task %s not found on worker %d", task.ID, workerID)
+	// Validate that this task is tracked for the worker's channel
+	wm.Mutex.Lock()
+	defer wm.Mutex.Unlock()
+	if ch, ok := wm.WorkerChannels[workerID]; ok {
+		if tasksByType, exists := wm.ChannelTasks[ch]; exists {
+			found := false
+			for _, ids := range tasksByType {
+				for _, id := range ids {
+					if id == task.ID {
+						found = true
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("task %s not found on worker %d", task.ID, workerID)
+			}
+		} else {
+			return fmt.Errorf("task %s not found on worker %d", task.ID, workerID)
+		}
+	} else {
+		return fmt.Errorf("worker %d not assigned to any channel", workerID)
 	}
 
 	worker.Mutex.Lock()
@@ -1584,7 +1703,7 @@ func (wm *WorkerManager) getWebTaskStatus(task *queue.Task) error {
 }
 
 // findWorkerForChannel finds worker for channel (reuse existing or find free)
-func (wm *WorkerManager) findWorkerForChannel(channel, taskType string) (*Worker, error, bool) {
+func (wm *WorkerManager) findWorkerForChannel(channel, cmd string) (*Worker, error, bool) {
 	// Check if channel already has a worker assigned
 	if workerID, exists := wm.ChannelWorkers[channel]; exists {
 		worker := wm.Workers[workerID]
@@ -1603,22 +1722,22 @@ func (wm *WorkerManager) findWorkerForChannel(channel, taskType string) (*Worker
 }
 
 // removeTaskFromChannel removes a specific task from channel tracking
-func (wm *WorkerManager) removeTaskFromChannel(channel, taskType, taskId string) {
+func (wm *WorkerManager) removeTaskFromChannel(channel, cmd, taskId string) {
 	wm.Mutex.Lock()
 	defer wm.Mutex.Unlock()
 
 	if channelTasks, ok := wm.ChannelTasks[channel]; ok {
-		if taskIDs, typeExists := channelTasks[taskType]; typeExists {
+		if taskIDs, typeExists := channelTasks[cmd]; typeExists {
 			// Remove specific task ID
 			for i, id := range taskIDs {
 				if id == taskId {
-					wm.ChannelTasks[channel][taskType] = append(taskIDs[:i], taskIDs[i+1:]...)
+					wm.ChannelTasks[channel][cmd] = append(taskIDs[:i], taskIDs[i+1:]...)
 					break
 				}
 			}
 			// Clean up empty task type
-			if len(wm.ChannelTasks[channel][taskType]) == 0 {
-				delete(wm.ChannelTasks[channel], taskType)
+			if len(wm.ChannelTasks[channel][cmd]) == 0 {
+				delete(wm.ChannelTasks[channel], cmd)
 			}
 		}
 		// Clean up empty channel
@@ -1633,215 +1752,6 @@ func (wm *WorkerManager) removeTaskFromChannel(channel, taskType, taskId string)
 			}
 		}
 	}
-}
-
-// Helper to generate 11 random digits as a string
-// including 0-9, a-z, A-Z
-func randomDigits(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	digits := make([]byte, n)
-	for i := 0; i < n; i++ {
-		digits[i] = '0' + (b[i] % 36)
-		if digits[i] > '9' {
-			digits[i] = 'a' + (digits[i] - '9' - 1)
-		}
-	}
-	return string(digits)
-}
-
-// Helper to create WorkerCommand with all required protocol fields
-func NewWorkerCommand(cmd string, action string, payload map[string]interface{}) WorkerCommand {
-	// The payload should already have defaults applied by validateTaskRequest
-	return WorkerCommand{
-		Cmd:     cmd,
-		Action:  action,
-		Payload: payload,
-	}
-}
-
-func (wm *WorkerManager) StartTaskOnWorker(taskReq TaskRequest) (*TaskResponse, error) {
-	// 1. Validate and get channel info
-	udsMsg, err := ValidateAndFlattenTaskRequest(&taskReq)
-	if err != nil {
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			Status:    "failed",
-			Error:     err.Error(),
-		}, err
-	}
-
-	channel := udsMsg.Channel
-	taskType := taskReq.Cmd
-
-	wm.Mutex.Lock()
-	// 2. Find worker for this channel (reuse if exists, find free if new)
-	worker, err, _ := wm.findWorkerForChannel(channel, taskType)
-	if err != nil {
-		wm.Mutex.Unlock()
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			Status:    "failed",
-			Error:     err.Error(),
-		}, err
-	}
-
-	// 3. Use existing task ID or generate new one for HTTP requests
-	var taskId string
-	if taskReq.TaskID != "" {
-		// Use existing taskID from request (recovery case)
-		taskId = taskReq.TaskID
-	} else {
-		// Generate new taskID for new HTTP requests
-		taskId = fmt.Sprintf("%s%d", randomDigits(11), worker.ID)
-	}
-
-	// 4. Update channel mappings (before sending to avoid race conditions)
-	wm.ChannelWorkers[channel] = worker.ID
-	wm.WorkerChannels[worker.ID] = channel
-	if wm.ChannelTasks[channel] == nil {
-		wm.ChannelTasks[channel] = make(map[string][]string)
-	}
-	wm.ChannelTasks[channel][taskType] = append(wm.ChannelTasks[channel][taskType], taskId)
-	wm.Mutex.Unlock()
-
-	// 5. Send task to worker
-	worker.Mutex.Lock()
-	err = wm.sendUDSMessageToWorker(worker, taskId, udsMsg)
-	if err != nil {
-		worker.Mutex.Unlock()
-		// Clean up on failure
-		wm.removeTaskFromChannel(channel, taskType, taskId)
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			TaskID:    taskId,
-			Status:    "failed",
-			Error:     err.Error(),
-		}, err
-	}
-
-	// 6. Update worker state
-	worker.Status.State = WORKER_RUNNING
-	worker.Status.TaskID = taskId
-	worker.TaskID = taskId
-	worker.Mutex.Unlock()
-
-	log.Printf("Pod %s assigned task %s (%s:%s) to worker %d", wm.PodID, taskId, channel, taskType, worker.ID)
-	return &TaskResponse{
-		RequestID: taskReq.RequestID,
-		TaskID:    taskId,
-		Status:    "success",
-	}, nil
-}
-
-func (wm *WorkerManager) StopTaskOnWorker(workerID int, taskReq TaskRequest) (*TaskResponse, error) {
-	// 1. Find and validate worker
-	wm.Mutex.Lock()
-	worker := wm.Workers[workerID]
-	wm.Mutex.Unlock()
-
-	if worker == nil || worker.Status.TaskID != taskReq.TaskID {
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			TaskID:    taskReq.TaskID,
-			Status:    "failed",
-			Error:     fmt.Sprintf("task %s not found on worker %d", taskReq.TaskID, workerID),
-		}, nil
-	}
-
-	// 2. Validate and send stop command
-	udsMsg, err := ValidateAndFlattenTaskRequest(&taskReq)
-	if err != nil {
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			TaskID:    taskReq.TaskID,
-			Status:    "failed",
-			Error:     err.Error(),
-		}, err
-	}
-
-	worker.Mutex.Lock()
-	err = wm.sendUDSMessageToWorker(worker, taskReq.TaskID, udsMsg)
-	if err != nil {
-		worker.Mutex.Unlock()
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			TaskID:    taskReq.TaskID,
-			Status:    "failed",
-			Error:     err.Error(),
-		}, err
-	}
-
-	// 3. Update worker state
-	worker.Status.TaskID = ""
-	worker.Mutex.Unlock()
-
-	// 4. Clean up channel tracking
-	wm.removeTaskFromChannel(udsMsg.Channel, taskReq.Cmd, taskReq.TaskID)
-
-	log.Printf("Pod %s released task %s (%s:%s) from worker %d", wm.PodID, taskReq.TaskID, udsMsg.Channel, taskReq.Cmd, workerID)
-	return &TaskResponse{
-		RequestID: taskReq.RequestID,
-		TaskID:    taskReq.TaskID,
-		Status:    "success",
-	}, nil
-}
-
-func (wm *WorkerManager) GetTaskStatusOnWorker(workerID int, taskReq TaskRequest) (*TaskResponse, error) {
-	wm.Mutex.Lock()
-	worker := wm.Workers[workerID]
-	wm.Mutex.Unlock()
-
-	if worker == nil {
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			TaskID:    taskReq.TaskID,
-			Status:    "failed",
-			Error:     fmt.Sprintf("worker %d not found", workerID),
-		}, fmt.Errorf("worker %d not found", workerID)
-	}
-
-	if worker.Status.TaskID != taskReq.TaskID {
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			TaskID:    taskReq.TaskID,
-			Status:    "failed",
-			Error:     fmt.Sprintf("taskId %s not found on worker %d", taskReq.TaskID, workerID),
-		}, fmt.Errorf("taskId %s not found on worker %d", taskReq.TaskID, workerID)
-	}
-
-	worker.Mutex.Lock()
-	defer worker.Mutex.Unlock()
-
-	// Validate and flatten the task request
-	udsMsg, err := ValidateAndFlattenTaskRequest(&taskReq)
-	if err != nil {
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			TaskID:    taskReq.TaskID,
-			Status:    "failed",
-			Error:     fmt.Sprintf("failed to validate and flatten task request: %v", err),
-		}, fmt.Errorf("failed to validate and flatten task request: %v", err)
-	}
-
-	// Send the flattened UDSMessage to worker
-	err = wm.sendUDSMessageToWorker(worker, taskReq.TaskID, udsMsg)
-	if err != nil {
-		return &TaskResponse{
-			RequestID: taskReq.RequestID,
-			TaskID:    taskReq.TaskID,
-			Status:    "failed",
-			Error:     fmt.Sprintf("failed to send status command to worker %d: %v", workerID, err),
-		}, fmt.Errorf("failed to send status command to worker %d: %v", workerID, err)
-	}
-
-	log.Printf("Pod %s get status of task %s on worker %d", wm.PodID, taskReq.TaskID, workerID)
-
-	return &TaskResponse{
-		RequestID: taskReq.RequestID,
-		TaskID:    taskReq.TaskID,
-		Status:    "success",
-	}, nil
 }
 
 // sendUDSMessageToWorker sends a flattened UDSMessage directly to a worker

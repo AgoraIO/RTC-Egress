@@ -58,7 +58,7 @@
     {
         "request_id": "m2d3k03l",
         "task_id": "1ta5k3552",
-        "status": "ENQUEUED",
+        "status": "enqueued"
     }
 
 ## Stop Task
@@ -66,33 +66,43 @@
 ### curl -X POST http://localhost:8091/egress/v1/{app_id}/tasks/{task_id}/stop \
     -H "Content-Type: application/json" \
     -d '{
-      "request_id": "2yui23k5",
-    }'    
-
-### Response
-
-```json
-{
-    "task_id": "1ta5k3552",
-    "status": "SUCCESS",
-}
-```
-
-## Get Task Status
-
-### curl -X GET http://localhost:8091/egress/v1/{app_id}/tasks/{task_id}    
-    -H "Content-Type: application/json"
-    -d '{
-      "request_id": "1yu323k5",
+      "request_id": "234drd3"
     }'
 
 ### Response
 
 ```json
 {
-    "task_id": "1ta5k3552",
-    "status": "PROCESSING",
-    "payload": {
+  "request_id": "234drd3",
+  "status": "enqueued",
+  "message": "Stop task enqueued for task 1ta5k3552", // Stop accepted; manager will set STOPPING when picked up
+}
+```
+
+Notes
+- The manager sets the original task to STOPPING when it actually picks up and processes
+  the stop task. In fast paths you may observe PROCESSING → STOPPED directly.
+- Track the terminal state (STOPPED/FAILED/TIMEOUT) of the target task id.
+
+## Get Task Status
+
+### curl -X POST http://localhost:8091/egress/v1/{app_id}/tasks/{task_id}/status \
+    -H "Content-Type: application/json" \
+    -d '{
+      "request_id": "1yu323k5"
+    }'
+
+### Response
+
+```json
+{
+  "request_id": "1yu323k5",
+  "task_id": "92347f6bdf0465b3",
+  "state": "PROCESSING",           // One of: ENQUEUED, PROCESSING, STOPPING, STOPPED, FAILED, TIMEOUT
+  "action": "start|stop|status",   // Last command processed for this task id
+  "created_at": "2025-09-19T00:15:15Z",
+  "error": "",                     // Error message when state is FAILED
+  "payload": {
         "layout": "flat",
         "channel": "egress_test",
         "users": ["user1", "user2"],
@@ -112,3 +122,12 @@
     }
 }
 ```
+
+## Task States
+
+- ENQUEUED: Task accepted and queued for processing.
+- PROCESSING: Manager has claimed the task with a lease.
+- STOPPING: Manager picked up a stop command for the original task and is stopping it.
+- STOPPED: Terminal, expected. Use reason/message to distinguish completed vs user_stop.
+- FAILED: Terminal, abnormal (unrecoverable error).
+- TIMEOUT: Terminal, abnormal (aged out while enqueued).

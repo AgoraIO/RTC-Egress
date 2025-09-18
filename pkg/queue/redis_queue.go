@@ -14,7 +14,8 @@ import (
 const (
 	TaskStateEnqueued   = "ENQUEUED"   // Task waiting in queue (can timeout after TaskTimeout)
 	TaskStateProcessing = "PROCESSING" // Worker actively working on task
-	TaskStateSuccess    = "SUCCESS"    // Task completed successfully
+	TaskStateStopping   = "STOPPING"   // Stop requested; worker is stopping the task
+	TaskStateStopped    = "STOPPED"    // Task stopped (by user or completed normally)
 	TaskStateFailed     = "FAILED"     // Fatal error(Can not be retried/recovered), like wrong access_token, no more disk space, etc. no user stop call needed
 	TaskStateTimeout    = "TIMEOUT"    // Task aged out while ENQUEUED (business staleness). no user stop call needed
 
@@ -43,6 +44,9 @@ type Task struct {
 	WorkerID    int                    `json:"worker_id,omitempty"`
 	LeaseExpiry *time.Time             `json:"lease_expiry,omitempty"` // When worker lease expires
 	RetryCount  int                    `json:"retry_count,omitempty"`  // Number of retry attempts
+	// SourceQueue indicates from which Redis queue this task was claimed.
+	// Not persisted to Redis; used to determine web vs native routing.
+	SourceQueue string `json:"-"`
 }
 
 type RedisQueue struct {
@@ -65,31 +69,31 @@ func NewRedisQueue(addr, password string, db int, ttl int, region string) *Redis
 	}
 }
 
-func (rq *RedisQueue) generateTaskID(taskType, channel, requestID string) string {
-	data := fmt.Sprintf("%s:%s:%s:%d", taskType, channel, requestID, time.Now().UnixNano())
+func (rq *RedisQueue) generateTaskID(cmd, channel, requestID string) string {
+	data := fmt.Sprintf("%s:%s:%s:%d", cmd, channel, requestID, time.Now().UnixNano())
 	hash := sha256.Sum256([]byte(data))
 	return fmt.Sprintf("%x", hash[:8])
 }
 
-func (rq *RedisQueue) buildQueueKey(taskType, channel string) string {
-	return fmt.Sprintf("egress:%s:%s", taskType, channel)
+func (rq *RedisQueue) buildQueueKey(cmd, channel string) string {
+	return fmt.Sprintf("egress:%s:%s", cmd, channel)
 }
 
 // buildRegionalQueueKey builds a region-specific queue key
-func (rq *RedisQueue) buildRegionalQueueKey(region, taskType, channel string) string {
+func (rq *RedisQueue) buildRegionalQueueKey(region, cmd, channel string) string {
 	if region == "" {
-		return fmt.Sprintf("egress:%s:%s", taskType, channel)
+		return fmt.Sprintf("egress:%s:%s", cmd, channel)
 	}
-	return fmt.Sprintf("egress:%s:%s:%s", region, taskType, channel)
+	return fmt.Sprintf("egress:%s:%s:%s", region, cmd, channel)
 }
 
 // BuildRegionalQueueKey builds a region-specific queue key (public)
-func (rq *RedisQueue) BuildRegionalQueueKey(region, taskType, channel string) string {
-	return rq.buildRegionalQueueKey(region, taskType, channel)
+func (rq *RedisQueue) BuildRegionalQueueKey(region, cmd, channel string) string {
+	return rq.buildRegionalQueueKey(region, cmd, channel)
 }
 
-func (rq *RedisQueue) BuildQueueKey(taskType, channel string) string {
-	return rq.buildQueueKey(taskType, channel)
+func (rq *RedisQueue) BuildQueueKey(cmd, channel string) string {
+	return rq.buildQueueKey(cmd, channel)
 }
 
 func (rq *RedisQueue) buildTaskKey(taskID string) string {
@@ -100,8 +104,8 @@ func (rq *RedisQueue) BuildTaskKey(taskID string) string {
 	return rq.buildTaskKey(taskID)
 }
 
-func (rq *RedisQueue) buildDedupeKey(taskType, channel, requestID string) string {
-	return fmt.Sprintf("egress:dedupe:%s:%s:%s", taskType, channel, requestID)
+func (rq *RedisQueue) buildDedupeKey(cmd, channel, requestID string) string {
+	return fmt.Sprintf("egress:dedupe:%s:%s:%s", cmd, channel, requestID)
 }
 
 func (rq *RedisQueue) buildProcessingQueueKey(workerID string) string {
@@ -125,23 +129,95 @@ func (rq *RedisQueue) GetRegion() string {
 	return rq.region
 }
 
+// PublishStopTaskFor publishes a stop task for an existing task ID.
+// It derives routing (global vs regional, web vs native) from the original task,
+// without requiring layout in the stop payload.
+func (rq *RedisQueue) PublishStopTaskFor(ctx context.Context, originalTaskID, requestID, region string) (*Task, error) {
+	// Load original task
+	origTaskKey := rq.buildTaskKey(originalTaskID)
+	origData, err := rq.client.Get(ctx, origTaskKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load original task %s: %v", originalTaskID, err)
+	}
+
+	var orig Task
+	if err := json.Unmarshal([]byte(origData), &orig); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal original task %s: %v", originalTaskID, err)
+	}
+
+	// Derive layout from original payload for routing only
+	layout := "flat"
+	if orig.Payload != nil {
+		if lv, ok := orig.Payload["layout"]; ok {
+			if ls, ok2 := lv.(string); ok2 && ls != "" {
+				layout = ls
+			}
+		}
+	}
+
+	// Build queue key based on original cmd/channel and derived layout
+	queueKey := rq.getQueueKey(layout, orig.Cmd, orig.Channel, region)
+
+	// Dedupe by (cmd, channel, requestID)
+	dedupeKey := rq.buildDedupeKey(orig.Cmd, orig.Channel, requestID)
+	exists, err := rq.client.Exists(ctx, dedupeKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to check duplicate: %v", err)
+	}
+	if exists > 0 {
+		return nil, fmt.Errorf("duplicate stop request for cmd=%s channel=%s request_id=%s", orig.Cmd, orig.Channel, requestID)
+	}
+
+	// Create stop task with minimal payload (no layout needed)
+	stopID := rq.generateTaskID(orig.Cmd, orig.Channel, requestID)
+	now := time.Now()
+	stopTask := &Task{
+		ID:         stopID,
+		Cmd:        orig.Cmd,
+		Action:     "stop",
+		Channel:    orig.Channel,
+		RequestID:  requestID,
+		Payload:    map[string]interface{}{"task_id": originalTaskID},
+		State:      TaskStateEnqueued,
+		CreatedAt:  now,
+		EnqueuedAt: &now,
+	}
+
+	data, err := json.Marshal(stopTask)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal stop task: %v", err)
+	}
+
+	pipe := rq.client.TxPipeline()
+	pipe.LPush(ctx, queueKey, stopID)
+	pipe.Expire(ctx, queueKey, rq.ttl)
+	pipe.Set(ctx, rq.buildTaskKey(stopID), data, rq.ttl)
+	pipe.Set(ctx, dedupeKey, stopID, rq.ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("failed to publish stop task: %v", err)
+	}
+
+	log.Printf("Published stop task %s for original %s to queue %s", stopID, originalTaskID, queueKey)
+	return stopTask, nil
+}
+
 // PublishTaskToRegion publishes a task to a specific region queue
-func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, taskType, action, channel, requestID string, payload map[string]interface{}, region string) (*Task, error) {
-	dedupeKey := rq.buildDedupeKey(taskType, channel, requestID)
+func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, cmd, action, channel, requestID string, payload map[string]interface{}, region string) (*Task, error) {
+	dedupeKey := rq.buildDedupeKey(cmd, channel, requestID)
 
 	exists, err := rq.client.Exists(ctx, dedupeKey).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check duplicate: %v", err)
 	}
 	if exists > 0 {
-		return nil, fmt.Errorf("duplicate task: %s for channel %s with request_id %s", taskType, channel, requestID)
+		return nil, fmt.Errorf("duplicate task: %s for channel %s with request_id %s", cmd, channel, requestID)
 	}
 
-	taskID := rq.generateTaskID(taskType, channel, requestID)
+	taskID := rq.generateTaskID(cmd, channel, requestID)
 	now := time.Now()
 	task := &Task{
 		ID:         taskID,
-		Cmd:        taskType,
+		Cmd:        cmd,
 		Action:     action,
 		Channel:    channel,
 		RequestID:  requestID,
@@ -169,7 +245,7 @@ func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, taskType, action,
 		}
 	}
 
-	queueKey := rq.getQueueKey(layout, taskType, channel, region)
+	queueKey := rq.getQueueKey(layout, cmd, channel, region)
 
 	taskKey := rq.buildTaskKey(taskID)
 
@@ -316,7 +392,10 @@ func (rq *RedisQueue) UpdateTaskResult(ctx context.Context, taskID, state, error
 
 	now := time.Now()
 	task.State = state
-	task.CompletedAt = &now
+	// Only set CompletedAt for terminal states
+	if state == TaskStateStopped || state == TaskStateFailed || state == TaskStateTimeout {
+		task.CompletedAt = &now
+	}
 	if errorMsg != "" {
 		task.Error = errorMsg
 	}
@@ -331,7 +410,7 @@ func (rq *RedisQueue) UpdateTaskResult(ctx context.Context, taskID, state, error
 		return fmt.Errorf("failed to update task result: %v", err)
 	}
 
-	if state == TaskStateSuccess || state == TaskStateFailed || state == TaskStateTimeout {
+	if state == TaskStateStopped || state == TaskStateFailed || state == TaskStateTimeout {
 		dedupeKey := rq.buildDedupeKey(task.Cmd, task.Channel, task.RequestID)
 		rq.client.Del(ctx, dedupeKey)
 	}
@@ -475,7 +554,7 @@ func (rq *RedisQueue) checkAndRecoverTask(ctx context.Context, taskID, processin
 	}
 
 	// Only recover PROCESSING or ENQUEUED tasks, not completed ones
-	if task.State == TaskStateSuccess || task.State == TaskStateFailed || task.State == TaskStateTimeout {
+	if task.State == TaskStateStopped || task.State == TaskStateFailed || task.State == TaskStateTimeout {
 		// Task is already completed, just remove from processing queue
 		rq.client.LRem(ctx, processingQueue, 1, taskID)
 		log.Printf("Skipped recovery of completed task %s (state: %s)", taskID, task.State)
@@ -568,7 +647,7 @@ func (rq *RedisQueue) checkAndTimeoutEnqueuedTask(ctx context.Context, taskID, q
 			return fmt.Errorf("failed to unmarshal task: %v", err)
 		}
 
-		// Only timeout ENQUEUED tasks (not PROCESSING, SUCCESS, FAILED, or already TIMEOUT)
+		// Only timeout ENQUEUED tasks (not PROCESSING, STOPPING, STOPPED, FAILED, or already TIMEOUT)
 		if task.State != TaskStateEnqueued {
 			return nil
 		}

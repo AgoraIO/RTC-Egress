@@ -335,7 +335,7 @@ func (hm *HealthManager) calculateQueueMetrics() error {
 		}
 
 		region := parts[1]
-		taskType := parts[2]
+		cmd := parts[2]
 
 		// Get queue length
 		length, err := hm.client.LLen(ctx, queueKey).Result()
@@ -343,7 +343,7 @@ func (hm *HealthManager) calculateQueueMetrics() error {
 			continue
 		}
 
-		key := fmt.Sprintf("%s:%s", region, taskType)
+		key := fmt.Sprintf("%s:%s", region, cmd)
 		queueDepths[key] += int(length)
 	}
 

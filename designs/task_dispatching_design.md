@@ -4,9 +4,8 @@
   
   ✅ Web/Native Shared Dispatch Logic
 
-  - Created TaskDispatcher interface that abstracts the Redis polling, lease management, and regional prioritization
+  - Created WorkerManager.processRedisTask that abstracts the Redis polling, lease management, and regional prioritization
   - Both native and web recorder systems use the same dispatch logic
-  - Implemented TaskProcessor interface for pluggable task handling
 
   ✅ WorkerManagerWebRecorderProxy
 
@@ -34,33 +33,36 @@
   - Lease management and automatic failover
   - Regional task prioritization
   - Health monitoring and pod registration
+  - (Appendix A) A worker can run only one task per type, but different types can run concurrently if they share the same channel.
   - Graceful shutdown and error handling
 
 ## Concepts
   1. State Definition
-	- TaskStateEnqueued    = "ENQUEUED"    // Task waiting in queue (can timeout after TaskTimeout)
+
+	- TaskStateEnqueued   = "ENQUEUED"    // Task waiting in queue (can timeout after TaskTimeout)
 	- TaskStateProcessing = "PROCESSING" // Worker actively working on task
-	- TaskStateSuccess    = "SUCCESS"    // Task completed successfully
+  - TaskStateStopping   = "STOPPING"   // Stop requested; worker is stopping the task
+  - TaskStateStopped    = "STOPPED"    // Task stopped/completed
 	- TaskStateFailed     = "FAILED"     // Fatal error(Can not be retried/recovered), like wrong access_token, no more disk space, etc. no user stop call needed
 	- TaskStateTimeout    = "TIMEOUT"    // Task aged out while ENQUEUEDs (business staleness). no user stop call needed
 
 
   2. Atomic State Transitions
 
-
   - ENQUEUED → PROCESSING: Worker atomically moves task via BRPopLPush
   - ENQUEUED → TIMEOUT: Cleanup atomically checks queue presence + state with WATCH
   - PROCESSING → ENQUEUED: Worker failure recovery
-  - PROCESSING → SUCCESS/FAILED: Worker completion
+  - PROCESSING → STOPPED/FAILED: Worker completion
 
 
   3. Task State Transitions
+
   | Scenario            | State    | Retry?  | Stays in Redis?         | Timeout Window        |
   |---------------------|----------|---------|---------------------|-----------------------|
   | Business timeout    | TIMEOUT  | ❌ No   | ✅ Yes                  | 30s from last ENQUEUED |
   | Worker crash        | ENQUEUED | ✅ Yes  | ✅ Yes                  | Fresh 30s window      |
   | Unrecoverable error | FAILED   | ❌ No   | ✅ Yes(Terminate task)  | N/A                   |
-  | Success             | SUCCESS  | ❌ No   | ✅ Yes                  | N/A                   |
+  | Stopped             | STOPPED  | ❌ No   | ✅ Yes                  | N/A                   |
 
 
   4. Race Condition Prevention
@@ -76,7 +78,7 @@
 
   5. State Flow
 
-  ENQUEUED (age ≤ 30s) → Worker picks up → PROCESSING → SUCCESS/FAILED
+  ENQUEUED (age ≤ 30s) → Worker picks up → PROCESSING → STOPPED/FAILED
   ENQUEUED (age > 30s) → Cleanup marks → TIMEOUT (final state)
   PROCESSING → Worker crashes → Cleanup recovers → ENQUEUED (retry)
 
@@ -132,7 +134,7 @@
       "layout": "flat",
       "uid": ["user123", "user456"]
     },
-    "state": "PROCESSING", // ENQUEUED, PROCESSING, SUCCESS, FAILED
+    "state": "PROCESSING", // ENQUEUED, PROCESSING, STOPPING, STOPPED, FAILED
     "created_at": "2025-01-13T14:32:18Z",
     "enqueued_at": "2025-01-13T14:32:18Z",
     "processed_at": "2025-01-13T14:32:19Z",
@@ -147,3 +149,29 @@
 ## Task State Transitions
 ### Worker failure/crash/loss pushes task to ENQUEUED. BE atomic, one ENQUEUED task can only be proccesing by one worker(marked as PROCESSING) or marked as TIMEOUT. All the task state transition should be atomic.
 ### No task loss, No task duplication
+
+
+
+## Appendix
+
+### Appendix A:
+#### Stage 1: Per-type Concurrency Guard
+**Goal**: Enforce at most one active task per type (snapshot/record) on a worker/channel.
+**Success Criteria**: A second start of the same `cmd` on the same channel fails fast with a clear error; starting a different `cmd` on the same channel succeeds.
+**Tests**:
+- Start `snapshot` on channel A, then start another `snapshot` on channel A -> second fails.
+- Start `record` on channel A while `snapshot` active -> succeeds.
+- Start `record` on channel A, then second `record` -> second fails.
+**Status**: Complete
+
+#### Stage 2: Completion Handling for Concurrent Types
+**Goal**: Allow a worker to complete tasks per-type concurrently without relying on a single `TaskID` per worker.
+**Success Criteria**: Completion for either `snapshot` or `record` is processed correctly; worker stays RUNNING if another type remains active; becomes IDLE when no tasks remain.
+**Tests**:
+- Start `snapshot` and `record` concurrently, then complete one -> worker remains RUNNING; complete the other -> worker becomes IDLE.
+- Completion logs update Redis to STOPPED/FAILED appropriately.
+**Status**: Complete
+
+## Notes
+- Rule interpreted as: one task per type per worker; since manager maps one channel to one worker, this is enforced per channel.
+- Web recorder mode unaffected.

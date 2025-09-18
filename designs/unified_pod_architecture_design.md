@@ -64,4 +64,4 @@
   - ✅ HTTP webhook notifications
   - ✅ Retry logic with exponential backoff
   - ✅ Notification deduplication
-  - ✅ State filtering (SUCCESS/FAILED/PROCESSING)
+  - ✅ State filtering (STOPPED/FAILED/PROCESSING)

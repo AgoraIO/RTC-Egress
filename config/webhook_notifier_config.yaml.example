@@ -25,9 +25,13 @@ webhook:
   # Which task states trigger notifications
   notify_states:
     - "PROCESSING"              # Task started processing(Every LeaseRenewalInterval)
-    - "SUCCESS"                 # Task completed successfully(Once)
+    - "STOPPED"                 # Task stopped/completed (Once)
     - "FAILED"                  # Task failed(Once)
     - "TIMEOUT"                 # Task timed out(Once)
+
+  # Dedupe retention for terminal states (seconds). Within this window,
+  # STOPPED/FAILED/TIMEOUT will only be delivered once even across restarts.
+  delivered_ttl: 172800          # 48 hours
 
 # Environment variable overrides:
 # REDIS_ADDR, REDIS_PASSWORD, POD_REGION, WEBHOOK_URL, WEBHOOK_AUTH_TOKEN
