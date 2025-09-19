@@ -113,6 +113,7 @@ var (
 func loadConfig() error {
 	viper.SetConfigName("egress_config")
 	viper.SetConfigType("yaml")
+	viper.AddConfigPath("/opt/config")
 	viper.AddConfigPath("./config")
 	viper.AddConfigPath("/etc/rtc_egress")
 	viper.AddConfigPath("/opt/rtc_egress/config")
