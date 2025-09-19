@@ -16,6 +16,8 @@ WORKDIR /opt
 
 # Copy pre-built binary and config
 COPY bin/uploader ./bin/
+# Ensure binary is executable
+RUN chmod +x ./bin/uploader && chmod 755 /opt /opt/bin || true
 COPY config/ ./config/
 
 # Create directory structure
@@ -35,5 +37,5 @@ EXPOSE 8194
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8194/health || exit 1
 
-# Default command
-CMD ["./bin/uploader", "--config", "/opt/config/uploader_config.yaml"]
+# Default command (absolute path)
+CMD ["/opt/bin/uploader", "--config", "/opt/config/uploader_config.yaml"]

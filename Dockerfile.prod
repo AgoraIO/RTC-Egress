@@ -86,6 +86,8 @@ WORKDIR /opt/rtc_egress
 
 # Copy ONLY stripped binaries and configs (NO source code, NO symbols)
 COPY --from=builder --chown=rtc_egress:rtc_egress /build/bin ./bin
+# Ensure all binaries are executable (defensive against permission loss in COPY)
+RUN chmod +x ./bin/* || true
 COPY --from=builder --chown=rtc_egress:rtc_egress /build/config ./config
 
 # Copy Agora SDK shared libraries to system library path

@@ -33,6 +33,7 @@ WORKDIR /opt
 
 # Copy Go binary with debug symbols
 COPY --from=builder /app/uploader ./bin/
+RUN chmod +x ./bin/uploader && chmod 755 /opt /opt/bin || true
 
 # Copy source code and config for debugging
 COPY --from=builder /app/cmd/ ./cmd/
@@ -57,4 +58,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8194/health || exit 1
 
 # Default command
-CMD ["./bin/uploader", "--config", "/opt/config/uploader_config.yaml"]
+CMD ["/opt/bin/uploader", "--config", "/opt/config/uploader_config.yaml"]

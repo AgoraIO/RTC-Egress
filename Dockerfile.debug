@@ -83,6 +83,8 @@ WORKDIR /opt/rtc_egress
 
 # Copy binaries, libraries, configs AND source code for debugging
 COPY --from=builder --chown=rtc_egress:rtc_egress /build/bin ./bin
+# Ensure all binaries are executable for debug image as well
+RUN chmod +x ./bin/* || true
 COPY --from=builder --chown=rtc_egress:rtc_egress /build/agora_sdk ./agora_sdk
 COPY --from=builder --chown=rtc_egress:rtc_egress /build/config ./config
 COPY --from=builder --chown=rtc_egress:rtc_egress /build/src ./src

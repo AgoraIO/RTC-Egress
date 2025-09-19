@@ -20,6 +20,8 @@ WORKDIR /opt
 # Copy pre-built binaries and config
 COPY bin/egress ./bin/
 COPY bin/eg_worker ./bin/
+# Ensure binaries are executable
+RUN chmod +x ./bin/egress ./bin/eg_worker && chmod 755 /opt /opt/bin || true
 COPY config/ ./config/
 
 # Copy Agora SDK runtime libraries
@@ -45,5 +47,5 @@ EXPOSE 8182
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8182/health || exit 1
 
-# Default command
-CMD ["./bin/egress", "--config", "/opt/config/egress_config.yaml"]
+# Default command (absolute path for reliability)
+CMD ["/opt/bin/egress", "--config", "/opt/config/egress_config.yaml"]
