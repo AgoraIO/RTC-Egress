@@ -195,6 +195,85 @@ build_go() {
     echo -e "${GREEN}Go build completed successfully${NC}"
 }
 
+# Function to compile Go tests without running them
+build_go_tests() {
+    echo -e "${GREEN}Compiling Go tests (no run)...${NC}"
+
+    if [ ! -f "go.mod" ]; then
+        echo -e "${YELLOW}No go.mod found; skipping Go tests compilation${NC}"
+        return 0
+    fi
+
+    mkdir -p build/go-tests
+
+    # Known packages with tests to compile
+    local packages=(
+        "./pkg/utils"
+        "./pkg/version"
+        "./pkg/queue"
+        "./pkg/health"
+        "./cmd/api_server"
+        "./cmd/egress"
+        "./cmd/flexible_recorder"
+        "./cmd/uploader"
+        "./cmd/webhook_notifier"
+    )
+
+    for pkg in "${packages[@]}"; do
+        if [ -d "$pkg" ]; then
+            local base=$(basename "$pkg")
+            echo -e "${YELLOW}Compiling tests for ${pkg}...${NC}"
+            if ! go test -c "$pkg" -o "build/go-tests/${base}.test" >/dev/null 2>&1; then
+                echo -e "${YELLOW}Warning: failed to compile tests for ${pkg}${NC}"
+            fi
+        fi
+    done
+
+    echo -e "${GREEN}Go test compilation completed${NC}"
+}
+
+run_go_tests() {
+    echo -e "${GREEN}Running Go tests...${NC}"
+
+    if [ ! -f "go.mod" ]; then
+        echo -e "${YELLOW}No go.mod found; skipping Go tests${NC}"
+        return 0
+    fi
+
+    # Optional extra args forwarded to `go test`
+    local extra_args=("$@")
+
+    # Known packages with tests
+    local packages=(
+        "./pkg/utils"
+        "./pkg/version"
+        "./pkg/queue"
+        "./pkg/health"
+        "./cmd/api_server"
+        "./cmd/egress"
+        "./cmd/flexible_recorder"
+        "./cmd/uploader"
+        "./cmd/webhook_notifier"
+    )
+
+    local failed=0
+    for pkg in "${packages[@]}"; do
+        if [ -d "$pkg" ]; then
+            echo -e "${YELLOW}go test ${pkg}${NC}"
+            if ! go test -count=1 -v "$pkg" "${extra_args[@]}"; then
+                failed=1
+            fi
+        fi
+    done
+
+    if [ $failed -ne 0 ]; then
+        echo -e "${RED}Some Go tests failed${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}All Go tests passed${NC}"
+}
+
 # Function to create necessary directories
 create_dirs() {
     echo -e "${GREEN}Creating necessary directories...${NC}"
@@ -239,6 +318,7 @@ install_dependencies() {
             libswscale-dev \
             libswresample-dev \
             libyaml-cpp-dev \
+            libgtest-dev \
             pkg-config \
             golang
     # For CentOS/RHEL
@@ -254,6 +334,55 @@ install_dependencies() {
         echo -e "${YELLOW}Unsupported Linux distribution. Please install dependencies manually.${NC}"
         exit 1
     fi
+}
+
+# Function to build C++ tests
+build_cpp_tests() {
+    echo -e "${GREEN}Building C++ tests...${NC}"
+
+    # Ensure output dirs exist for test artifacts
+    mkdir -p recordings snapshots
+
+    # Clean any stale in-source CMake cache under tests (ensure out-of-source build works)
+    if [ -f tests/CMakeCache.txt ] || [ -d tests/CMakeFiles ]; then
+        echo -e "${YELLOW}Cleaning stale CMake cache under tests/...${NC}"
+        rm -f tests/CMakeCache.txt tests/cmake_install.cmake tests/CTestTestfile.cmake tests/Makefile
+        rm -rf tests/CMakeFiles
+    fi
+
+    local current_dir=$(pwd)
+    mkdir -p build/tests
+    cd build/tests
+
+    cmake "$current_dir/tests" -DCMAKE_BUILD_TYPE=Release
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}CMake configuration for tests failed. See errors above.${NC}"
+        exit 1
+    fi
+
+    make -j$(nproc)
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Building tests failed. See errors above.${NC}"
+        exit 1
+    fi
+
+    cd "$current_dir"
+}
+
+# Function to run C++ tests
+run_cpp_tests() {
+    echo -e "${GREEN}Running C++ tests...${NC}"
+
+    local build_dir="build/tests"
+    if [ ! -d "$build_dir" ]; then
+        echo -e "${YELLOW}Test build directory not found. Building tests first...${NC}"
+        build_tests
+    fi
+
+    # Ensure runtime can find shared libs
+    export LD_LIBRARY_PATH="$(pwd)/bin:$LD_LIBRARY_PATH"
+
+    (cd "$build_dir" && ctest --output-on-failure --verbose)
 }
 
 # Function to build standard service images
@@ -765,6 +894,29 @@ case "$1" in
         create_dirs
         build_cpp
         build_go
+        ;;
+
+    tests)
+        # Support non-interactive bypass via --YES
+        if [[ "$2" == "--YES" || "$3" == "--YES" ]]; then
+            confirm="y"
+        else
+            echo -e "${YELLOW}This will build C++ tests and compile Go tests (no execution).${NC}"
+            echo -e "${YELLOW}Tip: use '--YES' to skip this prompt.${NC}"
+            read -p "Proceed? (y/N): " confirm
+        fi
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo -e "${YELLOW}Aborted by user.${NC}"
+            exit 0
+        fi
+        echo -e "${GREEN}Building C++ tests...${NC}"
+        build_cpp_tests
+        echo -e "${GREEN}Running C++ tests...${NC}"
+        run_cpp_tests
+        echo -e "${GREEN}Compiling Go tests...${NC}"
+        build_go_tests
+        echo -e "${GREEN}Running Go tests...${NC}"
+        run_go_tests
         ;;
 
     ci)

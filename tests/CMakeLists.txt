@@ -186,3 +186,37 @@ add_custom_target(run_simple_tests
     DEPENDS real_component_tests_simple
     COMMENT "Running simple tests"
 )
+
+# Additional test: snapshot user filtering behavior
+add_executable(snapshot_filter_tests
+    snapshot_filter_tests.cpp
+    ../src/snapshot_sink.cpp
+    ../src/metadata_manager.cpp
+    ../src/video_compositor.cpp
+    ../src/video_frame.cpp
+    ../src/layout_detector.cpp
+    ../src/snapshot_encoder.cpp
+    ../src/common/ffmpeg_utils.cpp
+    ../src/common/file_utils.cpp
+    ../src/common/helper.cpp
+)
+
+target_include_directories(snapshot_filter_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/../src/include
+    ${CMAKE_SOURCE_DIR}/../src/common
+)
+
+target_link_libraries(snapshot_filter_tests
+    GTest::GTest
+    GTest::Main
+    PkgConfig::FFMPEG
+    yaml-cpp
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    dl
+    rt
+    m
+)
+
+add_test(NAME SnapshotFilterTests COMMAND snapshot_filter_tests)

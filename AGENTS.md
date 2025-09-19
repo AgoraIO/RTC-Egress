@@ -169,6 +169,7 @@ This is an Agora RTC egress recording system with a hybrid C++/Go architecture:
 - **Run local services**: `./build.sh run all` - Runs all local services(C++ and Go)
 - **Clean build**: `./build.sh clean` - Removes build artifacts
 - **Install dependencies**: `./build.sh deps` - Installs system dependencies (cmake, ffmpeg, yaml-cpp, etc.)
+- **Build and run tests**: `./build.sh tests` - Builds and runs tests(DO NOT CALL THIS COMMAND, IT COSTS MILLIONS OF TOKENS)
 
 ### Docker
 - **Build images**: `./build.sh images` - Build all standard service images
