@@ -37,5 +37,8 @@ EXPOSE 8194
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8194/health || exit 1
 
+# Default config directory for containers
+ENV CONFIG_DIR=/opt/rtc_egress/config
+
 # Default command (absolute path)
-CMD ["/opt/bin/uploader", "--config", "/opt/config/uploader_config.yaml"]
+CMD ["/opt/bin/uploader"]

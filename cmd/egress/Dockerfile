@@ -47,5 +47,8 @@ EXPOSE 8182
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8182/health || exit 1
 
+# Default config directory for containers
+ENV CONFIG_DIR=/opt/rtc_egress/config
+
 # Default command (absolute path for reliability)
-CMD ["/opt/bin/egress", "--config", "/opt/config/egress_config.yaml"]
+CMD ["/opt/bin/egress"]

@@ -47,14 +47,12 @@ TEST_F(SnapshotFilterTest, CapturesOnlyTargetUsers) {
     std::vector<uint8_t> v((width / 2) * (height / 2), 128);
 
     // Send a frame for non-target userB — should not produce a file
-    sink.onVideoFrame(y.data(), u.data(), v.data(),
-                      width, width / 2, width / 2,
-                      width, height, /*ts*/ 0, "userB");
+    sink.onVideoFrame(y.data(), u.data(), v.data(), width, width / 2, width / 2, width, height,
+                      /*ts*/ 0, "userB");
 
     // Send a frame for target userA — should produce a file
-    sink.onVideoFrame(y.data(), u.data(), v.data(),
-                      width, width / 2, width / 2,
-                      width, height, /*ts*/ 10, "userA");
+    sink.onVideoFrame(y.data(), u.data(), v.data(), width, width / 2, width / 2, width, height,
+                      /*ts*/ 10, "userA");
 
     // Allow the background capture thread to run
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -72,4 +70,3 @@ TEST_F(SnapshotFilterTest, CapturesOnlyTargetUsers) {
     EXPECT_GE(userA, 1u);
     EXPECT_EQ(userB, 0u);
 }
-

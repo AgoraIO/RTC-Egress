@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -72,12 +73,34 @@ var (
 )
 
 func loadConfig() error {
+	// Support CLI flags and environment variables for config path
+	cfEnv := os.Getenv("CONFIG_FILE")
+	cdEnv := os.Getenv("CONFIG_DIR")
+	var cfFlag string
+	var cdFlag string
+	flag.StringVar(&cfFlag, "config", "", "Path to config YAML file")
+	flag.StringVar(&cdFlag, "config-dir", "", "Directory to search for config")
+	_ = flag.CommandLine.Parse(os.Args[1:])
+
 	viper.SetConfigName("flexible_recorder_config")
 	viper.SetConfigType("yaml")
+	if cfFlag != "" {
+		viper.SetConfigFile(cfFlag)
+	} else if cfEnv != "" {
+		viper.SetConfigFile(cfEnv)
+	}
+	// Unified search order:
+	// 1) Local dev: ./config
+	// 2) Container/K8s default: /opt/rtc_egress/config
+	// 3) System fallback: /etc/rtc_egress
+	if cdFlag != "" {
+		viper.AddConfigPath(cdFlag)
+	} else if cdEnv != "" {
+		viper.AddConfigPath(cdEnv)
+	}
 	viper.AddConfigPath("./config")
-	viper.AddConfigPath("/etc/rtc_egress")
 	viper.AddConfigPath("/opt/rtc_egress/config")
-	viper.AddConfigPath("$HOME/.rtc_egress")
+	viper.AddConfigPath("/etc/rtc_egress")
 
 	// Enable environment variable overrides
 	viper.AutomaticEnv()
