@@ -41,7 +41,7 @@ COPY --from=builder /app/pkg/ ./pkg/
 COPY config/ ./config/
 
 # Create directory structure
-RUN mkdir -p /opt/config /opt/logs /recordings /snapshots /web_recorder
+RUN mkdir -p /opt/rtc_egress/config /opt/logs /recordings /snapshots /web_recorder
 
 # Create non-root user
 RUN groupadd -r rtc_egress && \
@@ -57,5 +57,8 @@ EXPOSE 8194
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8194/health || exit 1
 
+# Default config directory for containers
+ENV CONFIG_DIR=/opt/rtc_egress/config
+
 # Default command
-CMD ["/opt/bin/uploader", "--config", "/opt/config/uploader_config.yaml"]
+CMD ["/opt/bin/uploader"]

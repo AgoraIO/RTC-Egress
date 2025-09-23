@@ -81,7 +81,7 @@ COPY --from=go_builder /app/pkg/ ./pkg/
 COPY config/ ./config/
 
 # Create directory structure
-RUN mkdir -p /opt/config /opt/logs /recordings /snapshots /web_recorder
+RUN mkdir -p /opt/rtc_egress/config /opt/logs /recordings /snapshots /web_recorder
 
 # Set library path for Agora SDK
 ENV LD_LIBRARY_PATH=/opt/lib:$LD_LIBRARY_PATH
@@ -100,5 +100,8 @@ EXPOSE 8182
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8182/health || exit 1
 
+# Default config directory for containers
+ENV CONFIG_DIR=/opt/rtc_egress/config
+
 # Default command
-CMD ["/opt/bin/egress", "--config", "/opt/config/egress_config.yaml"]
+CMD ["/opt/bin/egress"]

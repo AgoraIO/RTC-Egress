@@ -45,7 +45,7 @@ RUN groupadd -r rtc_egress && \
     useradd -r -g rtc_egress -s /bin/bash rtc_egress
 
 # Create directories
-RUN mkdir -p /opt/config /var/log/flexible_recorder /web_recorder && \
+RUN mkdir -p /opt/rtc_egress/config /var/log/flexible_recorder /web_recorder && \
     chown -R rtc_egress:rtc_egress /opt /var/log/flexible_recorder /web_recorder
 
 USER rtc_egress
@@ -57,5 +57,8 @@ EXPOSE 8193
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8193/health || exit 1
 
+# Default config directory for containers
+ENV CONFIG_DIR=/opt/rtc_egress/config
+
 # Default command
-CMD ["/opt/bin/flexible_recorder", "--config", "/opt/config/flexible_recorder_config.yaml"]
+CMD ["/opt/bin/flexible_recorder"]
