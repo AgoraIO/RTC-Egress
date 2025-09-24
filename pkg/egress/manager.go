@@ -96,10 +96,6 @@ type WorkerManager struct {
 // Global worker manager instance for cleanup
 var globalWorkerManager *WorkerManager
 
-func NewWorkerManagerWithHealth(binPath string, num int, redisQueue *queue.RedisQueue, podID string, healthManager *health.HealthManager) *WorkerManager {
-	return NewWorkerManagerWithMode(binPath, num, redisQueue, podID, healthManager, ModeNative, nil, []string{})
-}
-
 func NewWorkerManagerWithMode(binPath string, num int, redisQueue *queue.RedisQueue, podID string, healthManager *health.HealthManager, mode WorkerManagerMode, webConfig *WebRecorderConfig, patterns []string) *WorkerManager {
 	wm := &WorkerManager{
 		Workers:           make([]*Worker, num),
@@ -1778,17 +1774,18 @@ func (wm *WorkerManager) sendUDSMessageToWorker(worker *Worker, taskID string, u
 	return nil
 }
 
+func InitEgressConfig(configFile string) {
+	egressConfigPath = configFile
+}
+
 func ManagerMainWithRedisAndHealth(redisQueue *queue.RedisQueue, healthManager *health.HealthManager, numWorkers int, patterns []string) {
-	binPath := "./bin/eg_worker" // Adjust if needed
-	egressConfigPath = ""
-	for i, arg := range os.Args {
-		if arg == "--config" && i+1 < len(os.Args) {
-			egressConfigPath = os.Args[i+1]
-		}
-	}
+	binPath := "./bin/eg_worker"
+
 	if egressConfigPath == "" {
-		log.Fatal("--config must be provided for egress processes")
+		log.Fatal("egress config file not specified")
 	}
+
+	log.Printf("Using egress config file: %s", egressConfigPath)
 
 	// Generate unique 12-character pod ID
 	podID := utils.GenerateRandomID(12)
