@@ -6,53 +6,55 @@ pod:
   workers: 4          # Number of eg_worker processes
 
 server:
-  health_port: 8182   # Health check port
+  health_port: 8192   # Health check port
 
 # Redis Configuration
 redis:
-  addr: "localhost:6379" # Redis server address
+  addr: "localhost:6379"     # Redis server address
   password: ""               # Redis password (leave empty if no password)
   db: 0                      # Redis database number
   task_ttl: 172800           # Task TTL in seconds (48 hours)
-  worker_patterns:           # Worker subscription patterns
-    - "egress:snapshot:*"    # Example: workers can subscribe to specific patterns
-    - "egress:record:*"      # Example: different workers for different tasks
+  worker_patterns:           # Native worker subscription patterns
+    - "egress:snapshot:*"    # Global native snapshot tasks
+    - "egress:record:*"      # Global native recording tasks
+    - "egress:*:snapshot:*"  # Regional native snapshot tasks
+    - "egress:*:record:*"    # Regional native recording tasks
 
 # Agora Configuration
 agora:
-  app_id: "yourApp1d"
-  channel_name: "egress_test"
-  access_token: "007eJxSECAAA//+OLyXH"
-  egress_uid: "42"
-  rtc_timeout: 10           # RTC connection timeout in seconds
+  app_id: ""
+  channel_name: ""
+  access_token: ""
+  egress_uid: ""
+  rtc_timeout: 10            # RTC connection timeout in seconds
 
 # Snapshots settings
 snapshots:
   output_dir: "./snapshots"  # Where to store snapshots (relative to the working directory for default)
-  width: 1280               # Video width
-  height: 720               # Video height
-  users: ""       # target user list, if multiple users, use comma to separate
-  layout: "flat"           # Recording layout: "grid" or "flat" or "spotlight" or "freestyle" or "customized-layout"
-  interval_in_ms: 20000  # Save frame every 20 seconds
-  quality: 90           # Picture quality(0 for AUTO, 1-100)
+  width: 1280                # Video width
+  height: 720                # Video height
+  users: ""                  # target user list, if multiple users, use comma to separate
+  layout: "flat"             # Recording layout: "grid" or "flat" or "spotlight" or "freestyle" or "customized-layout"
+  interval_in_ms: 20000      # Save frame every 20 seconds
+  quality: 90                # Picture quality(0 for AUTO, 1-100)
 
 # Recording settings
 recording:
-  output_dir: "./recordings"  # Where to store recordings
-  users: ""  # target user list, if multiple users, use comma to separate
-  layout: "flat"           # Recording layout: "grid" or "flat" or "spotlight" or "freestyle" or "customized-layout"
-  format: "ts"            # Output format: "mp4", "avi", "mkv", "ts"
+  output_dir: "./recordings"   # Where to store recordings
+  users: ""                    # target user list, if multiple users, use comma to separate
+  layout: "flat"               # Recording layout: "grid" or "flat" or "spotlight" or "freestyle" or "customized-layout"
+  format: "ts"                 # Output format: "mp4", "avi", "mkv", "ts"
   max_duration_seconds: 86400  # Maximum recording duration (1 day)
 
   # Video recording settings
   video:
-    enabled: true         # Enable video recording
-    width: 1280          # Video width
-    height: 720          # Video height
-    fps: 30              # Video frame rate
-    bitrate: 2000000     # Video bitrate in bps (2 Mbps)
-    codec: "libx264"     # Video codec
-    buffer_size: 30      # Video frame buffer size
+    enabled: true            # Enable video recording
+    width: 1280              # Video width
+    height: 720              # Video height
+    fps: 30                  # Video frame rate
+    bitrate: 2000000         # Video bitrate in bps (2 Mbps)
+    codec: "libx264"         # Video codec
+    buffer_size: 30          # Video frame buffer size
 
   # Audio recording settings
   audio:
@@ -89,4 +91,3 @@ advanced:
 
 # Environment variable overrides:
 # REDIS_ADDR, REDIS_PASSWORD, POD_REGION, POD_WORKERS, APP_ID
-

@@ -7,12 +7,12 @@ redis:
   db: 0
 
 server:
-  port: 8080          # Main API port
-  health_port: 8181   # Health check port
+  port: 8091          # Main API port
+  health_port: 8191   # Health check port
 
 # Task routing configuration
 task_routing:
-  default_region: "" // empty for global
+  default_region: ""         # empty for global
   task_ttl: 172800           # Task TTL in seconds (48 hours)
 
 # Layout-based queue routing:

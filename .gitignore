@@ -7,8 +7,16 @@ bin-*/
 .env
 
 # Configuration files with sensitive data
-egress_config.yaml
+config/api_server_config.yaml
 config/egress_config.yaml
+config/flexible_recorder_config.yaml
+config/uploader_config.yaml
+config/webhook_notifier_config.yaml
+config/api_server_config
+config/egress_config
+config/flexible_recorder_config
+config/uploader_config
+config/webhook_notifier_config
 
 .cache/
 
@@ -41,4 +49,3 @@ tests/real_file_generation_tests
 tests/video_compositor_real_test
 tests/real_files_test_output_*/
 tests/fake_webhook_server
-

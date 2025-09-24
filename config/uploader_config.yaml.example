@@ -18,7 +18,7 @@ watcher:
   # Directories to watch for new files (support multiple directories)
   directories:
     - "/recordings"         # Native recordings from egress pods
-    - "/opt2"               # Web recordings from flexible-recorder pods
+    - "/web_recorder"               # Web recordings from flexible-recorder pods
     - "/snapshots"          # Snapshot images
   
   poll_interval: 10         # How often to scan directories (seconds)
