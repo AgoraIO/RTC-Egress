@@ -432,7 +432,8 @@ func main() {
 	server := NewAPIServer(config)
 
 	// Main API router
-	r := gin.Default()
+	r := gin.New()
+	r.Use(utils.MyCustomLogger(), gin.Recovery())
 
 	// API routes
 	v1 := r.Group("/egress/v1")
@@ -444,6 +445,7 @@ func main() {
 
 	// Health check router (separate port)
 	healthRouter := gin.New()
+	healthRouter.Use(utils.MyCustomLogger(), gin.Recovery())
 	healthRouter.GET("/health", server.healthCheck)
 
 	// Start health server

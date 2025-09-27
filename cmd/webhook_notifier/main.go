@@ -18,6 +18,7 @@ import (
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
 	"github.com/AgoraIO/RTC-Egress/pkg/version"
 	"github.com/AgoraIO/RTC-Egress/pkg/webhook"
+	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/viper"
 )
@@ -194,11 +195,10 @@ func startHealthServer() {
 	}
 
 	go func() {
-		mux := http.NewServeMux()
+		r := gin.New()
+		r.Use(utils.MyCustomLogger(), gin.Recovery())
 
-		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-
+		r.GET("/health", func(c *gin.Context) {
 			// Check Redis connectivity
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -215,7 +215,7 @@ func startHealthServer() {
 				redisStatus = "ok"
 			}
 
-			response := map[string]interface{}{
+			response := gin.H{
 				"status":        status,
 				"version":       version.GetVersion(),
 				"service":       "webhook-notifier",
@@ -224,17 +224,10 @@ func startHealthServer() {
 				"notify_states": config.Webhook.NotifyStates,
 			}
 
-			w.WriteHeader(statusCode)
-			json.NewEncoder(w).Encode(response)
+			c.JSON(statusCode, response)
 		})
 
-		// Webhook test endpoint
-		mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != "POST" {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-
+		r.POST("/test", func(c *gin.Context) {
 			// Create a test webhook payload
 			testPayload := webhook.WebhookPayload{
 				TaskID:    fmt.Sprintf("test_%s", utils.GenerateRandomID(8)),
@@ -249,23 +242,20 @@ func startHealthServer() {
 
 			// Test the webhook endpoint directly
 			success := testWebhookEndpoint(testPayload)
+			statusCode := http.StatusOK
+			if !success {
+				statusCode = http.StatusBadGateway
+			}
 
-			response := map[string]interface{}{
+			c.JSON(statusCode, gin.H{
 				"test_payload": testPayload,
 				"success":      success,
-			}
-
-			if success {
-				w.WriteHeader(http.StatusOK)
-			} else {
-				w.WriteHeader(http.StatusBadGateway)
-			}
-			json.NewEncoder(w).Encode(response)
+			})
 		})
 
 		server := &http.Server{
 			Addr:    fmt.Sprintf(":%d", config.Server.HealthPort),
-			Handler: mux,
+			Handler: r,
 		}
 
 		log.Printf("Health server starting on port %d", config.Server.HealthPort)

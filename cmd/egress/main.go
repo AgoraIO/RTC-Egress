@@ -299,7 +299,8 @@ func initHealthManager() error {
 }
 
 func startHealthCheckServer() {
-	r := gin.Default()
+	r := gin.New()
+	r.Use(utils.MyCustomLogger(), gin.Recovery())
 
 	// Health check
 	r.GET("/health", healthCheckHandler)
