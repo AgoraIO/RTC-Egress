@@ -1,6 +1,6 @@
 # Agora RTC Egress
 
-A high-performance egress recording solution for Agora RTC streams, with support for saving video frames as images/recording mp4 and uploading to S3 or compatible storage.
+A high-performance egress recording solution for Agora RTC streams, with support for saving video frames as images/recording mp4/hls and uploading to S3 or compatible storage.
 
 ## Features
 
@@ -15,18 +15,21 @@ A high-performance egress recording solution for Agora RTC streams, with support
 
 The system consists of five main components:
 
-1. **C++ Core**: Handles the low-level RTC streaming and frame processing
-2. **Go HTTP Server**: Provides REST API for controlling the recorder
-3. **Go Egress Manager**: Manages the recording process
-4. **Go Flexible Recorder**: Flexible recorder for recording Agora RTC streams
-5. **Go Webhook Notifier**: Notifies external systems about recording events
-6. **Go Uploader**: Uploads recorded media to S3 or compatible storage
+1. **Go HTTP Server**: Provides REST API for controlling the recorder
+2. **Go Egress Manager**: Manages the recording process
+3. **Go Flexible Recorder**: Flexible recorder for recording Agora RTC streams
+4. **Go Webhook Notifier**: Notifies external systems about recording events
+5. **Go Uploader**: Uploads recorded media to S3 or compatible storage
+
+and using C++/C to handle the low-level RTC streaming and frame processing
 
 ## Prerequisites
 
-- Docker and Docker Compose
 - Agora Developer Account and App ID
+- A Redis service
 - (Optional) AWS S3 credentials for cloud storage
+- (Optional) Docker and Docker Compose
+- (Optional) Kubernetes for production deployment, check https://github.com/AgoraIO/Helm-Charts for more details
 
 ## Quick Start
 
@@ -58,9 +61,6 @@ The system consists of five main components:
    docker compose -f docker-compose-redis-debug.yml up -d
    ```
 
-3. **Access the web interface**
-   Open `http://localhost:3000` in your browser
-
 ## Configuration
 
 Edit `config/egress_config.yaml` to configure the application:
@@ -75,6 +75,10 @@ health_port: 8182  # Health check endpoint
 api_port: 8080     # API server port
 template_port: 3000 # Web interface port
 
+# Redis configuration
+redis:
+  addr: "your-redis-host:6379"
+
 # Recording settings
 recording:
   output_dir: "/recordings"  # Where to store recordings
@@ -84,9 +88,49 @@ recording:
   interval_in_ms: 20000  # Save frame every 20 seconds
 ```
 
+Edit `config/api_server_config.yaml` to configure the API server:
+
+```yaml
+# Redis configuration
+redis:
+  addr: "your-redis-host:6379"
+
+# API server configuration
+api:
+  port: 8080
+```
+
+Edit `config/flexible_recorder_config.yaml` to configure the flexible recorder:
+
+```yaml
+# Redis configuration
+redis:
+  addr: "your-redis-host:6379"
+
+# Flexible recorder configuration(Web Recorder, optional)
+web_recorder:
+  base_url: "https://www.youtube.com/"
+```
+
+Edit `config/webhook_config.yaml` to configure the webhook notifier:
+
+```yaml
+# Redis configuration
+redis:
+  addr: "your-redis-host:6379"
+
+# Webhook notifier configuration (optional)
+webhook:
+  url: "your-webhook-url"
+```
+
 Edit `config/uploader_config.yaml` to configure the uploader:
 
 ```yaml
+# Redis configuration
+redis:
+  addr: "your-redis-host:6379"
+
 # S3 Configuration (optional)
 s3:
   bucket: "your-s3-bucket"
@@ -117,17 +161,7 @@ Refer to `designs/restful_api_design.md`
    cd RTC-Egress
    ```
 
-2. **Build the C++ components**
-   ```bash
-   ./build.sh cpp
-   ```
-
-3. **Build the Go server**
-   ```bash
-   ./build.sh go
-   ```
-
-4. **Run the application**
+2. **Build and run the application**
    ```bash
     ./build.sh local && ./build.sh run all
    ```
@@ -197,7 +231,7 @@ docker compose logs -f
 curl http://localhost:8182/health
 
 # Expected response
-{"status":"ok","version":"1.0.0"}
+{"status":"ok","version":"1.2.11"}
 ```
 
 ## Monitoring
@@ -206,7 +240,7 @@ The application exposes the following endpoints for monitoring:
 
 - `http://localhost:8182/health` - Health check
 - `http://localhost:8182/metrics` - Metrics
-- `http://localhost:8080/api/v1/egress/status/{egress_id}` - Recording status
+- `http://localhost:8080/egress/v1/{app_id}/tasks/{task_id}/status` - Recording status
 
 ## License
 
@@ -230,3 +264,6 @@ For support, please open an issue in the GitHub repository.
 - [FFmpeg](https://ffmpeg.org/) for video processing
 - [Gin](https://github.com/gin-gonic/gin) for the HTTP server
 - [Docker](https://www.docker.com/) for containerization
+- [Redis](https://redis.io/) for caching
+- [K8s](https://kubernetes.io/) for container orchestration
+- [Helm](https://helm.sh/) for Kubernetes deployment
