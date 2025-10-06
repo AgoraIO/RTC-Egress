@@ -90,4 +90,4 @@ advanced:
   thread_pool_size: 4       # Number of worker threads for processing
 
 # Environment variable overrides:
-# REDIS_ADDR, REDIS_PASSWORD, POD_REGION, POD_WORKERS, APP_ID
+# REDIS_ADDR, REDIS_PASSWORD, POD_REGION, POD_WORKERS, AGORA_APP_ID

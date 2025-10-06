@@ -129,7 +129,7 @@ func loadConfig() error {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	// Set environment variable bindings for key configuration
-	viper.BindEnv("agora.app_id", "APP_ID")
+	viper.BindEnv("agora.app_id", "AGORA_APP_ID")
 	viper.BindEnv("redis.addr", "REDIS_ADDR")
 	viper.BindEnv("redis.password", "REDIS_PASSWORD")
 	viper.BindEnv("redis.db", "REDIS_DB")
@@ -147,14 +147,15 @@ func loadConfig() error {
 	if err := viper.Unmarshal(&config); err != nil {
 		return fmt.Errorf("error unmarshaling config: %v", err)
 	}
+	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
-	// Validate mandatory APP_ID (managed mode - ACCESS_TOKEN comes from requests)
+	// Validate mandatory AGORA_APP_ID (managed mode - AGORA_ACCESS_TOKEN comes from requests)
 	if strings.TrimSpace(config.Agora.AppID) == "" {
-		return fmt.Errorf("agora.app_id is required (set via environment variable APP_ID or in egress_config.yaml)")
+		return fmt.Errorf("agora.app_id is required (set via environment variable AGORA_APP_ID or in egress_config.yaml)")
 	}
 
 	log.Printf("Configuration loaded for managed mode:")
-	log.Printf("  APP_ID: %s", config.Agora.AppID)
+	log.Printf("  AGORA_APP_ID: %s", config.Agora.AppID)
 
 	// Validate required fields
 	if strings.TrimSpace(config.Snapshots.OutputDir) == "" {

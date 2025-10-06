@@ -117,6 +117,7 @@ func loadConfig() error {
 	if err := viper.Unmarshal(&config); err != nil {
 		return fmt.Errorf("error unmarshaling config: %v", err)
 	}
+	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
 	// Debug: Check viper values before validation
 	log.Printf("Viper raw values:")

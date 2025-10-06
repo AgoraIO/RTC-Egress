@@ -1,6 +1,6 @@
 # Agora RTC Egress
 
-A high-performance egress recording solution for Agora RTC streams, with support for saving video frames as images/recording mp4/hls and uploading to S3 or compatible storage.
+A high-performance egress service solution for Agora RTC streams, with support for saving video frames as images/recording mp4/hls and uploading to S3 or compatible storage.
 
 ## Features
 
@@ -37,14 +37,46 @@ and using C++/C to handle the low-level RTC streaming and frame processing
 
 1. **With External Redis:**
    ```bash
-   # Set your Redis connection
-   export REDIS_ADDR="your-redis-host:6379"
-   export APP_ID="your-agora-app-id"
+   git clone https://github.com/AgoraIO/RTC-Egress.git
+   cd RTC-Egress
 
-   # Download and run
-   curl -O https://raw.githubusercontent.com/AgoraIO/RTC-Egress/main/deployment/docker_compose/docker-compose-external-redis.yml
-   docker compose -f docker-compose-external-redis.yml up -d
+   # Create/update .env with your values
+   cat <<'ENV' > .env
+   AGORA_APP_ID=your-agora-app-id
+   REDIS_HOST=your-redis-host
+   REDIS_PORT=6379
+   # Optional overrides
+   # REDIS_PASSWORD=
+   # REDIS_DB=0
+   # IMAGE_TAG=latest
+   # S3_BUCKET=
+   # S3_REGION=
+   # S3_ACCESS_KEY=
+   # S3_SECRET_KEY=
+   # S3_ENDPOINT=
+   # WEBHOOK_URL=
+   ENV
+
+   # Copy default config (edit if you need custom settings)
+   cp config/egress_config.yaml.example config/egress_config.yaml
+
+   # Ensure host directories exist for bind mounts
+   mkdir -p recordings snapshots logs web_recordings
+
+   # Make sure the expected Docker network exists (no-op if it already does)
+   docker network create ag_rtc_egress_external_network 2>/dev/null || true
+
+   # Load env vars locally (Compose also reads .env automatically)
+   set -a; source .env; set +a
+
+   # Start the stack
+   docker compose --env-file .env \
+     -f deployment/docker_compose/docker-compose-external-redis.yml up -d
    ```
+
+   The services prefer `REDIS_ADDR` when set; otherwise they combine
+   `REDIS_HOST`/`REDIS_PORT` automatically. Optional values such as `S3_*`,
+   `WEBHOOK_URL`, or `IMAGE_TAG` are passed through unchanged.
 
 2. **With Built-in Redis (Development):**
    ```bash
@@ -54,11 +86,17 @@ and using C++/C to handle the low-level RTC streaming and frame processing
 
    # Configure the application
    cp config/egress_config.yaml.example config/egress_config.yaml
-   # Edit config/egress_config.yaml with your Agora credentials
+   cp config/api_server_config.yaml.example config/api_server_config.yaml
+   cp config/flexible_recorder_config.yaml.example config/flexible_recorder_config.yaml
+   cp config/webhook_config.yaml.example config/webhook_config.yaml
+   cp config/uploader_config.yaml.example config/uploader_config.yaml
+   # Edit config/*_config.yaml files with your Agora credentials/S3 credentials and other settings
+
+   # Prepare bind-mount directories
+   mkdir -p ./{recordings,snapshots,logs,web_recordings}
 
    # Run with built-in Redis
-   cd deployment/docker_compose
-   docker compose -f docker-compose-redis-debug.yml up -d
+   docker compose -f deployment/docker_compose/docker-compose-redis-debug.yml up -d
    ```
 
 ## Configuration
@@ -183,7 +221,7 @@ docker run -d \
   -v ./recordings:/recordings \
   -v ./snapshots:/snapshots \
   -e REDIS_ADDR="your-redis-host:6379" \
-  -e APP_ID="your-agora-app-id" \
+  -e AGORA_APP_ID="your-agora-app-id" \
   ghcr.io/AgoraIO/RTC-Egress:latest
 ```
 

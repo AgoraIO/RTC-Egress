@@ -7,7 +7,7 @@
   Mode-specific behavior:
 
   - Standalone mode: All variables resolved through the 3 layers above
-  - Managed mode: APP_ID from the 3 layers above, ACCESS_TOKEN/CHANNEL_NAME passed dynamically per task via IPC
+  - Managed mode: AGORA_APP_ID from the 3 layers above, AGORA_ACCESS_TOKEN/AGORA_CHANNEL_NAME passed dynamically per task via IPC
 
   Implementation flow:
 
@@ -16,9 +16,8 @@
   3. Host environment variables (at container launch) override everything
 
   This means:
-  - docker run -e APP_ID=xxx (host env) beats docker-compose environment
+  - docker run -e AGORA_APP_ID=your_app_id (host env) beats docker-compose environment
   - Docker-compose environment: section beats egress_config.yaml
   - egress_config.yaml provides sensible defaults
 
-  The entrypoint validation should only require APP_ID to be resolvable through these layers, not mandate it as a host environment variable.
-  
+  The entrypoint validation should only require AGORA_APP_ID to be resolvable through these layers, not mandate it as a host environment variable.

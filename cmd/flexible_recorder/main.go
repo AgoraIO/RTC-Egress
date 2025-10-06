@@ -108,8 +108,12 @@ func loadConfig() error {
 	if err := viper.Unmarshal(&config); err != nil {
 		return fmt.Errorf("error unmarshaling config: %v", err)
 	}
+	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
-	// No app_id validation needed - web recorder engine handles RTC credentials
+	// Validate mandatory fields (no app_id needed for flexible recorder, the page to be recorded will handle RTC credentials)
+	if strings.TrimSpace(config.Redis.Addr) == "" {
+		return fmt.Errorf("redis.addr is required for flexible recorder")
+	}
 
 	// Set default worker count - for web recorder we don't need many "workers"
 	// since the actual work is done by the web recorder engine

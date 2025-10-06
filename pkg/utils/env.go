@@ -1,6 +1,10 @@
 package utils
 
-import "os"
+import (
+	"fmt"
+	"os"
+	"strings"
+)
 
 // IsRunningInContainer detects if the application is running inside a container
 func IsRunningInContainer() bool {
@@ -26,4 +30,28 @@ func IsRunningInContainer() bool {
 	}
 
 	return false
+}
+
+// ResolveRedisAddr prefers an explicit addr, otherwise combines REDIS_HOST/REDIS_PORT.
+func ResolveRedisAddr(current string) string {
+	current = strings.TrimSpace(current)
+	if current != "" {
+		return current
+	}
+
+	if addr := strings.TrimSpace(os.Getenv("REDIS_ADDR")); addr != "" {
+		return addr
+	}
+
+	host := strings.TrimSpace(os.Getenv("REDIS_HOST"))
+	if host == "" {
+		return ""
+	}
+
+	port := strings.TrimSpace(os.Getenv("REDIS_PORT"))
+	if port == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("%s:%s", host, port)
 }

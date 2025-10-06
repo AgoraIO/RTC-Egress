@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/AgoraIO/RTC-Egress/pkg/egress"
@@ -62,8 +63,9 @@ type TaskResponse struct {
 	Status string `json:"status"`
 }
 
-func NewAPIServer(config *Config) *APIServer {
-	// Initialize RedisQueue
+var config Config
+
+func NewAPIServer() *APIServer {
 	redisQueue := queue.NewRedisQueue(
 		config.Redis.Addr,
 		config.Redis.Password,
@@ -74,7 +76,7 @@ func NewAPIServer(config *Config) *APIServer {
 
 	return &APIServer{
 		redisQueue: redisQueue,
-		config:     config,
+		config:     &config,
 	}
 }
 
@@ -376,14 +378,14 @@ func generateRandomString(length int) string {
 	return string(b)
 }
 
-func loadConfig() *Config {
+func loadConfig() error {
 	// Support CLI flag and use shared resolver
 	var cfFlag string
 	flag.StringVar(&cfFlag, "config", "", "Path to config YAML file")
 	_ = flag.CommandLine.Parse(os.Args[1:])
 	resolved, err := utils.ResolveConfigFile("api_server_config.yaml", os.Args[1:])
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	log.Printf("Using config file: %s", resolved)
 	viper.SetConfigFile(resolved)
@@ -392,44 +394,34 @@ func loadConfig() *Config {
 	// Environment variable overrides
 	viper.SetEnvPrefix("API_SERVER")
 	viper.AutomaticEnv()
-
-	config := &Config{}
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	viper.BindEnv("redis.addr", "REDIS_ADDR")
+	viper.BindEnv("redis.password", "REDIS_PASSWORD")
+	viper.BindEnv("redis.db", "REDIS_DB")
+	viper.BindEnv("server.port", "API_PORT")
+	viper.BindEnv("server.health_port", "HEALTH_PORT")
 
 	if err := viper.ReadInConfig(); err != nil {
 		log.Printf("Config file not found, using environment variables and defaults: %v", err)
 	}
 
-	// Set defaults
-	viper.SetDefault("redis.addr", "localhost:6379")
-	viper.SetDefault("redis.password", "")
-	viper.SetDefault("redis.db", 0)
-	viper.SetDefault("server.port", 8080)
-	viper.SetDefault("server.health_port", 8182)
+	if err := viper.Unmarshal(&config); err != nil {
+		return fmt.Errorf("error unmarshaling config: %v", err)
+	}
+	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
-	// Override with environment variables
-	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
-		viper.Set("redis.addr", addr)
+	if strings.TrimSpace(config.Redis.Addr) == "" {
+		return fmt.Errorf("redis.addr is required for api server")
 	}
-	if password := os.Getenv("REDIS_PASSWORD"); password != "" {
-		viper.Set("redis.password", password)
-	}
-	if port := os.Getenv("API_PORT"); port != "" {
-		viper.Set("server.port", port)
-	}
-	if healthPort := os.Getenv("HEALTH_PORT"); healthPort != "" {
-		viper.Set("server.health_port", healthPort)
-	}
-
-	if err := viper.Unmarshal(config); err != nil {
-		log.Fatalf("Failed to unmarshal config: %v", err)
-	}
-
-	return config
+	return nil
 }
 
 func main() {
-	config := loadConfig()
-	server := NewAPIServer(config)
+	// Load configuration
+	if err := loadConfig(); err != nil {
+		log.Fatalf("failed to load config: %v", err)
+	}
+	server := NewAPIServer()
 
 	// Main API router
 	r := gin.New()

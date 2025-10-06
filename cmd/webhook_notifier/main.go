@@ -72,7 +72,7 @@ func loadConfig() error {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	// Set environment variable bindings for key configuration
-	viper.BindEnv("app_id", "APP_ID")
+	viper.BindEnv("app_id", "AGORA_APP_ID")
 	viper.BindEnv("redis.addr", "REDIS_ADDR")
 	viper.BindEnv("redis.password", "REDIS_PASSWORD")
 	viper.BindEnv("redis.db", "REDIS_DB")
@@ -91,9 +91,9 @@ func loadConfig() error {
 	if err := viper.Unmarshal(&config); err != nil {
 		return fmt.Errorf("error unmarshaling config: %v", err)
 	}
+	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
 	// Validate mandatory fields (no app_id needed for webhook notifier)
-
 	if strings.TrimSpace(config.Redis.Addr) == "" {
 		return fmt.Errorf("redis.addr is required for webhook notifications")
 	}
@@ -134,7 +134,7 @@ func loadConfig() error {
 	}
 
 	log.Printf("Configuration loaded for webhook notifier:")
-	// No APP_ID needed for webhook notifier
+	// No AGORA_APP_ID needed for webhook notifier
 	log.Printf("  Redis: %s (db: %d)", config.Redis.Addr, config.Redis.DB)
 	log.Printf("  Webhook URL: %s", config.Webhook.URL)
 	log.Printf("  Pod Region: %s", config.Pod.Region)

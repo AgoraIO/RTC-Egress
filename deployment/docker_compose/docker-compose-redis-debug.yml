@@ -20,22 +20,21 @@ services:
     environment:
       # Redis Configuration (internal to this compose stack)
       - REDIS_ADDR=redis:6379
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_DB=${REDIS_DB:-0}
-      
+
       # Agora Configuration
-      - APP_ID=${APP_ID:-}
-      - ACCESS_TOKEN=${ACCESS_TOKEN:-}
-      - CHANNEL_NAME=${CHANNEL_NAME:-}
-      # ACCESS_TOKEN and CHANNEL_NAME are optional for managed mode (passed via IPC)
-      # For standalone mode, they can be set via env vars to override config file
-      
+      - AGORA_APP_ID=${AGORA_APP_ID:-}
+      - AGORA_ACCESS_TOKEN=${AGORA_ACCESS_TOKEN:-}
+      - AGORA_CHANNEL_NAME=${AGORA_CHANNEL_NAME:-}
+
       # Server Configuration  
       - GIN_MODE=debug
       - API_PORT=8080
       - HEALTH_PORT=8182
-      - CANVAS_TEMPLATE_PORT=3000
-      
+
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-info}
     
@@ -132,9 +131,11 @@ services:
       - ./logs:/var/log/flexible-recorder
     environment:
       - REDIS_ADDR=redis:6379
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_DB=${REDIS_DB:-0}
-      - APP_ID=${APP_ID:-}
+      - AGORA_APP_ID=${AGORA_APP_ID:-}
       - WEB_RECORDER_BASE_URL=http://web_recorder:8001
       - WEB_RECORDER_AUTH_TOKEN=${WEB_RECORDER_AUTH_TOKEN:-}
       - POD_REGION=${POD_REGION:-us-west-1}
