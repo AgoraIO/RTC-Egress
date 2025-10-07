@@ -49,14 +49,24 @@ jobs:
         include:
           - service: api_server
             image_name: api-server
+            package_name: rtc-egress/api-server
+            package_api_path: rtc-egress%2Fapi-server
           - service: egress
             image_name: egress
+            package_name: rtc-egress/egress
+            package_api_path: rtc-egress%2Fegress
           - service: flexible_recorder
             image_name: flexible-recorder
+            package_name: rtc-egress/flexible-recorder
+            package_api_path: rtc-egress%2Fflexible-recorder
           - service: uploader
             image_name: uploader
+            package_name: rtc-egress/uploader
+            package_api_path: rtc-egress%2Fuploader
           - service: webhook_notifier
             image_name: webhook-notifier
+            package_name: rtc-egress/webhook-notifier
+            package_api_path: rtc-egress%2Fwebhook-notifier
 
     steps:
     - name: Checkout repository
@@ -110,6 +120,17 @@ jobs:
         provenance: false
         sbom: false
 
+    - name: Set package visibility to public
+      if: github.event_name != 'pull_request'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        curl -X PATCH \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/${{ matrix.package_api_path }} \
+          -d '{"visibility":"public"}' || true
+
   build-monolithic-image:
     runs-on: ubuntu-latest
     permissions:
@@ -162,3 +183,14 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         provenance: false
         sbom: false
+
+    - name: Set monolithic package visibility to public
+      if: github.event_name != 'pull_request'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        curl -X PATCH \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/rtc-egress \
+          -d '{"visibility":"public"}' || true

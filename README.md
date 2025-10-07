@@ -269,7 +269,7 @@ docker compose logs -f
 curl http://localhost:8182/health
 
 # Expected response
-{"status":"ok","version":"1.2.11"}
+{"status":"ok","version":"1.2.14"}
 ```
 
 ## Monitoring
