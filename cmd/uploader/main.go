@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AgoraIO/RTC-Egress/pkg/logger"
 	"github.com/AgoraIO/RTC-Egress/pkg/uploader"
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
 	"github.com/AgoraIO/RTC-Egress/pkg/version"
@@ -82,6 +82,16 @@ var (
 	startTime = time.Now()
 )
 
+func maskKey(value string) string {
+	if value == "" {
+		return "EMPTY"
+	}
+	if len(value) <= 6 {
+		return value
+	}
+	return value[:6] + "..."
+}
+
 func loadConfig() error {
 	// Support CLI flag and use shared resolver
 	var cfFlag string
@@ -89,9 +99,9 @@ func loadConfig() error {
 	_ = flag.CommandLine.Parse(os.Args[1:])
 	resolved, err := utils.ResolveConfigFile("uploader_config.yaml", os.Args[1:])
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("failed to resolve uploader config", logger.ErrorField(err))
 	}
-	log.Printf("Using config file: %s", resolved)
+	logger.Info("Using config file", logger.String("path", resolved))
 	viper.SetConfigFile(resolved)
 	viper.SetConfigType("yaml")
 
@@ -120,20 +130,18 @@ func loadConfig() error {
 	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
 	// Debug: Check viper values before validation
-	log.Printf("Viper raw values:")
-	log.Printf("  s3.access_key: '%s'", viper.GetString("s3.access_key"))
-	log.Printf("  s3.secret_key length: %d", len(viper.GetString("s3.secret_key")))
+	logger.Debug("Uploader Viper raw values",
+		logger.String("s3_access_key_prefix", maskKey(viper.GetString("s3.access_key"))),
+		logger.Int("s3_secret_key_length", len(viper.GetString("s3.secret_key"))))
 
-	// Debug: Log S3 config values (without sensitive data)
-	log.Printf("Uploader configuration loaded:")
-	log.Printf("  S3 Bucket: %s (region: %s)", config.S3.Bucket, config.S3.Region)
-	log.Printf("  S3 Access Key: %s (length: %d)",
-		func() string {
-			if config.S3.AccessKey == "" {
-				return "EMPTY"
-			}
-			return config.S3.AccessKey[:min(8, len(config.S3.AccessKey))] + "..."
-		}(), len(config.S3.AccessKey))
+	// Log S3 config values (without sensitive data)
+	logger.Info("Uploader configuration loaded",
+		logger.String("s3_bucket", config.S3.Bucket),
+		logger.String("s3_region", config.S3.Region),
+		logger.String("s3_endpoint", config.S3.Endpoint))
+	logger.Info("Uploader access key summary",
+		logger.String("access_key_prefix", maskKey(config.S3.AccessKey)),
+		logger.Int("access_key_length", len(config.S3.AccessKey)))
 
 	// Validate mandatory fields
 	if config.S3.Bucket == "" {
@@ -151,9 +159,10 @@ func loadConfig() error {
 		config.Server.HealthPort = 8185 // Different from other services
 	}
 
-	log.Printf("Uploader configuration loaded:")
-	log.Printf("  S3 Bucket: %s (region: %s)", config.S3.Bucket, config.S3.Region)
-	log.Printf("  Watch Directories: %v", config.Watcher.Directories)
+	logger.Info("Uploader watch configuration",
+		logger.String("s3_bucket", config.S3.Bucket),
+		logger.String("s3_region", config.S3.Region),
+		logger.String("watch_directories", fmt.Sprint(config.Watcher.Directories)))
 
 	return nil
 }
@@ -214,13 +223,13 @@ func updateMetadataFile(metadataPath string, fileInfo *FileInfo, operation, deta
 	// Read current metadata
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
-		log.Printf("Failed to read metadata file %s: %v", metadataPath, err)
+		logger.Error("Failed to read metadata file", logger.String("metadata_path", metadataPath), logger.ErrorField(err))
 		return
 	}
 
 	var metadata MetadataFile
 	if err := json.Unmarshal(data, &metadata); err != nil {
-		log.Printf("Failed to parse metadata file %s: %v", metadataPath, err)
+		logger.Error("Failed to parse metadata file", logger.String("metadata_path", metadataPath), logger.ErrorField(err))
 		return
 	}
 
@@ -236,23 +245,26 @@ func updateMetadataFile(metadataPath string, fileInfo *FileInfo, operation, deta
 	}
 
 	if !updated {
-		log.Printf("Warning: Could not find matching file in metadata to update")
+		logger.Warn("Could not find matching file in metadata to update", logger.String("metadata_path", metadataPath))
 		return
 	}
 
 	// Write back to file
 	updatedData, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		log.Printf("Failed to marshal updated metadata: %v", err)
+		logger.Error("Failed to marshal updated metadata", logger.String("metadata_path", metadataPath), logger.ErrorField(err))
 		return
 	}
 
 	if err := os.WriteFile(metadataPath, updatedData, 0644); err != nil {
-		log.Printf("Failed to write updated metadata to %s: %v", metadataPath, err)
+		logger.Error("Failed to write updated metadata", logger.String("metadata_path", metadataPath), logger.ErrorField(err))
 		return
 	}
 
-	log.Printf("Updated metadata %s: %s - %s", metadataPath, operation, details)
+	logger.Info("Updated metadata entry",
+		logger.String("metadata_path", metadataPath),
+		logger.String("operation", operation),
+		logger.String("details", details))
 }
 
 func startFileWatchers() error {
@@ -269,12 +281,12 @@ func startFileWatchers() error {
 	watchers = make([]*uploader.Watcher, 0, len(config.Watcher.Directories))
 
 	for _, watchDir := range config.Watcher.Directories {
-		log.Printf("Creating file watcher for directory: %s", watchDir)
+		logger.Info("Creating file watcher", logger.String("directory", watchDir))
 
 		// Create watcher with custom uploader logic
 		watcher, err := NewCustomWatcher(watchDir, config.S3, customUploader)
 		if err != nil {
-			log.Printf("Failed to create file watcher for %s: %v", watchDir, err)
+			logger.Error("Failed to create file watcher", logger.String("directory", watchDir), logger.ErrorField(err))
 			continue
 		}
 
@@ -282,11 +294,11 @@ func startFileWatchers() error {
 
 		// Start each watcher in a separate goroutine
 		go func(watchDir string, w *uploader.Watcher) {
-			log.Printf("Starting file watcher for directory: %s", watchDir)
+			logger.Info("Starting file watcher", logger.String("directory", watchDir))
 			if err := w.Start(context.Background()); err != nil {
-				log.Printf("File watcher error for %s: %v", watchDir, err)
+				logger.Error("File watcher error", logger.String("directory", watchDir), logger.ErrorField(err))
 			} else {
-				log.Printf("File watcher for %s started successfully", watchDir)
+				logger.Info("File watcher started successfully", logger.String("directory", watchDir))
 			}
 		}(watchDir, watcher)
 	}
@@ -295,7 +307,7 @@ func startFileWatchers() error {
 		return fmt.Errorf("no file watchers started successfully")
 	}
 
-	log.Printf("Started %d file watchers", len(watchers))
+	logger.Info("File watchers started", logger.Int("count", len(watchers)))
 	return nil
 }
 
@@ -316,13 +328,16 @@ func (u *CompletionAwareUploader) UploadFile(filePath string) error {
 	// Only upload files that are from completed tasks
 	metadataPath, fileInfo := findFileInMetadata(filePath)
 	if metadataPath == "" || fileInfo == nil {
-		log.Printf("Skipping upload of %s - no metadata found or file not completed", filePath)
+		logger.Debug("Skipping upload - metadata missing or incomplete",
+			logger.String("file", filePath))
 		return nil
 	}
 
 	// Check if already uploaded
 	if fileInfo.UploadStatus == "uploaded" {
-		log.Printf("Skipping %s - already uploaded to %s", filePath, fileInfo.UploadURL)
+		logger.Info("Skipping already uploaded file",
+			logger.String("file", filePath),
+			logger.String("upload_url", fileInfo.UploadURL))
 		return nil
 	}
 
@@ -335,7 +350,10 @@ func (u *CompletionAwareUploader) uploadWithRetry(filePath, metadataPath string,
 	baseDelay := 5 * time.Second
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		log.Printf("Upload attempt %d/%d for file: %s", attempt, maxRetries, filePath)
+		logger.Info("Uploading file",
+			logger.String("file", filePath),
+			logger.Int("attempt", attempt),
+			logger.Int("max_attempts", maxRetries))
 
 		// Update upload attempt count
 		fileInfo.UploadAttempts = attempt
@@ -344,7 +362,7 @@ func (u *CompletionAwareUploader) uploadWithRetry(filePath, metadataPath string,
 		err := u.uploader.UploadFile(filePath)
 		if err == nil {
 			// Upload successful - update metadata and delete file
-			log.Printf("Successfully uploaded file: %s", filePath)
+			logger.Info("File uploaded successfully", logger.String("file", filePath))
 
 			// Generate S3 URL (simplified - in real implementation you'd get this from the upload result)
 			filename := filepath.Base(filePath)
@@ -363,9 +381,9 @@ func (u *CompletionAwareUploader) uploadWithRetry(filePath, metadataPath string,
 			deleteAfterUpload := true // This could be configurable per task
 			if deleteAfterUpload {
 				if err := os.Remove(filePath); err != nil {
-					log.Printf("Warning: Failed to delete file %s after upload: %v", filePath, err)
+					logger.Warn("Failed to delete file after upload", logger.String("file", filePath), logger.ErrorField(err))
 				} else {
-					log.Printf("Deleted local file after successful upload: %s", filePath)
+					logger.Info("Deleted local file after successful upload", logger.String("file", filePath))
 					updateMetadataFile(metadataPath, fileInfo, "file_deleted_after_upload", "")
 				}
 			}
@@ -374,14 +392,20 @@ func (u *CompletionAwareUploader) uploadWithRetry(filePath, metadataPath string,
 		}
 
 		// Upload failed - update metadata with error
-		log.Printf("Upload attempt %d failed for %s: %v", attempt, filePath, err)
+		logger.Warn("Upload attempt failed",
+			logger.String("file", filePath),
+			logger.Int("attempt", attempt),
+			logger.ErrorField(err))
 		fileInfo.LastUploadError = err.Error()
 		updateMetadataFile(metadataPath, fileInfo, "upload_failed", err.Error())
 
 		// If not the last attempt, wait with exponential backoff
 		if attempt < maxRetries {
 			delay := time.Duration(attempt) * baseDelay
-			log.Printf("Waiting %v before retry %d", delay, attempt+1)
+			logger.Info("Waiting before retry",
+				logger.String("file", filePath),
+				logger.Duration("delay", delay),
+				logger.Int("next_attempt", attempt+1))
 			time.Sleep(delay)
 		}
 	}
@@ -428,7 +452,7 @@ func healthCheckHandler(c *gin.Context) {
 
 func startHealthCheckServer() {
 	r := gin.New()
-	r.Use(utils.MyCustomLogger(), gin.Recovery())
+	r.Use(logger.GinRequestLogger(), gin.Recovery())
 
 	// Health check
 	r.GET("/health", healthCheckHandler)
@@ -450,11 +474,11 @@ func startHealthCheckServer() {
 			Handler: r,
 		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start health check server: %v", err)
+			logger.Fatal("Failed to start uploader health check server", logger.ErrorField(err))
 		}
 	}()
 
-	log.Printf("Uploader health server started on port %d", config.Server.HealthPort)
+	logger.Info("Uploader health server started", logger.Int("port", config.Server.HealthPort))
 }
 
 func scanAndUploadExistingFiles() {
@@ -464,12 +488,12 @@ func scanAndUploadExistingFiles() {
 
 	customUploader, err := NewCompletionAwareUploader(config.S3)
 	if err != nil {
-		log.Printf("Failed to create uploader for background scanning: %v", err)
+		logger.Error("Failed to create uploader for background scanning", logger.ErrorField(err))
 		return
 	}
 
 	for range ticker.C {
-		log.Printf("Scanning for completed files to upload...")
+		logger.Info("Scanning for completed files to upload")
 		for _, watchDir := range config.Watcher.Directories {
 			filepath.Walk(watchDir, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
@@ -483,7 +507,7 @@ func scanAndUploadExistingFiles() {
 
 				// Use the completion-aware uploader which handles all the logic
 				if err := customUploader.UploadFile(path); err != nil {
-					log.Printf("Background scan: Failed to process file %s: %v", path, err)
+					logger.Warn("Background scan failed to process file", logger.String("file", path), logger.ErrorField(err))
 				}
 
 				return nil
@@ -493,9 +517,12 @@ func scanAndUploadExistingFiles() {
 }
 
 func main() {
+	logger.Init("uploader")
+	logger.Info("uploader service starting", logger.String("version", version.GetVersion()))
+
 	// Load configuration
 	if err := loadConfig(); err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		logger.Fatal("Failed to load configuration", logger.ErrorField(err))
 	}
 
 	// Start health check server
@@ -503,26 +530,27 @@ func main() {
 
 	// Start file watchers (main functionality)
 	if err := startFileWatchers(); err != nil {
-		log.Fatalf("Failed to start file watchers: %v", err)
+		logger.Fatal("Failed to start file watchers", logger.ErrorField(err))
 	}
 
 	// Start background scanner for missed completed files
 	go scanAndUploadExistingFiles()
 
-	log.Printf("Uploader service started successfully")
-	log.Printf("Watching directories: %v", config.Watcher.Directories)
-	log.Printf("Uploading to S3: %s/%s", config.S3.Region, config.S3.Bucket)
-	log.Printf("Health endpoint: http://localhost:%d/health", config.Server.HealthPort)
+	logger.Info("Uploader service started",
+		logger.String("directories", fmt.Sprint(config.Watcher.Directories)),
+		logger.String("s3_bucket", config.S3.Bucket),
+		logger.String("s3_region", config.S3.Region),
+		logger.Int("health_port", config.Server.HealthPort))
 
 	// Wait for interrupt signal to gracefully shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Uploader service stopping...")
+	logger.Info("Uploader service stopping")
 
 	// The existing watcher package handles graceful shutdown via context cancellation
-	log.Printf("Stopped %d watchers", len(watchers))
+	logger.Info("Stopped watchers", logger.Int("count", len(watchers)))
 
-	log.Println("Uploader service stopped")
+	logger.Info("Uploader service stopped")
 }

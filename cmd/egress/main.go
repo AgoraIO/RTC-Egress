@@ -4,9 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,8 +13,8 @@ import (
 
 	"github.com/AgoraIO/RTC-Egress/pkg/egress"
 	"github.com/AgoraIO/RTC-Egress/pkg/health"
+	"github.com/AgoraIO/RTC-Egress/pkg/logger"
 	"github.com/AgoraIO/RTC-Egress/pkg/queue"
-	"github.com/AgoraIO/RTC-Egress/pkg/uploader"
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
 	"github.com/AgoraIO/RTC-Egress/pkg/version"
 	"github.com/gin-gonic/gin"
@@ -83,13 +81,6 @@ type Config struct {
 			KeepIncompleteSegments bool `mapstructure:"keep_incomplete_segments"`
 		} `mapstructure:"ts"`
 	} `mapstructure:"recording"`
-	S3 struct {
-		Bucket    string `mapstructure:"bucket"`
-		Region    string `mapstructure:"region"`
-		AccessKey string `mapstructure:"access_key"`
-		SecretKey string `mapstructure:"secret_key"`
-		Endpoint  string `mapstructure:"endpoint"`
-	} `mapstructure:"s3"`
 	Log struct {
 		Level      string `mapstructure:"level"`
 		Path       string `mapstructure:"path"`
@@ -118,9 +109,9 @@ func loadConfig() error {
 	_ = flag.CommandLine.Parse(os.Args[1:])
 	resolved, err := utils.ResolveConfigFile("egress_config.yaml", os.Args[1:])
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("failed to resolve egress config file", logger.ErrorField(err))
 	}
-	log.Printf("Using config file: %s", resolved)
+	logger.Info("Using config file", logger.String("path", resolved))
 	viper.SetConfigFile(resolved)
 	viper.SetConfigType("yaml")
 
@@ -154,8 +145,7 @@ func loadConfig() error {
 		return fmt.Errorf("agora.app_id is required (set via environment variable AGORA_APP_ID or in egress_config.yaml)")
 	}
 
-	log.Printf("Configuration loaded for managed mode:")
-	log.Printf("  AGORA_APP_ID: %s", config.Agora.AppID)
+	logger.Info("Configuration loaded", logger.String("mode", "managed"), logger.String("agora_app_id", config.Agora.AppID))
 
 	// Validate required fields
 	if strings.TrimSpace(config.Snapshots.OutputDir) == "" {
@@ -186,31 +176,16 @@ func loadConfig() error {
 		config.Pod.NumWorkers = 4 // Default to 4 workers
 	}
 
-	// Validate S3 configuration if bucket is provided
-	if config.S3.Bucket != "" {
-		if config.S3.Region == "" {
-			return fmt.Errorf("S3 region is required when S3 bucket is specified")
-		}
-		if config.S3.AccessKey == "" || config.S3.SecretKey == "" {
-			return fmt.Errorf("S3 access_key and secret_key are required when S3 bucket is specified")
-		}
-		if config.S3.Endpoint != "" {
-			if _, err := url.Parse(config.S3.Endpoint); err != nil {
-				return fmt.Errorf("S3 endpoint is configured but not a valid URL: %v", err)
-			}
-		}
-	}
-
 	// Create directories only if not in container AND they don't exist
 	if !utils.IsRunningInContainer() {
-		log.Printf("Running in local mode - checking output directories")
+		logger.Info("Running in local mode - checking output directories")
 
 		// Check and create snapshots directory if needed
 		if _, err := os.Stat(config.Snapshots.OutputDir); os.IsNotExist(err) {
 			if err := os.MkdirAll(config.Snapshots.OutputDir, 0755); err != nil {
 				return fmt.Errorf("failed to create snapshots output directory: %v", err)
 			}
-			log.Printf("Created snapshots directory: %s", config.Snapshots.OutputDir)
+			logger.Info("Created snapshots directory", logger.String("path", config.Snapshots.OutputDir))
 		}
 
 		// Check and create recording directory if needed
@@ -218,14 +193,17 @@ func loadConfig() error {
 			if err := os.MkdirAll(config.Recording.OutputDir, 0755); err != nil {
 				return fmt.Errorf("failed to create recording output directory: %v", err)
 			}
-			log.Printf("Created recording directory: %s", config.Recording.OutputDir)
+			logger.Info("Created recording directory", logger.String("path", config.Recording.OutputDir))
 		}
 
-		log.Printf("Output directories ready: snapshots=%s, recordings=%s", config.Snapshots.OutputDir, config.Recording.OutputDir)
+		logger.Info("Output directories ready",
+			logger.String("snapshots_dir", config.Snapshots.OutputDir),
+			logger.String("recordings_dir", config.Recording.OutputDir))
 	} else {
 		// In container mode, directories should already exist via volume mounts
-		log.Printf("Running in container mode - output directories should be mounted as volumes")
-		log.Printf("Expected mount points: snapshots=%s, recordings=%s", config.Snapshots.OutputDir, config.Recording.OutputDir)
+		logger.Info("Running in container mode - output directories should be mounted as volumes",
+			logger.String("snapshots_dir", config.Snapshots.OutputDir),
+			logger.String("recordings_dir", config.Recording.OutputDir))
 	}
 
 	return nil
@@ -233,7 +211,7 @@ func loadConfig() error {
 
 func initRedisQueue() error {
 	if config.Redis.Addr == "" {
-		log.Println("Redis not configured, using direct worker management")
+		logger.Warn("Redis not configured, using direct worker management")
 		return nil
 	}
 
@@ -252,13 +230,14 @@ func initRedisQueue() error {
 		return fmt.Errorf("failed to connect to Redis: %v", err)
 	}
 
-	log.Printf("Connected to Redis at %s", config.Redis.Addr)
 	if config.Pod.Region != "" {
-		log.Printf("Pod region configured: %s", config.Pod.Region)
+		logger.Info("Pod region configured", logger.String("pod_region", config.Pod.Region), logger.Int("pod_workers", config.Pod.NumWorkers))
 	} else {
-		log.Printf("Pod region not configured, will handle all regional queues")
+		logger.Warn("Pod region not configured, will handle all regional queues", logger.Int("pod_workers", config.Pod.NumWorkers))
 	}
-	log.Printf("Pod workers configured: %d", config.Pod.NumWorkers)
+
+	logger.Info("Connected to Redis", logger.String("redis_addr", config.Redis.Addr))
+
 	return nil
 }
 
@@ -277,7 +256,7 @@ func healthCheckHandler(c *gin.Context) {
 
 func initHealthManager() error {
 	if redisQueue == nil {
-		log.Println("Redis not configured, HealthManager disabled")
+		logger.Warn("Redis not configured, HealthManager disabled")
 		return nil
 	}
 
@@ -295,13 +274,15 @@ func initHealthManager() error {
 	// Start background processes
 	healthManager.StartRegionalStatsCalculation()
 
-	log.Printf("HealthManager initialized for pod %s in region %s", podID, config.Pod.Region)
+	logger.Info("HealthManager initialized",
+		logger.String("pod_id", podID),
+		logger.String("pod_region", config.Pod.Region))
 	return nil
 }
 
 func startHealthCheckServer() {
 	r := gin.New()
-	r.Use(utils.MyCustomLogger(), gin.Recovery())
+	r.Use(logger.GinRequestLogger(), gin.Recovery())
 
 	// Health check
 	r.GET("/health", healthCheckHandler)
@@ -310,7 +291,7 @@ func startHealthCheckServer() {
 	if healthManager != nil {
 		healthAPI := health.NewHealthAPI(healthManager)
 		healthAPI.RegisterRoutes(r)
-		log.Println("Health monitoring API enabled")
+		logger.Info("Health monitoring API enabled")
 	}
 
 	go func() {
@@ -319,92 +300,37 @@ func startHealthCheckServer() {
 			Handler: r,
 		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start health check server: %v", err)
+			logger.Fatal("Failed to start health check server", logger.ErrorField(err))
 		}
 	}()
 
 	_, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	log.Printf("Health server started on port %d", config.Server.HealthPort)
-}
-
-func startUploader() {
-	log.Println("Starting uploader initialization...")
-
-	// Check if we have any output directories to watch
-	outputDirs := []string{}
-	if config.Snapshots.OutputDir != "" {
-		outputDirs = append(outputDirs, config.Snapshots.OutputDir)
-		log.Printf("Snapshots output directory: %s", config.Snapshots.OutputDir)
-	}
-	if config.Recording.OutputDir != "" {
-		outputDirs = append(outputDirs, config.Recording.OutputDir)
-		log.Printf("Recording output directory: %s", config.Recording.OutputDir)
-	}
-
-	if len(outputDirs) == 0 {
-		log.Println("No output directories configured, file watcher disabled")
-		return
-	}
-
-	if config.S3.Bucket == "" || config.S3.Bucket == "your-s3-bucket" {
-		log.Println("S3 bucket not configured, file watcher disabled")
-		return
-	}
-
-	log.Printf("S3 Bucket: %s, Region: %s, Endpoint: %s", config.S3.Bucket, config.S3.Region, config.S3.Endpoint)
-
-	s3Config := uploader.S3Config{
-		Bucket:    config.S3.Bucket,
-		Region:    config.S3.Region,
-		AccessKey: config.S3.AccessKey,
-		SecretKey: config.S3.SecretKey,
-		Endpoint:  config.S3.Endpoint,
-	}
-
-	// Start file watchers for each output directory
-	for _, dir := range outputDirs {
-		log.Printf("Creating file watcher for directory: %s", dir)
-		watcher, err := uploader.NewWatcher(dir, s3Config)
-		if err != nil {
-			log.Printf("Failed to create file watcher for %s: %v", dir, err)
-			continue
-		}
-
-		// Start each watcher in a separate goroutine
-		go func(watchDir string, w *uploader.Watcher) {
-			log.Printf("Starting file watcher for directory: %s", watchDir)
-			if err := w.Start(context.Background()); err != nil {
-				log.Printf("File watcher error for %s: %v", watchDir, err)
-			} else {
-				log.Printf("File watcher for %s started successfully", watchDir)
-			}
-		}(dir, watcher)
-	}
+	logger.Info("Health server started", logger.Int("port", config.Server.HealthPort))
 }
 
 func main() {
+	logger.Init("egress")
+	logger.Info("egress service starting", logger.String("version", version.GetVersion()))
+
 	// Load configuration
 	if err := loadConfig(); err != nil {
-		log.Fatalf("Error loading config: %v", err)
+		logger.Fatal("Failed to load config", logger.ErrorField(err))
 	}
 
 	// Initialize Redis queue if configured
 	if err := initRedisQueue(); err != nil {
-		log.Fatalf("Error initializing Redis: %v", err)
+		logger.Fatal("Failed to initialize Redis", logger.ErrorField(err))
 	}
 
 	// Initialize HealthManager if Redis is available
 	if err := initHealthManager(); err != nil {
-		log.Printf("Warning: Failed to initialize HealthManager: %v", err)
+		logger.Warn("Failed to initialize HealthManager", logger.ErrorField(err))
 	}
 
 	// Start worker manager in background in a separate goroutine
 	startWorkerManager()
-
-	// Start uploader if configured
-	startUploader()
 
 	// Setup and start Health server
 	startHealthCheckServer()
@@ -414,10 +340,10 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down server...")
+	logger.Info("Shutting down server")
 
 	// Clean up worker processes
 	egress.CleanupWorkers()
 
-	log.Println("Server exiting")
+	logger.Info("Server exiting")
 }

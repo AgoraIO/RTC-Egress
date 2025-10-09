@@ -4,13 +4,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/AgoraIO/RTC-Egress/pkg/egress"
+	"github.com/AgoraIO/RTC-Egress/pkg/logger"
 	"github.com/AgoraIO/RTC-Egress/pkg/queue"
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
 	"github.com/AgoraIO/RTC-Egress/pkg/version"
@@ -179,7 +179,9 @@ func (s *APIServer) startTask(c *gin.Context) {
 	// Parse region from client IP
 	clientIP := c.ClientIP()
 	region := parseRegionFromIP(clientIP)
-	log.Printf("Client IP: %s, Parsed region: %s", clientIP, region)
+	logger.Debug("Parsed request region",
+		logger.String("client_ip", clientIP),
+		logger.String("region", region))
 
 	task, err := s.redisQueue.PublishTaskToRegion(ctx, taskReq.Cmd, "start", channel, taskReq.RequestID, taskReq.Payload, region)
 	if err != nil {
@@ -255,7 +257,9 @@ func (s *APIServer) stopTask(c *gin.Context) {
 	// Parse region from client IP for stop task routing as well
 	clientIP := c.ClientIP()
 	region := parseRegionFromIP(clientIP)
-	log.Printf("Stop task - Client IP: %s, Parsed region: %s", clientIP, region)
+	logger.Debug("Parsed stop request region",
+		logger.String("client_ip", clientIP),
+		logger.String("region", region))
 
 	// Publish a stop task derived from original without requiring layout in payload
 	_, err = s.redisQueue.PublishStopTaskFor(ctx, taskID, req.RequestID, region)
@@ -268,7 +272,9 @@ func (s *APIServer) stopTask(c *gin.Context) {
 		return
 	}
 
-	log.Printf("Stop requested for task %s (request_id=%s)", taskID, req.RequestID)
+	logger.Info("Stop requested",
+		logger.String("task_id", taskID),
+		logger.String("request_id", req.RequestID))
 
 	c.JSON(http.StatusOK, gin.H{
 		"request_id": req.RequestID,
@@ -387,7 +393,7 @@ func loadConfig() error {
 	if err != nil {
 		return err
 	}
-	log.Printf("Using config file: %s", resolved)
+	logger.Info("Using config file", logger.String("path", resolved))
 	viper.SetConfigFile(resolved)
 	viper.SetConfigType("yaml")
 
@@ -402,7 +408,7 @@ func loadConfig() error {
 	viper.BindEnv("server.health_port", "HEALTH_PORT")
 
 	if err := viper.ReadInConfig(); err != nil {
-		log.Printf("Config file not found, using environment variables and defaults: %v", err)
+		logger.Warn("Config file not found, using environment variables and defaults", logger.ErrorField(err))
 	}
 
 	if err := viper.Unmarshal(&config); err != nil {
@@ -417,15 +423,20 @@ func loadConfig() error {
 }
 
 func main() {
+	logger.Init("api-server")
+	logger.Info("api-server starting", logger.String("version", version.GetVersion()))
+
 	// Load configuration
 	if err := loadConfig(); err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		logger.Fatal("Failed to load config", logger.ErrorField(err))
 	}
 	server := NewAPIServer()
 
+	logger.Info("Connected to Redis", logger.String("redis_addr", config.Redis.Addr))
+
 	// Main API router
 	r := gin.New()
-	r.Use(utils.MyCustomLogger(), gin.Recovery())
+	r.Use(logger.GinRequestLogger(), gin.Recovery())
 
 	// API routes
 	v1 := r.Group("/egress/v1")
@@ -437,24 +448,23 @@ func main() {
 
 	// Health check router (separate port)
 	healthRouter := gin.New()
-	healthRouter.Use(utils.MyCustomLogger(), gin.Recovery())
+	healthRouter.Use(logger.GinRequestLogger(), gin.Recovery())
 	healthRouter.GET("/health", server.healthCheck)
 
 	// Start health server
 	go func() {
 		healthAddr := fmt.Sprintf(":%d", config.Server.HealthPort)
-		log.Printf("Health server starting on %s", healthAddr)
+		logger.Info("Health server starting", logger.String("address", healthAddr))
 		if err := healthRouter.Run(healthAddr); err != nil {
-			log.Fatalf("Health server failed: %v", err)
+			logger.Fatal("Health server failed", logger.ErrorField(err))
 		}
 	}()
 
 	// Start main API server
 	addr := fmt.Sprintf(":%d", config.Server.Port)
-	log.Printf("API server starting on %s", addr)
-	log.Printf("Connected to Redis: %s", config.Redis.Addr)
+	logger.Info("API server starting", logger.String("address", addr))
 
 	if err := r.Run(addr); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		logger.Fatal("API server failed", logger.ErrorField(err))
 	}
 }

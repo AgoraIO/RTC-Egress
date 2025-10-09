@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AgoraIO/RTC-Egress/pkg/health"
+	"github.com/AgoraIO/RTC-Egress/pkg/logger"
 	"github.com/AgoraIO/RTC-Egress/pkg/queue"
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
 )
@@ -689,15 +690,11 @@ func (wm *WorkerManager) moveTaskBackToMainQueue(ctx context.Context, taskID str
 
 // startRedisSubscriber continuously polls Redis for tasks and processes them
 func (wm *WorkerManager) startRedisSubscriber() {
-	log.Printf("Starting Redis task subscriber for pod %s", wm.PodID)
-
 	// Validate that patterns were provided during construction
 	if len(wm.patterns) == 0 {
-		log.Fatalf("Worker patterns not configured - cannot start Redis subscriber")
+		logger.Fatal("Worker patterns not configured - cannot start Redis subscriber")
 		return
 	}
-
-	log.Printf("Using configured patterns: %v", wm.patterns)
 
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -706,7 +703,7 @@ func (wm *WorkerManager) startRedisSubscriber() {
 		cancel()
 
 		if err != nil {
-			log.Printf("Error fetching task from Redis: %v", err)
+			logger.Warn("Error fetching task from Redis", logger.ErrorField(err))
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -1785,7 +1782,7 @@ func ManagerMainWithRedisAndHealth(redisQueue *queue.RedisQueue, healthManager *
 		log.Fatal("egress config file not specified")
 	}
 
-	log.Printf("Using egress config file: %s", egressConfigPath)
+	logger.Info("Using egress config file", logger.String("path", egressConfigPath))
 
 	// Generate unique 12-character pod ID
 	podID := utils.GenerateRandomID(12)
@@ -1794,7 +1791,17 @@ func ManagerMainWithRedisAndHealth(redisQueue *queue.RedisQueue, healthManager *
 	globalWorkerManager = wm // Store for cleanup
 	wm.StartAll()
 
-	log.Printf("Native egress worker manager started, listening for Redis tasks with patterns: %v", patterns)
+	redisAddr := "redis disabled"
+	if redisQueue != nil {
+		if client := redisQueue.Client(); client != nil {
+			redisAddr = client.Options().Addr
+		}
+	}
+
+	logger.Info("Egress worker manager started in NativeMode",
+		logger.String("pod_id", podID),
+		logger.String("redis_addr", redisAddr),
+		logger.String("patterns", fmt.Sprint(patterns)))
 
 	// Keep running to process Redis tasks
 	select {}

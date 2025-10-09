@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AgoraIO/RTC-Egress/pkg/logger"
 	"github.com/AgoraIO/RTC-Egress/pkg/queue"
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
 	"github.com/AgoraIO/RTC-Egress/pkg/version"
@@ -61,9 +61,9 @@ func loadConfig() error {
 	_ = flag.CommandLine.Parse(os.Args[1:])
 	resolved, err := utils.ResolveConfigFile("webhook_notifier_config.yaml", os.Args[1:])
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("failed to resolve webhook notifier config", logger.ErrorField(err))
 	}
-	log.Printf("Using config file: %s", resolved)
+	logger.Info("Using config file", logger.String("path", resolved))
 	viper.SetConfigFile(resolved)
 	viper.SetConfigType("yaml")
 
@@ -82,9 +82,9 @@ func loadConfig() error {
 
 	// Try to read config file - it's optional for containerized deployments
 	if err := viper.ReadInConfig(); err != nil {
-		log.Printf("Config file not found, using environment variables: %v", err)
+		logger.Warn("Config file not found, using environment variables", logger.ErrorField(err))
 	} else {
-		log.Printf("Using config file: %s", viper.ConfigFileUsed())
+		logger.Info("Using config file", logger.String("path", viper.ConfigFileUsed()))
 	}
 
 	// Unmarshal the entire config
@@ -133,13 +133,13 @@ func loadConfig() error {
 		}
 	}
 
-	log.Printf("Configuration loaded for webhook notifier:")
-	// No AGORA_APP_ID needed for webhook notifier
-	log.Printf("  Redis: %s (db: %d)", config.Redis.Addr, config.Redis.DB)
-	log.Printf("  Webhook URL: %s", config.Webhook.URL)
-	log.Printf("  Pod Region: %s", config.Pod.Region)
-	log.Printf("  Notify States: %v", config.Webhook.NotifyStates)
-	log.Printf("  Max Retries: %d", config.Webhook.MaxRetries)
+	logger.Info("Webhook notifier configuration loaded",
+		logger.String("redis_addr", config.Redis.Addr),
+		logger.Int("redis_db", config.Redis.DB),
+		logger.String("webhook_url", config.Webhook.URL),
+		logger.String("pod_region", config.Pod.Region),
+		logger.String("notify_states", fmt.Sprint(config.Webhook.NotifyStates)),
+		logger.Int("max_retries", config.Webhook.MaxRetries))
 
 	return nil
 }
@@ -158,7 +158,7 @@ func initRedisClient() error {
 		return fmt.Errorf("failed to connect to Redis: %v", err)
 	}
 
-	log.Printf("Connected to Redis at %s", config.Redis.Addr)
+	logger.Info("Connected to Redis", logger.String("redis_addr", config.Redis.Addr))
 	return nil
 }
 
@@ -175,7 +175,7 @@ func initWebhookNotifier() error {
 	}
 
 	notifier = webhook.NewWebhookNotifier(webhookConfig, redisClient)
-	log.Printf("Webhook notifier initialized")
+	logger.Info("Webhook notifier initialized")
 	return nil
 }
 
@@ -184,19 +184,19 @@ func startWebhookNotifier() error {
 	if err := notifier.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start webhook notifier: %v", err)
 	}
-	log.Printf("Webhook notifier started successfully")
+	logger.Info("Webhook notifier started successfully")
 	return nil
 }
 
 func startHealthServer() {
 	if config.Server.HealthPort <= 0 {
-		log.Println("Health server disabled (port not configured)")
+		logger.Warn("Health server disabled (port not configured)")
 		return
 	}
 
 	go func() {
 		r := gin.New()
-		r.Use(utils.MyCustomLogger(), gin.Recovery())
+		r.Use(logger.GinRequestLogger(), gin.Recovery())
 
 		r.GET("/health", func(c *gin.Context) {
 			// Check Redis connectivity
@@ -258,9 +258,9 @@ func startHealthServer() {
 			Handler: r,
 		}
 
-		log.Printf("Health server starting on port %d", config.Server.HealthPort)
+		logger.Info("Health server starting", logger.Int("port", config.Server.HealthPort))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start health server: %v", err)
+			logger.Fatal("Failed to start webhook notifier health server", logger.ErrorField(err))
 		}
 	}()
 }
@@ -285,13 +285,13 @@ func testWebhookEndpoint(testPayload webhook.WebhookPayload) bool {
 
 	payloadBytes, err := json.Marshal(testPayload)
 	if err != nil {
-		log.Printf("Error marshaling test payload: %v", err)
+		logger.Error("Error marshaling test payload", logger.ErrorField(err))
 		return false
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", testConfig.URL, bytes.NewBuffer(payloadBytes))
 	if err != nil {
-		log.Printf("Error creating test request: %v", err)
+		logger.Error("Error creating test webhook request", logger.ErrorField(err))
 		return false
 	}
 
@@ -303,32 +303,32 @@ func testWebhookEndpoint(testPayload webhook.WebhookPayload) bool {
 	client := &http.Client{Timeout: testConfig.Timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error sending test webhook: %v", err)
+		logger.Error("Error sending test webhook", logger.ErrorField(err))
 		return false
 	}
 	defer resp.Body.Close()
 
-	log.Printf("Test webhook sent successfully (status: %d)", resp.StatusCode)
+	logger.Info("Test webhook sent", logger.Int("status", resp.StatusCode))
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("Starting Webhook Notifier Service")
+	logger.Init("webhook-notifier")
+	logger.Info("Starting Webhook Notifier Service", logger.String("version", version.GetVersion()))
 
 	// Load configuration
 	if err := loadConfig(); err != nil {
-		log.Fatalf("Error loading config: %v", err)
+		logger.Fatal("Error loading config", logger.ErrorField(err))
 	}
 
 	// Initialize Redis client
 	if err := initRedisClient(); err != nil {
-		log.Fatalf("Error initializing Redis: %v", err)
+		logger.Fatal("Error initializing Redis", logger.ErrorField(err))
 	}
 
 	// Initialize webhook notifier
 	if err := initWebhookNotifier(); err != nil {
-		log.Fatalf("Error initializing webhook notifier: %v", err)
+		logger.Fatal("Error initializing webhook notifier", logger.ErrorField(err))
 	}
 
 	// Start health server
@@ -336,19 +336,21 @@ func main() {
 
 	// Start webhook notifier
 	if err := startWebhookNotifier(); err != nil {
-		log.Fatalf("Error starting webhook notifier: %v", err)
+		logger.Fatal("Error starting webhook notifier", logger.ErrorField(err))
 	}
 
-	log.Println("Webhook Notifier Service is running...")
-	log.Printf("Health endpoint: http://localhost:%d/health", config.Server.HealthPort)
-	log.Printf("Test endpoint: http://localhost:%d/test", config.Server.HealthPort)
+	logger.Info("Webhook Notifier Service is running",
+		logger.Int("health_port", config.Server.HealthPort))
+	logger.Info("Webhook Notifier endpoints",
+		logger.String("health_url", fmt.Sprintf("http://localhost:%d/health", config.Server.HealthPort)),
+		logger.String("test_url", fmt.Sprintf("http://localhost:%d/test", config.Server.HealthPort)))
 
 	// Wait for interrupt signal to gracefully shut down
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down Webhook Notifier Service...")
+	logger.Info("Shutting down Webhook Notifier Service")
 
 	// Stop webhook notifier
 	if notifier != nil {
@@ -360,5 +362,5 @@ func main() {
 		redisClient.Close()
 	}
 
-	log.Println("Webhook Notifier Service stopped")
+	logger.Info("Webhook Notifier Service stopped")
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/AgoraIO/RTC-Egress/pkg/egress"
 	"github.com/AgoraIO/RTC-Egress/pkg/health"
+	"github.com/AgoraIO/RTC-Egress/pkg/logger"
 	"github.com/AgoraIO/RTC-Egress/pkg/queue"
 	"github.com/AgoraIO/RTC-Egress/pkg/utils"
 	"github.com/AgoraIO/RTC-Egress/pkg/version"
@@ -79,9 +79,9 @@ func loadConfig() error {
 	_ = flag.CommandLine.Parse(os.Args[1:])
 	resolved, err := utils.ResolveConfigFile("flexible_recorder_config.yaml", os.Args[1:])
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal("failed to resolve flexible recorder config", logger.ErrorField(err))
 	}
-	log.Printf("Using config file: %s", resolved)
+	logger.Info("Using config file", logger.String("path", resolved))
 	viper.SetConfigFile(resolved)
 	viper.SetConfigType("yaml")
 
@@ -135,9 +135,12 @@ func loadConfig() error {
 		config.WebRecorder.OutputPath = "/opt2"
 	}
 
-	log.Printf("Flexible Recorder configuration loaded:")
-	log.Printf("  Web Recorder URL: %s", config.WebRecorder.BaseURL)
-	log.Printf("  Worker Patterns: %v", config.Redis.WorkerPatterns)
+	logger.Info("Flexible Recorder configuration loaded",
+		logger.String("web_recorder_url", config.WebRecorder.BaseURL),
+		logger.String("redis_addr", config.Redis.Addr),
+		logger.String("pod_region", config.Pod.Region),
+		logger.Int("workers", config.Pod.NumWorkers))
+	logger.Info("Flexible Recorder worker patterns", logger.String("patterns", fmt.Sprint(config.Redis.WorkerPatterns)))
 
 	return nil
 }
@@ -162,14 +165,14 @@ func initRedisQueue() error {
 		return fmt.Errorf("failed to connect to Redis: %v", err)
 	}
 
-	log.Printf("Connected to Redis at %s", config.Redis.Addr)
-	log.Printf("Flexible Recorder will handle patterns: %v", config.Redis.WorkerPatterns)
+	logger.Info("Connected to Redis", logger.String("redis_addr", config.Redis.Addr))
+	logger.Info("Flexible Recorder will handle patterns", logger.String("patterns", fmt.Sprint(config.Redis.WorkerPatterns)))
 	return nil
 }
 
 func initHealthManager() error {
 	if redisQueue == nil {
-		log.Println("Redis not configured, HealthManager disabled")
+		logger.Warn("Redis not configured, HealthManager disabled")
 		return nil
 	}
 
@@ -184,7 +187,9 @@ func initHealthManager() error {
 		return fmt.Errorf("failed to register flexible recorder pod: %v", err)
 	}
 
-	log.Printf("HealthManager initialized for flexible recorder pod %s", podID)
+	logger.Info("HealthManager initialized for flexible recorder",
+		logger.String("pod_id", podID),
+		logger.String("pod_region", config.Pod.Region))
 	return nil
 }
 
@@ -216,7 +221,10 @@ func startWorkerManager() {
 		wm.StartAll()
 	}()
 
-	log.Printf("Flexible Recorder worker manager started in ModeWeb")
+	logger.Info("Flexible Recorder worker manager started in ModeWeb",
+		logger.String("pod_id", podID),
+		logger.String("redis_addr", config.Redis.Addr),
+		logger.String("patterns", fmt.Sprint(config.Redis.WorkerPatterns)))
 }
 
 func healthCheckHandler(c *gin.Context) {
@@ -240,7 +248,7 @@ func healthCheckHandler(c *gin.Context) {
 
 func startHealthCheckServer() {
 	r := gin.New()
-	r.Use(utils.MyCustomLogger(), gin.Recovery())
+	r.Use(logger.GinRequestLogger(), gin.Recovery())
 
 	// Health check
 	r.GET("/health", healthCheckHandler)
@@ -249,7 +257,7 @@ func startHealthCheckServer() {
 	if healthManager != nil {
 		healthAPI := health.NewHealthAPI(healthManager)
 		healthAPI.RegisterRoutes(r)
-		log.Println("Health monitoring API enabled for flexible recorder")
+		logger.Info("Health monitoring API enabled for flexible recorder")
 	}
 
 	go func() {
@@ -258,27 +266,32 @@ func startHealthCheckServer() {
 			Handler: r,
 		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start health check server: %v", err)
+			logger.Fatal("Failed to start health check server", logger.ErrorField(err))
 		}
 	}()
 
-	log.Printf("Flexible recorder health server started on port %d", config.Server.HealthPort)
+	logger.Info("Flexible recorder health server started", logger.Int("port", config.Server.HealthPort))
 }
 
 func main() {
+	logger.Init("flexible-recorder")
+	logger.Info("flexible-recorder starting", logger.String("version", version.GetVersion()))
+
 	// Load configuration
 	if err := loadConfig(); err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		logger.Fatal("Failed to load configuration", logger.ErrorField(err))
 	}
 
 	// Initialize Redis queue
 	if err := initRedisQueue(); err != nil {
-		log.Fatalf("Failed to initialize Redis: %v", err)
+		logger.Fatal("Failed to initialize Redis", logger.ErrorField(err))
 	}
+
+	logger.Info("Web Recorder Engine URL configured", logger.String("url", config.WebRecorder.BaseURL))
 
 	// Initialize health manager
 	if err := initHealthManager(); err != nil {
-		log.Fatalf("Failed to initialize health manager: %v", err)
+		logger.Fatal("Failed to initialize health manager", logger.ErrorField(err))
 	}
 
 	// Start health check server
@@ -287,24 +300,20 @@ func main() {
 	// Start worker manager - REUSES existing egress manager but in ModeWeb
 	startWorkerManager()
 
-	log.Printf("Flexible Recorder service started in web-only mode")
-	log.Printf("Handling web recording patterns: %v", config.Redis.WorkerPatterns)
-	log.Printf("Web Recorder Engine URL: %s", config.WebRecorder.BaseURL)
-
 	// Wait for interrupt signal to gracefully shutdown the server
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Flexible Recorder service stopping...")
+	logger.Info("Flexible Recorder service stopping")
 
 	// Cleanup health manager
 	if healthManager != nil {
-		log.Println("Cleaning up health manager...")
+		logger.Info("Cleaning up health manager")
 	}
 
 	// Clean up worker processes (shared cleanup function)
 	egress.CleanupWorkers()
 
-	log.Println("Flexible Recorder service stopped")
+	logger.Info("Flexible Recorder service stopped")
 }
