@@ -114,6 +114,23 @@ func NewWorkerManagerWithMode(binPath string, num int, redisQueue *queue.RedisQu
 		patterns:          patterns,
 	}
 
+	// Ensure stop tasks targeted at this pod are prioritised.
+	stopPattern := fmt.Sprintf("egress:stop:%s", podID)
+	patternExists := false
+	for _, existing := range wm.patterns {
+		if existing == stopPattern {
+			patternExists = true
+			break
+		}
+	}
+	if !patternExists {
+		if wm.patterns == nil {
+			wm.patterns = []string{stopPattern}
+		} else {
+			wm.patterns = append([]string{stopPattern}, wm.patterns...)
+		}
+	}
+
 	// Start health heartbeat if HealthManager is available
 	if healthManager != nil {
 		healthManager.StartHeartbeat(num, wm.getActiveTaskCount)
@@ -656,10 +673,11 @@ func (wm *WorkerManager) moveTaskBackToMainQueue(ctx context.Context, taskID str
 
 	// Reset task state
 	task.State = queue.TaskStateEnqueued
-	task.WorkerID = 0 // Reset worker ID to 0
+	task.WorkerID = -1
 	task.LeaseExpiry = nil
 	task.ProcessedAt = nil
 	task.RetryCount++
+	task.PodID = ""
 
 	// Update task and move back to main queue
 	originalQueue := wm.RedisQueue.BuildQueueKey(task.Cmd, task.Channel)
@@ -753,6 +771,14 @@ func (wm *WorkerManager) fetchTaskFromRedis(ctx context.Context, patterns []stri
 			return nil, fmt.Errorf("failed to pop from queue %s: %v", queue, err)
 		}
 
+		// If task prefers another pod, return it to the originating queue.
+		if skip, err := wm.deferTaskForAnotherPod(ctx, queue, processingQueue, taskID); err != nil {
+			log.Printf("Failed to inspect task %s for preferred pod: %v", taskID, err)
+		} else if skip {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+
 		// Use proper lease mechanism instead of manual state update
 		task, err := wm.RedisQueue.ClaimTaskWithLease(ctx, taskID, wm.PodID)
 		if err != nil {
@@ -776,10 +802,80 @@ func (wm *WorkerManager) fetchTaskFromRedis(ctx context.Context, patterns []stri
 	return nil, nil // No tasks available
 }
 
+func (wm *WorkerManager) deferTaskForAnotherPod(ctx context.Context, queueName, processingQueue, taskID string) (bool, error) {
+	task, err := wm.RedisQueue.GetTaskStatus(ctx, taskID)
+	if err != nil {
+		if err.Error() == "redis: nil" {
+			return false, nil
+		}
+		return false, err
+	}
+	if task == nil {
+		return false, nil
+	}
+
+	targetPodID := strings.TrimSpace(task.PodID)
+	targetWorkerID := task.WorkerID
+	updated := false
+
+	if task.Action == "stop" && task.Payload != nil {
+		if originalID, ok := task.Payload["task_id"].(string); ok && originalID != "" {
+			if origTask, err := wm.RedisQueue.GetTaskStatus(ctx, originalID); err == nil && origTask != nil {
+				newPodID := strings.TrimSpace(origTask.PodID)
+				newWorkerID := origTask.WorkerID
+				if newPodID != targetPodID {
+					targetPodID = newPodID
+					task.PodID = newPodID
+					updated = true
+				}
+				if newWorkerID != targetWorkerID {
+					targetWorkerID = newWorkerID
+					task.WorkerID = newWorkerID
+					updated = true
+				}
+			} else {
+				if targetPodID != "" || targetWorkerID != -1 {
+					targetPodID = ""
+					targetWorkerID = -1
+					task.PodID = ""
+					task.WorkerID = -1
+					updated = true
+				}
+			}
+		}
+	}
+
+	if updated {
+		if data, marshalErr := json.Marshal(task); marshalErr == nil {
+			wm.RedisQueue.Client().Set(ctx, wm.RedisQueue.BuildTaskKey(taskID), data, wm.RedisQueue.TTL())
+		}
+	}
+
+	if targetPodID == "" || targetPodID == wm.PodID {
+		return false, nil
+	}
+
+	newQueue := fmt.Sprintf("egress:stop:%s", targetPodID)
+
+	pipe := wm.RedisQueue.Client().TxPipeline()
+	pipe.LRem(ctx, processingQueue, 1, taskID)
+	pipe.RPush(ctx, newQueue, taskID)
+	pipe.Expire(ctx, newQueue, wm.RedisQueue.TTL())
+	if _, err := pipe.Exec(ctx); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 // isValidQueueKey validates that a key follows expected queue structure
 func isValidQueueKey(keyParts []string) bool {
 	if len(keyParts) < 3 || keyParts[0] != "egress" {
 		return false
+	}
+
+	if len(keyParts) == 3 && keyParts[1] == "stop" {
+		return true
 	}
 
 	validCmds := map[string]bool{"snapshot": true, "record": true, "rtmp": true, "whip": true}
@@ -806,6 +902,7 @@ func (wm *WorkerManager) getPrioritizedQueues(ctx context.Context, patterns []st
 		return nil
 	}
 
+	var stopQueues []string
 	var regionalQueues []string
 	var globalQueues []string
 
@@ -831,7 +928,13 @@ func (wm *WorkerManager) getPrioritizedQueues(ctx context.Context, patterns []st
 			// Validate queue key structure - must match expected formats:
 			// Global: egress:cmd:channel OR egress:web:cmd:channel
 			// Regional: egress:region:cmd:channel OR egress:region:web:cmd:channel
+			// Stop: egress:stop:<podID>
 			if !isValidQueueKey(keyParts) {
+				continue
+			}
+
+			if keyParts[1] == "stop" {
+				stopQueues = append(stopQueues, key)
 				continue
 			}
 
@@ -868,9 +971,16 @@ func (wm *WorkerManager) getPrioritizedQueues(ctx context.Context, patterns []st
 		}
 	}
 
-	// Combine with priority: regional first, then global
+	// Combine with priority: pod-specific stop queues first, then regional, then global
 	var result []string
 	uniqueQueues := make(map[string]bool)
+
+	for _, queue := range stopQueues {
+		if !uniqueQueues[queue] {
+			uniqueQueues[queue] = true
+			result = append(result, queue)
+		}
+	}
 
 	// Add regional queues first (higher priority)
 	for _, queue := range regionalQueues {
@@ -897,6 +1007,9 @@ func (wm *WorkerManager) shouldYieldForRegionalTask(queueKey string) bool {
 
 	// Parse queue key to determine if it's a regional task
 	keyParts := strings.Split(queueKey, ":")
+	if len(keyParts) >= 2 && keyParts[1] == "stop" {
+		return false
+	}
 	if len(keyParts) < 4 {
 		return false // Not a valid queue format
 	}
@@ -1195,6 +1308,13 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 	originalTask, err := wm.RedisQueue.GetTaskStatus(ctx, originalTaskID)
 	cancel()
 
+	if strings.TrimSpace(originalTask.PodID) == "" || originalTask.WorkerID < 0 {
+		ctxDone, cancelDone := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelDone()
+		wm.RedisQueue.UpdateTaskResult(ctxDone, originalTaskID, queue.TaskStateStopped, "Stopped by user - task idle")
+		return nil
+	}
+
 	if err == nil && wm.isWebTask(originalTask) {
 		// This is a web task - use web recorder proxy to stop it
 		if wm.webRecorderProxy != nil {
@@ -1271,6 +1391,17 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 						targetWorkerID = wid
 						break
 					}
+				}
+			}
+		}
+	}
+
+	if task.WorkerID >= 0 && task.WorkerID < len(wm.Workers) {
+		if w := wm.Workers[task.WorkerID]; w != nil {
+			if originalTask != nil {
+				if ch, ok := wm.WorkerChannels[task.WorkerID]; ok && ch == originalTask.Channel {
+					targetWorker = w
+					targetWorkerID = task.WorkerID
 				}
 			}
 		}

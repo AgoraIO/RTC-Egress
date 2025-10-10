@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -44,6 +45,7 @@ type Task struct {
 	WorkerID    int                    `json:"worker_id,omitempty"`
 	LeaseExpiry *time.Time             `json:"lease_expiry,omitempty"` // When worker lease expires
 	RetryCount  int                    `json:"retry_count,omitempty"`  // Number of retry attempts
+	PodID       string                 `json:"pod_id,omitempty"`       // Pod currently processing the task
 	// SourceQueue indicates from which Redis queue this task was claimed.
 	// Not persisted to Redis; used to determine web vs native routing.
 	SourceQueue string `json:"-"`
@@ -157,6 +159,23 @@ func (rq *RedisQueue) PublishStopTaskFor(ctx context.Context, originalTaskID, re
 
 	// Build queue key based on original cmd/channel and derived layout
 	queueKey := rq.getQueueKey(layout, orig.Cmd, orig.Channel, region)
+	targetPodID := strings.TrimSpace(orig.PodID)
+	if targetPodID == "" {
+		if leaseHolder, err := rq.client.Get(ctx, rq.buildLeaseKey(originalTaskID)).Result(); err == nil {
+			leaseHolder = strings.TrimSpace(leaseHolder)
+			if leaseHolder != "" {
+				targetPodID = leaseHolder
+			}
+		}
+	}
+	if targetPodID != "" {
+		queueKey = fmt.Sprintf("egress:stop:%s", targetPodID)
+	}
+
+	targetWorkerID := orig.WorkerID
+	if targetPodID == "" {
+		targetWorkerID = -1
+	}
 
 	// Dedupe by (cmd, channel, requestID)
 	dedupeKey := rq.buildDedupeKey(orig.Cmd, orig.Channel, requestID)
@@ -181,6 +200,8 @@ func (rq *RedisQueue) PublishStopTaskFor(ctx context.Context, originalTaskID, re
 		State:      TaskStateEnqueued,
 		CreatedAt:  now,
 		EnqueuedAt: &now,
+		PodID:      targetPodID,
+		WorkerID:   targetWorkerID,
 	}
 
 	data, err := json.Marshal(stopTask)
@@ -197,7 +218,11 @@ func (rq *RedisQueue) PublishStopTaskFor(ctx context.Context, originalTaskID, re
 		return nil, fmt.Errorf("failed to publish stop task: %v", err)
 	}
 
-	log.Printf("Published stop task %s for original %s to queue %s", stopID, originalTaskID, queueKey)
+	if targetPodID != "" {
+		log.Printf("Published stop task %s for original %s to pod-specific queue %s (target pod %s worker %d)", stopID, originalTaskID, queueKey, targetPodID, targetWorkerID)
+	} else {
+		log.Printf("Published stop task %s for original %s to queue %s", stopID, originalTaskID, queueKey)
+	}
 	return stopTask, nil
 }
 
@@ -225,6 +250,7 @@ func (rq *RedisQueue) PublishTaskToRegion(ctx context.Context, cmd, action, chan
 		State:      TaskStateEnqueued,
 		CreatedAt:  now,
 		EnqueuedAt: &now, // Set initial ENQUEUED timestamp
+		WorkerID:   -1,
 	}
 
 	taskData, err := json.Marshal(task)
@@ -302,9 +328,10 @@ func (rq *RedisQueue) ClaimTaskWithLease(ctx context.Context, taskID, workerID s
 	leaseExpiry := now.Add(LeaseTimeout)
 	task.State = TaskStateProcessing
 	task.ProcessedAt = &now
-	// WorkerID remains 0 for now - will be updated when task is assigned to specific worker
-	task.WorkerID = 0
+	// WorkerID remains -1 until a worker is assigned
+	task.WorkerID = -1
 	task.LeaseExpiry = &leaseExpiry
+	task.PodID = workerID
 
 	updatedData, err := json.Marshal(task)
 	if err != nil {
@@ -564,9 +591,10 @@ func (rq *RedisQueue) checkAndRecoverTask(ctx context.Context, taskID, processin
 	// Increment retry count and reset state
 	task.RetryCount++
 	task.State = TaskStateEnqueued
-	task.WorkerID = 0 // Reset worker ID to 0
+	task.WorkerID = -1
 	task.LeaseExpiry = nil
 	task.ProcessedAt = nil
+	task.PodID = ""
 	// Reset ENQUEUED timestamp for fresh timeout window
 	now := time.Now()
 	task.EnqueuedAt = &now
