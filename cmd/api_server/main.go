@@ -332,7 +332,7 @@ func (s *APIServer) getTaskStatus(c *gin.Context) {
 		"state":      task.State,
 		"action":     task.Action,
 		"created_at": task.CreatedAt,
-		"error":      task.Error,
+		"message":    task.Message,
 		"worker_id":  task.WorkerID,
 	})
 }

@@ -64,7 +64,7 @@ type TaskResponse struct {
 	RequestID string `json:"request_id"`
 	TaskID    string `json:"task_id"`
 	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 // WorkerManagerMode defines the operational mode of the worker manager
@@ -431,13 +431,13 @@ func (wm *WorkerManager) handleTaskCompletion(worker *Worker, completion *UDSCom
 
 	// Check for unrecoverable errors and auto-stop FAILED tasks
 	if completion.Status != "success" {
-		errorMsg := completion.Error
-		if errorMsg == "" {
-			errorMsg = completion.Message
+		message := completion.Message
+		if message == "" {
+			message = completion.Error
 		}
 
 		// Detect unrecoverable errors that should mark task as FAILED
-		isUnrecoverable := wm.isUnrecoverableError(errorMsg)
+		isUnrecoverable := wm.isUnrecoverableError(message)
 
 		if isUnrecoverable {
 			// Get task from Redis to pass to failTask
@@ -448,9 +448,9 @@ func (wm *WorkerManager) handleTaskCompletion(worker *Worker, completion *UDSCom
 			if err != nil {
 				log.Printf("Failed to get task for FAILED handling: %v", err)
 			} else {
-				log.Printf("Detected unrecoverable error for task %s: %s", completion.TaskID, errorMsg)
+				log.Printf("Detected unrecoverable error for task %s: %s", completion.TaskID, message)
 				// Auto-stop the FAILED task
-				if err := wm.failTask(task, errorMsg); err != nil {
+				if err := wm.failTask(task, message); err != nil {
 					log.Printf("Failed to auto-stop FAILED task %s: %v", completion.TaskID, err)
 				}
 				return // Exit early as failTask handles Redis update and cleanup
@@ -463,17 +463,9 @@ func (wm *WorkerManager) handleTaskCompletion(worker *Worker, completion *UDSCom
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		status := queue.TaskStateStopped
-		errorMsg := ""
-		if completion.Status != "success" {
-			status = queue.TaskStateFailed
-			errorMsg = completion.Error
-			if errorMsg == "" {
-				errorMsg = completion.Message
-			}
-		}
+		status, message := deriveCompletionResult(completion)
 
-		if err := wm.RedisQueue.UpdateTaskResult(ctx, completion.TaskID, status, errorMsg); err != nil {
+		if err := wm.RedisQueue.UpdateTaskResult(ctx, completion.TaskID, status, message); err != nil {
 			log.Printf("Failed to update Redis status for task %s: %v", completion.TaskID, err)
 		}
 	}
@@ -545,6 +537,32 @@ func (wm *WorkerManager) startLeaseRenewal() {
 	for range ticker.C {
 		wm.renewAllLeases()
 	}
+}
+
+func deriveCompletionResult(completion *UDSCompletionMessage) (string, string) {
+	if completion == nil {
+		return queue.TaskStateFailed, "Task failed: missing completion message"
+	}
+
+	status := queue.TaskStateStopped
+	message := strings.TrimSpace(completion.Message)
+
+	if completion.Status != "success" {
+		status = queue.TaskStateFailed
+		if message == "" {
+			message = strings.TrimSpace(completion.Error)
+		}
+		if message == "" {
+			message = "Task failed"
+		}
+		return status, message
+	}
+
+	if message == "" {
+		message = "Task completed successfully"
+	}
+
+	return status, message
 }
 
 // renewAllLeases renews leases for all active tasks
@@ -1281,13 +1299,15 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 		return fmt.Errorf("stop task %s missing original task_id in payload", task.ID)
 	}
 
+	stopTaskMessage := "Stop completed"
+
 	// Always mark stop task(not the origial task) as STOPPED at the end
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		// Mark stop task as STOPPED - stop operation acknowledged
-		err := wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateStopped, "Stop command executed")
+		err := wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateStopped, stopTaskMessage)
 		if err != nil {
 			log.Printf("Failed to update stop task %s state to STOPPED: %v", task.ID, err)
 		}
@@ -1303,19 +1323,30 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 	wm.RedisQueue.UpdateTaskResult(ctxMark, originalTaskID, queue.TaskStateStopping, "Stop in progress")
 	cancelMark()
 
-	// 3. Check if original task was a web recording task
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	originalTask, err := wm.RedisQueue.GetTaskStatus(ctx, originalTaskID)
-	cancel()
+	// 3. Inspect current ownership/state of the original task
+	ctxLookup, cancelLookup := context.WithTimeout(context.Background(), 5*time.Second)
+	originalTask, err := wm.RedisQueue.GetTaskStatus(ctxLookup, originalTaskID)
+	cancelLookup()
 
-	if strings.TrimSpace(originalTask.PodID) == "" || originalTask.WorkerID < 0 {
-		ctxDone, cancelDone := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancelDone()
-		wm.RedisQueue.UpdateTaskResult(ctxDone, originalTaskID, queue.TaskStateStopped, "Stopped by user - task idle")
+	if err != nil || originalTask == nil {
+		message := "Stop completed (task already finished or not found)"
+		stopTaskMessage = message
+		ctxFinalize, cancelFinalize := context.WithTimeout(context.Background(), 5*time.Second)
+		wm.RedisQueue.UpdateTaskResult(ctxFinalize, originalTaskID, queue.TaskStateStopped, message)
+		cancelFinalize()
 		return nil
 	}
 
-	if err == nil && wm.isWebTask(originalTask) {
+	if strings.TrimSpace(originalTask.PodID) == "" || originalTask.WorkerID < 0 {
+		message := "Stop completed (task idle)"
+		stopTaskMessage = message
+		ctxFinalize, cancelFinalize := context.WithTimeout(context.Background(), 5*time.Second)
+		wm.RedisQueue.UpdateTaskResult(ctxFinalize, originalTaskID, queue.TaskStateStopped, message)
+		cancelFinalize()
+		return nil
+	}
+
+	if wm.isWebTask(originalTask) {
 		// This is a web task - use web recorder proxy to stop it
 		if wm.webRecorderProxy != nil {
 			log.Printf("Stopping web recording task %s via web recorder proxy", originalTaskID)
@@ -1327,10 +1358,11 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 			}
 		}
 
-		// Mark original task as STOPPED
-		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		wm.RedisQueue.UpdateTaskResult(ctx, originalTaskID, queue.TaskStateStopped, "Stopped by user via web recorder")
+		message := "Stop completed via web recorder"
+		stopTaskMessage = message
+		ctxFinalize, cancelFinalize := context.WithTimeout(context.Background(), 5*time.Second)
+		wm.RedisQueue.UpdateTaskResult(ctxFinalize, originalTaskID, queue.TaskStateStopped, message)
+		cancelFinalize()
 		return nil
 	}
 
@@ -1413,6 +1445,8 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 	if targetWorker == nil {
 		// Original task may have already completed or not found
 		log.Printf("Original task %s not found on any worker for stop task %s", originalTaskID, task.ID)
+		message := "Stop completed (task already completed or not found)"
+		stopTaskMessage = message
 
 		// Clean up original task from lease renewal anyway
 		wm.TasksMutex.Lock()
@@ -1422,7 +1456,7 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 		// Mark original task as STOPPED (may already be completed)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		err := wm.RedisQueue.UpdateTaskResult(ctx, originalTaskID, queue.TaskStateStopped, "Task already completed or not found")
+		err := wm.RedisQueue.UpdateTaskResult(ctx, originalTaskID, queue.TaskStateStopped, message)
 		if err != nil {
 			log.Printf("Failed to update original task %s state: %v", originalTaskID, err)
 		}
@@ -1433,11 +1467,18 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 	// 5. Try to stop original task gracefully with retries
 	stopped := wm.stopOriginalTaskWithRetries(targetWorker, targetWorkerID, originalTaskID, task)
 
+	finalMessage := "Stop completed"
 	if stopped {
 		log.Printf("Pod %s successfully stopped task %s on worker %d (via stop task %s)", wm.PodID, originalTaskID, targetWorkerID, task.ID)
 	} else {
 		log.Printf("Pod %s force killed worker %d for task %s (via stop task %s)", wm.PodID, targetWorkerID, originalTaskID, task.ID)
+		finalMessage = "Stop completed after force kill"
 	}
+	stopTaskMessage = finalMessage
+
+	ctxFinalize, cancelFinalize := context.WithTimeout(context.Background(), 5*time.Second)
+	wm.RedisQueue.UpdateTaskResult(ctxFinalize, originalTaskID, queue.TaskStateStopped, finalMessage)
+	cancelFinalize()
 
 	return nil
 }

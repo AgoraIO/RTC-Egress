@@ -101,7 +101,7 @@ Notes
   "state": "PROCESSING",           // One of: ENQUEUED, PROCESSING, STOPPING, STOPPED, FAILED, TIMEOUT
   "action": "start|stop|status",   // Last command processed for this task id
   "created_at": "2025-09-19T00:15:15Z",
-  "error": "",                     // Error message when state is FAILED
+  "message": "",                   // Latest status message (non-empty when state is STOPPED/FAILED)
   "payload": {
         "layout": "flat",
         "channel": "egress_test",

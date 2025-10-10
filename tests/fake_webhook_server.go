@@ -20,7 +20,6 @@ type WebhookPayload struct {
 	Timestamp time.Time              `json:"timestamp"`
 	Data      map[string]interface{} `json:"data,omitempty"`
 	Files     []interface{}          `json:"files,omitempty"`
-	Error     string                 `json:"error,omitempty"`
 	Message   string                 `json:"message,omitempty"`
 }
 
@@ -64,9 +63,6 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("  State: %s", payload.State)
 	log.Printf("  Timestamp: %s", payload.Timestamp.Format(time.RFC3339))
 
-	if payload.Error != "" {
-		log.Printf("  ⚠️  Error: %s", payload.Error)
-	}
 	if payload.Message != "" {
 		log.Printf("  💬 Message: %s", payload.Message)
 	}

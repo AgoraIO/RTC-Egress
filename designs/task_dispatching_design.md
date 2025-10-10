@@ -139,7 +139,7 @@
     "enqueued_at": "2025-01-13T14:32:18Z",
     "processed_at": "2025-01-13T14:32:19Z",
     "completed_at": null,
-    "error": "",
+    "message": "",
     "worker_id": 1, // Worker ID
     "lease_expiry": "2025-01-13T14:33:04Z",
     "retry_count": 0

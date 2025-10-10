@@ -34,7 +34,7 @@ type WebhookPayload struct {
 	Action      string                 `json:"action"`  // "start", "stop", "status"
 	Channel     string                 `json:"channel"` // channel name
 	State       string                 `json:"state"`   // ENQUEUED, PROCESSING, STOPPING, STOPPED, FAILED, TIMEOUT
-	Error       string                 `json:"error,omitempty"`
+	Message     string                 `json:"message,omitempty"`
 	WorkerID    int                    `json:"worker_id,omitempty"`
 	Payload     map[string]interface{} `json:"payload,omitempty"`
 	CreatedAt   time.Time              `json:"created_at"`
@@ -276,7 +276,7 @@ func (wn *WebhookNotifier) processTaskNotification(task *queue.Task) {
 		Action:      task.Action,
 		Channel:     task.Channel,
 		State:       task.State,
-		Error:       task.Error,
+		Message:     task.Message,
 		WorkerID:    task.WorkerID,
 		CreatedAt:   task.CreatedAt,
 		ProcessedAt: task.ProcessedAt,
@@ -529,7 +529,7 @@ func (wn *WebhookNotifier) processRetries() {
 				Action:      task.Action,
 				Channel:     task.Channel,
 				State:       task.State,
-				Error:       task.Error,
+				Message:     task.Message,
 				WorkerID:    task.WorkerID,
 				CreatedAt:   task.CreatedAt,
 				ProcessedAt: task.ProcessedAt,

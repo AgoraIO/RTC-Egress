@@ -41,7 +41,7 @@ type Task struct {
 	EnqueuedAt  *time.Time             `json:"enqueued_at,omitempty"` // When task was last set to ENQUEUED (for timeout calculation)
 	ProcessedAt *time.Time             `json:"processed_at,omitempty"`
 	CompletedAt *time.Time             `json:"completed_at,omitempty"`
-	Error       string                 `json:"error,omitempty"`
+	Message     string                 `json:"message,omitempty"`
 	WorkerID    int                    `json:"worker_id,omitempty"`
 	LeaseExpiry *time.Time             `json:"lease_expiry,omitempty"` // When worker lease expires
 	RetryCount  int                    `json:"retry_count,omitempty"`  // Number of retry attempts
@@ -404,7 +404,7 @@ func (rq *RedisQueue) UpdateTaskWorker(ctx context.Context, taskID string, worke
 	return nil
 }
 
-func (rq *RedisQueue) UpdateTaskResult(ctx context.Context, taskID, state, errorMsg string) error {
+func (rq *RedisQueue) UpdateTaskResult(ctx context.Context, taskID, state, message string) error {
 	taskKey := rq.buildTaskKey(taskID)
 
 	taskData, err := rq.client.Get(ctx, taskKey).Result()
@@ -423,9 +423,7 @@ func (rq *RedisQueue) UpdateTaskResult(ctx context.Context, taskID, state, error
 	if state == TaskStateStopped || state == TaskStateFailed || state == TaskStateTimeout {
 		task.CompletedAt = &now
 	}
-	if errorMsg != "" {
-		task.Error = errorMsg
-	}
+	task.Message = message
 
 	updatedData, err := json.Marshal(task)
 	if err != nil {
@@ -707,7 +705,7 @@ func (rq *RedisQueue) checkAndTimeoutEnqueuedTask(ctx context.Context, taskID, q
 
 		// Mark task as TIMEOUT and remove from queue atomically
 		task.State = TaskStateTimeout
-		task.Error = fmt.Sprintf("Task timeout: ENQUEUED task exceeded %v limit (age: %v)", TaskTimeout, taskAge)
+		task.Message = fmt.Sprintf("Task timeout: ENQUEUED task exceeded %v limit (age: %v)", TaskTimeout, taskAge)
 
 		updatedData, err := json.Marshal(task)
 		if err != nil {
