@@ -440,7 +440,7 @@ func (rq *RedisQueue) UpdateTaskResult(ctx context.Context, taskID, state, messa
 		rq.client.Del(ctx, dedupeKey)
 	}
 
-	log.Printf("Updated task %s state to %s", taskID, state)
+	log.Printf("Updated task %s state to %s(%s)", taskID, state, message)
 	return nil
 }
 

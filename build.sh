@@ -208,6 +208,7 @@ build_go_tests() {
 
     # Known packages with tests to compile
     local packages=(
+        "./pkg/egress"
         "./pkg/utils"
         "./pkg/version"
         "./pkg/queue"
@@ -245,6 +246,7 @@ run_go_tests() {
 
     # Known packages with tests
     local packages=(
+        "./pkg/egress"
         "./pkg/utils"
         "./pkg/version"
         "./pkg/queue"

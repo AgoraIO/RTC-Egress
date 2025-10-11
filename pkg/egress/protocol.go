@@ -31,19 +31,24 @@ type UDSCompletionMessage struct {
 	Message string `json:"message"` // Additional completion message
 }
 
-// FlattenPayloadToUDSMessage converts a WorkerCommand with nested payload to a flattened UDSMessage
-// that matches the C++ UDSMessage structure exactly
-func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]interface{}) (*UDSMessage, error) {
-	udsMsg := &UDSMessage{
-		Cmd:    cmd,
-		Action: action,
-		Layout: "flat", // default
-		Uid:    []string{},
+// buildUDSMessageFromQueueTask converts a queue task into the UDS payload expected by eg_worker.
+func buildUDSMessageFromQueueTask(task *queue.Task) (*UDSMessage, error) {
+	if task == nil {
+		return nil, fmt.Errorf("task cannot be nil")
 	}
 
-	// Extract and validate each field from payload
+	udsMsg := &UDSMessage{
+		TaskID:  task.ID,
+		Cmd:     task.Cmd,
+		Action:  task.Action,
+		Layout:  "flat", // default layout is flat
+		Uid:     []string{},
+		Channel: task.Channel,
+	}
+
+	payload := task.Payload
 	if payload == nil {
-		return nil, fmt.Errorf("payload cannot be nil")
+		payload = map[string]interface{}{}
 	}
 
 	// Layout (optional, defaults to "flat")
@@ -64,9 +69,8 @@ func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]in
 	if uidVal, ok := payload["uid"]; ok && uidVal != nil {
 		switch v := uidVal.(type) {
 		case []string:
-			udsMsg.Uid = v
+			udsMsg.Uid = append(udsMsg.Uid, v...)
 		case []interface{}:
-			// Convert []interface{} to []string
 			for _, item := range v {
 				if str, isStr := item.(string); isStr {
 					udsMsg.Uid = append(udsMsg.Uid, str)
@@ -82,7 +86,8 @@ func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]in
 		} else {
 			return nil, fmt.Errorf("channel must be a string")
 		}
-	} else if action == "start" {
+	}
+	if udsMsg.Channel == "" && task.Action == "start" {
 		return nil, fmt.Errorf("channel is required for start actions")
 	}
 
@@ -93,7 +98,7 @@ func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]in
 		} else {
 			return nil, fmt.Errorf("access_token must be a string")
 		}
-	} else if action == "start" {
+	} else if task.Action == "start" {
 		return nil, fmt.Errorf("access_token is required for start actions")
 	}
 
@@ -109,7 +114,7 @@ func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]in
 		default:
 			return nil, fmt.Errorf("workerUid must be a number")
 		}
-	} else if action == "start" {
+	} else if task.Action == "start" {
 		return nil, fmt.Errorf("workerUid is required for start actions")
 	}
 
@@ -125,21 +130,18 @@ func FlattenPayloadToUDSMessage(cmd string, action string, payload map[string]in
 		default:
 			return nil, fmt.Errorf("interval_in_ms must be a number")
 		}
-	} else {
-		// Default to 20 seconds if not provided
-		udsMsg.IntervalInMs = 20000
 	}
 
-	// TaskID (extract from payload if present)
+	// TaskID override for stop/status payloads
 	if taskIDVal, ok := payload["task_id"]; ok {
-		if taskIDStr, isStr := taskIDVal.(string); isStr {
+		if taskIDStr, isStr := taskIDVal.(string); isStr && taskIDStr != "" {
 			udsMsg.TaskID = taskIDStr
 		}
 	}
 
 	// Validate the flattened result
 	if err := ValidateUDSMessage(udsMsg); err != nil {
-		return nil, fmt.Errorf("validation failed after flattening: %v", err)
+		return nil, fmt.Errorf("validation failed after building UDS message: %v", err)
 	}
 
 	return udsMsg, nil
@@ -199,23 +201,6 @@ func ValidateUDSMessage(msg *UDSMessage) error {
 	// Stop and status actions don't require these fields - they use task_id for identification
 
 	return nil
-}
-
-// ValidateAndFlattenTaskRequest validates a TaskRequest and returns a flattened UDSMessage
-// This combines validation and flattening into a single operation that can be called before AssignTask
-func ValidateAndFlattenTaskRequest(taskReq *TaskRequest) (*UDSMessage, error) {
-	// First validate the TaskRequest
-	if err := validateTaskRequest(taskReq); err != nil {
-		return nil, fmt.Errorf("validation failed: %v", err)
-	}
-
-	// Then flatten the validated payload to UDSMessage
-	udsMsg, err := FlattenPayloadToUDSMessage(taskReq.Cmd, taskReq.Action, taskReq.Payload)
-	if err != nil {
-		return nil, fmt.Errorf("flattening failed: %v", err)
-	}
-
-	return udsMsg, nil
 }
 
 // ValidateStartTaskRequest validates TaskRequest specifically for Redis publishing

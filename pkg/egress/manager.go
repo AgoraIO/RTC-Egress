@@ -114,7 +114,7 @@ func NewWorkerManagerWithMode(binPath string, num int, redisQueue *queue.RedisQu
 		patterns:          patterns,
 	}
 
-	// Ensure stop tasks targeted at this pod are prioritised.
+	// Ensure stop-tasks targeted at this pod are prioritised.
 	stopPattern := fmt.Sprintf("egress:stop:%s", podID)
 	patternExists := false
 	for _, existing := range wm.patterns {
@@ -508,7 +508,7 @@ func (wm *WorkerManager) handleTaskCompletion(worker *Worker, completion *UDSCom
 	} else {
 		wm.Mutex.Unlock()
 		log.Printf("Warning: Could not locate task %s in channel/task tracking for worker %d", completion.TaskID, worker.ID)
-		log.Printf("Warning: This is NORMAL if triggered by stop task from user")
+		log.Printf("Warning: This is NORMAL if triggered by stop-task from user")
 	}
 
 	// Determine if worker should remain RUNNING (other tasks left on its channel)
@@ -1171,36 +1171,9 @@ func (wm *WorkerManager) startTask(task *queue.Task) error {
 
 // startNativeRecorderTask starts a native recording task using eg_workers
 func (wm *WorkerManager) startNativeRecorderTask(task *queue.Task) error {
-	// Create UDS message directly from task for native tasks
-	udsMsg := &UDSMessage{
-		TaskID:  task.ID,
-		Cmd:     task.Cmd,
-		Action:  task.Action,
-		Channel: task.Channel,
-		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
-	}
-
-	// Extract fields from task payload
-	if task.Payload != nil {
-		if layout, ok := task.Payload["layout"].(string); ok {
-			udsMsg.Layout = layout
-		}
-		if uid, ok := task.Payload["uid"].([]interface{}); ok {
-			for _, u := range uid {
-				if s, ok := u.(string); ok {
-					udsMsg.Uid = append(udsMsg.Uid, s)
-				}
-			}
-		}
-		if accessToken, ok := task.Payload["access_token"].(string); ok {
-			udsMsg.AccessToken = accessToken
-		}
-		if workerUid, ok := task.Payload["workerUid"].(float64); ok {
-			udsMsg.WorkerUid = int(workerUid)
-		}
-		if interval, ok := task.Payload["interval_in_ms"].(float64); ok {
-			udsMsg.IntervalInMs = int(interval)
-		}
+	udsMsg, err := buildUDSMessageFromQueueTask(task)
+	if err != nil {
+		return fmt.Errorf("failed to build UDS message for task %s: %v", task.ID, err)
 	}
 
 	channel := task.Channel
@@ -1287,7 +1260,7 @@ func (wm *WorkerManager) startWebRecorderTask(task *queue.Task) error {
 // stopTask stops a task from Redis queue directly - always succeeds
 // Returns a special error to prevent post-processing
 func (wm *WorkerManager) stopTask(task *queue.Task) error {
-	// 1. Extract original task ID from stop task payload
+	// 1. Extract original task ID from stop-task payload
 	var originalTaskID string
 	if task.Payload != nil {
 		if taskID, ok := task.Payload["task_id"].(string); ok {
@@ -1296,23 +1269,23 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 	}
 
 	if originalTaskID == "" {
-		return fmt.Errorf("stop task %s missing original task_id in payload", task.ID)
+		return fmt.Errorf("stop-task %s missing original task_id in payload", task.ID)
 	}
 
-	stopTaskMessage := "Stop completed"
+	stopTaskMessage := "Trying to stop"
 
-	// Always mark stop task(not the origial task) as STOPPED at the end
+	// Always mark stop-task(not the origial task) as STOPPED at the end
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// Mark stop task as STOPPED - stop operation acknowledged
-		err := wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateStopped, stopTaskMessage)
+		// Mark stop-task as STOPPED - stop operation acknowledged
+		err := wm.RedisQueue.UpdateTaskResult(ctx, task.ID, queue.TaskStateStopped, stopTaskMessage+"/stop-task")
 		if err != nil {
-			log.Printf("Failed to update stop task %s state to STOPPED: %v", task.ID, err)
+			log.Printf("Failed to update stop-task %s state to STOPPED: %v", task.ID, err)
 		}
 
-		// Remove stop task from lease renewal
+		// Remove stop-task from lease renewal
 		wm.TasksMutex.Lock()
 		delete(wm.ActiveTasks, task.ID)
 		wm.TasksMutex.Unlock()
@@ -1444,7 +1417,7 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 
 	if targetWorker == nil {
 		// Original task may have already completed or not found
-		log.Printf("Original task %s not found on any worker for stop task %s", originalTaskID, task.ID)
+		log.Printf("Original task %s not found on any worker for stop-task %s", originalTaskID, task.ID)
 		message := "Stop completed (task already completed or not found)"
 		stopTaskMessage = message
 
@@ -1469,9 +1442,9 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 
 	finalMessage := "Stop completed"
 	if stopped {
-		log.Printf("Pod %s successfully stopped task %s on worker %d (via stop task %s)", wm.PodID, originalTaskID, targetWorkerID, task.ID)
+		log.Printf("Pod %s successfully stopped task %s on worker %d (via stop-task %s)", wm.PodID, originalTaskID, targetWorkerID, task.ID)
 	} else {
-		log.Printf("Pod %s force killed worker %d for task %s (via stop task %s)", wm.PodID, targetWorkerID, originalTaskID, task.ID)
+		log.Printf("Pod %s force killed worker %d for task %s (via stop-task %s)", wm.PodID, targetWorkerID, originalTaskID, task.ID)
 		finalMessage = "Stop completed after force kill"
 	}
 	stopTaskMessage = finalMessage
@@ -1485,13 +1458,20 @@ func (wm *WorkerManager) stopTask(task *queue.Task) error {
 
 // stopOriginalTaskWithRetries attempts graceful stop with retries, then force kill
 func (wm *WorkerManager) stopOriginalTaskWithRetries(targetWorker *Worker, targetWorkerID int, originalTaskID string, stopTask *queue.Task) bool {
-	// Create UDS message to stop the original task
-	udsMsg := &UDSMessage{
-		TaskID:  originalTaskID,
-		Cmd:     stopTask.Cmd,
-		Action:  "stop",
-		Channel: stopTask.Channel,
-		Uid:     []string{},
+	if stopTask == nil {
+		return false
+	}
+	if stopTask.Payload == nil {
+		stopTask.Payload = map[string]interface{}{}
+	}
+	if _, ok := stopTask.Payload["task_id"]; !ok {
+		stopTask.Payload["task_id"] = originalTaskID
+	}
+
+	udsMsg, err := buildUDSMessageFromQueueTask(stopTask)
+	if err != nil {
+		log.Printf("Failed to build stop UDS message for task %s: %v", originalTaskID, err)
+		return false
 	}
 
 	// Try graceful stop with retries (3 attempts with exponential backoff)
@@ -1500,7 +1480,7 @@ func (wm *WorkerManager) stopOriginalTaskWithRetries(targetWorker *Worker, targe
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		targetWorker.Mutex.Lock()
-		err := wm.sendUDSMessageToWorker(targetWorker, originalTaskID, udsMsg)
+		err = wm.sendUDSMessageToWorker(targetWorker, originalTaskID, udsMsg)
 		targetWorker.Mutex.Unlock()
 
 		if err == nil {
@@ -1654,19 +1634,31 @@ func (wm *WorkerManager) failTask(task *queue.Task, reason string) error {
 	}
 
 	// Send stop command to worker first
-	udsMsg := &UDSMessage{
-		TaskID:  task.ID,
+	stopCmd := &queue.Task{
+		ID:      task.ID,
 		Cmd:     task.Cmd,
 		Action:  "stop",
 		Channel: task.Channel,
-		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
+		Payload: map[string]interface{}{"task_id": task.ID},
+	}
+
+	udsMsg, err := buildUDSMessageFromQueueTask(stopCmd)
+	if err != nil {
+		log.Printf("Failed to build stop UDS message for FAILED task %s: %v", task.ID, err)
+		udsMsg = &UDSMessage{
+			TaskID:  task.ID,
+			Cmd:     task.Cmd,
+			Action:  "stop",
+			Channel: task.Channel,
+			Uid:     []string{},
+		}
 	}
 
 	// NOTE: Worker mutex is already locked by the caller (handleTaskCompletion)
 	// Do not lock again to avoid deadlock
 	// Try to send stop command to worker (best effort)
 	log.Printf("Sending stop command to worker %d for FAILED task %s (channel: %s, cmd: %s)", workerID, task.ID, task.Channel, task.Cmd)
-	err := wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
+	err = wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
 	if err != nil {
 		log.Printf("Failed to send stop command to worker %d for FAILED task %s: %v", workerID, task.ID, err)
 		// Continue anyway - mark as FAILED even if stop failed
@@ -1801,12 +1793,9 @@ func (wm *WorkerManager) getTaskStatus(task *queue.Task) error {
 
 // getNativeTaskStatus gets status of a native task from eg_workers
 func (wm *WorkerManager) getNativeTaskStatus(task *queue.Task) error {
-	udsMsg := &UDSMessage{
-		TaskID:  task.ID,
-		Cmd:     task.Cmd,
-		Action:  task.Action,
-		Channel: task.Channel,
-		Uid:     []string{}, // Initialize as empty slice to avoid null JSON serialization
+	udsMsg, err := buildUDSMessageFromQueueTask(task)
+	if err != nil {
+		return fmt.Errorf("failed to build status UDS message for task %s: %v", task.ID, err)
 	}
 
 	// Find worker for this task
@@ -1850,7 +1839,7 @@ func (wm *WorkerManager) getNativeTaskStatus(task *queue.Task) error {
 	worker.Mutex.Lock()
 	defer worker.Mutex.Unlock()
 
-	err := wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
+	err = wm.sendUDSMessageToWorker(worker, task.ID, udsMsg)
 	if err != nil {
 		return fmt.Errorf("failed to send status command to worker %d: %v", workerID, err)
 	}
