@@ -65,9 +65,9 @@ func buildUDSMessageFromQueueTask(task *queue.Task) (*UDSMessage, error) {
 		}
 	}
 
-	// Uid (optional)
-	if uidVal, ok := payload["uid"]; ok && uidVal != nil {
-		switch v := uidVal.(type) {
+	// Users (optional, map to UID list)
+	if usersVal, ok := payload["users"]; ok && usersVal != nil {
+		switch v := usersVal.(type) {
 		case []string:
 			udsMsg.Uid = append(udsMsg.Uid, v...)
 		case []interface{}:
@@ -75,6 +75,10 @@ func buildUDSMessageFromQueueTask(task *queue.Task) (*UDSMessage, error) {
 				if str, isStr := item.(string); isStr {
 					udsMsg.Uid = append(udsMsg.Uid, str)
 				}
+			}
+		case string:
+			if v != "" {
+				udsMsg.Uid = append(udsMsg.Uid, v)
 			}
 		}
 	}
@@ -130,6 +134,10 @@ func buildUDSMessageFromQueueTask(task *queue.Task) (*UDSMessage, error) {
 		default:
 			return nil, fmt.Errorf("interval_in_ms must be a number")
 		}
+	}
+
+	if udsMsg.IntervalInMs == 0 && task.Action == "start" {
+		udsMsg.IntervalInMs = 20000
 	}
 
 	// TaskID override for stop/status payloads

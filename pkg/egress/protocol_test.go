@@ -18,7 +18,7 @@ func TestBuildUDSMessageFromQueueTaskStart(t *testing.T) {
 			"layout":         "flat",
 			"channel":        "demo",
 			"access_token":   "token-value-12345",
-			"uid":            []string{"user1", "user2"},
+			"users":          []string{"user1", "user2"},
 			"workerUid":      float64(101),
 			"interval_in_ms": float64(15000),
 		},
@@ -156,7 +156,7 @@ func TestBuildUDSMessageFromQueueTaskStartChannelFallback(t *testing.T) {
 	}
 }
 
-func TestBuildUDSMessageFromQueueTaskUIDConversion(t *testing.T) {
+func TestBuildUDSMessageFromQueueTaskUsersConversion(t *testing.T) {
 	task := &queue.Task{
 		ID:      "start-with-uids",
 		Cmd:     "record",
@@ -165,7 +165,7 @@ func TestBuildUDSMessageFromQueueTaskUIDConversion(t *testing.T) {
 		Payload: map[string]interface{}{
 			"access_token": "token-123456",
 			"workerUid":    float64(42),
-			"uid":          []interface{}{"user1", "user2"},
+			"users":        []interface{}{"user1", "user2"},
 		},
 	}
 
@@ -176,6 +176,28 @@ func TestBuildUDSMessageFromQueueTaskUIDConversion(t *testing.T) {
 
 	if len(msg.Uid) != 2 || msg.Uid[0] != "user1" || msg.Uid[1] != "user2" {
 		t.Fatalf("expected uid slice [user1 user2], got %#v", msg.Uid)
+	}
+}
+
+func TestBuildUDSMessageFromQueueTaskDefaultInterval(t *testing.T) {
+	task := &queue.Task{
+		ID:      "start-default-interval",
+		Cmd:     "record",
+		Action:  "start",
+		Channel: "demo",
+		Payload: map[string]interface{}{
+			"access_token": "token-123456",
+			"workerUid":    float64(55),
+		},
+	}
+
+	msg, err := buildUDSMessageFromQueueTask(task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.IntervalInMs != 20000 {
+		t.Fatalf("expected default interval 20000, got %d", msg.IntervalInMs)
 	}
 }
 
