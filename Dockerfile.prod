@@ -1,6 +1,14 @@
 # Production Dockerfile - Build stripped binaries (no symbols, no source code)
 FROM ubuntu:24.04 AS builder
 
+ARG AGORA_SDK_URL
+ARG VERSION_OVERRIDE
+ARG GIT_COMMIT_SHORT
+
+ENV AGORA_SDK_URL=${AGORA_SDK_URL}
+ENV VERSION_OVERRIDE=${VERSION_OVERRIDE}
+ENV GIT_COMMIT_SHORT=${GIT_COMMIT_SHORT}
+
 # Set timezone and avoid interactive prompts during build
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC

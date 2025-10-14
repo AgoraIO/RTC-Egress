@@ -154,7 +154,13 @@ build_go() {
     esac
 
     local git_commit
-    git_commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    if [ -n "$GIT_COMMIT_SHORT" ]; then
+        git_commit="$GIT_COMMIT_SHORT"
+    elif [ -n "$GIT_COMMIT" ]; then
+        git_commit="$GIT_COMMIT"
+    else
+        git_commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    fi
     local build_time
     build_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     local ldflags="-X github.com/AgoraIO/RTC-Egress/pkg/version.Version=$version_literal -X github.com/AgoraIO/RTC-Egress/pkg/version.GitCommit=$git_commit -X github.com/AgoraIO/RTC-Egress/pkg/version.BuildTime=$build_time"

@@ -22,12 +22,13 @@ jobs:
     - name: Compute build version
       run: |
         BASE_VERSION=$(python3 -c "import pathlib,re;text=pathlib.Path('pkg/version/version.go').read_text();m=re.search(r'Version\\s*=\\s*\"v([^\"\\n]+)\"', text);print(m.group(1) if m else '0.0.0')")
+        SHORT_SHA=${GITHUB_SHA::7}
+        echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
         if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
           RAW_VERSION="${GITHUB_REF#refs/tags/v}"
           echo "VERSION_OVERRIDE=v${RAW_VERSION}" >> "$GITHUB_ENV"
         else
           DATE=$(date -u +%Y%m%d)
-          SHORT_SHA=${GITHUB_SHA::7}
           SEMVER_VERSION="${BASE_VERSION}-${DATE}+${SHORT_SHA}"
           echo "VERSION_OVERRIDE=v${SEMVER_VERSION}" >> "$GITHUB_ENV"
         fi
@@ -36,7 +37,8 @@ jobs:
       run: |
         # Build using the builder stage from Dockerfile.debug
         docker build --platform linux/amd64 --target builder -t temp-builder -f Dockerfile.debug \
-          --build-arg AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz \
+          --build-arg VERSION_OVERRIDE="$VERSION_OVERRIDE" \
+          --build-arg GIT_COMMIT_SHORT="$SHORT_SHA" \
           .
 
         # Extract built binaries and SDK from the container
@@ -177,6 +179,21 @@ jobs:
       if: steps.should_build.outputs.build == 'true'
       uses: actions/checkout@v4
 
+    - name: Compute build version
+      if: steps.should_build.outputs.build == 'true'
+      run: |
+        BASE_VERSION=$(python3 -c "import pathlib,re;text=pathlib.Path('pkg/version/version.go').read_text();m=re.search(r'Version\\s*=\\s*\"v([^\"\\n]+)\"', text);print(m.group(1) if m else '0.0.0')")
+        SHORT_SHA=${GITHUB_SHA::7}
+        echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+        if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          RAW_VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION_OVERRIDE=v${RAW_VERSION}" >> "$GITHUB_ENV"
+        else
+          DATE=$(date -u +%Y%m%d)
+          SEMVER_VERSION="${BASE_VERSION}-${DATE}+${SHORT_SHA}"
+          echo "VERSION_OVERRIDE=v${SEMVER_VERSION}" >> "$GITHUB_ENV"
+        fi
+
     - name: Set up Docker Buildx
       if: steps.should_build.outputs.build == 'true'
       uses: docker/setup-buildx-action@v3
@@ -237,4 +254,5 @@ jobs:
         provenance: false
         sbom: false
         build-args: |
-          AGORA_SDK_URL=https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-v4.4.32-20250425_144419-675648.tgz
+          VERSION_OVERRIDE=${{ env.VERSION_OVERRIDE }}
+          GIT_COMMIT_SHORT=${{ env.SHORT_SHA }}
