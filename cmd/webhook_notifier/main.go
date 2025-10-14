@@ -314,7 +314,7 @@ func testWebhookEndpoint(testPayload webhook.WebhookPayload) bool {
 
 func main() {
 	logger.Init("webhook-notifier")
-	logger.Info("Starting Webhook Notifier Service", logger.String("version", version.GetVersion()))
+	logger.Info("Starting Webhook Notifier Service", logger.String("version", version.FullVersion()))
 
 	// Load configuration
 	if err := loadConfig(); err != nil {

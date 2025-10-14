@@ -136,8 +136,33 @@ build_go() {
     echo -e "${GREEN}Tidying Go modules...${NC}"
     go mod tidy
 
+    local version_literal
+    if [ -n "$VERSION_OVERRIDE" ]; then
+        version_literal="$VERSION_OVERRIDE"
+    else
+        version_literal=$(git describe --tags --abbrev=0 2>/dev/null || true)
+        if [ -z "$version_literal" ]; then
+            version_literal=$(awk -F'"' '/^[[:space:]]*Version[[:space:]]*=/{print $2; exit}' pkg/version/version.go)
+        fi
+    fi
+    if [ -z "$version_literal" ]; then
+        version_literal="v0.0.0-dev"
+    fi
+    case "$version_literal" in
+        v*) ;;
+        *) version_literal="v$version_literal" ;;
+    esac
+
+    local git_commit
+    git_commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    local build_time
+    build_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local ldflags="-X github.com/AgoraIO/RTC-Egress/pkg/version.Version=$version_literal -X github.com/AgoraIO/RTC-Egress/pkg/version.GitCommit=$git_commit -X github.com/AgoraIO/RTC-Egress/pkg/version.BuildTime=$build_time"
+
+    echo -e "${GREEN}Embedding version info: ${version_literal} (commit ${git_commit}, built ${build_time})${NC}"
+
     echo -e "${GREEN}Building egress service...${NC}"
-    go build -o bin/egress ./cmd/egress
+    go build -ldflags="$ldflags" -o bin/egress ./cmd/egress
 
     if [ ! -f "bin/egress" ]; then
         echo -e "${RED}Build failed - egress binary not found${NC}"
@@ -148,7 +173,7 @@ build_go() {
     # Build api-server service if directory exists
     if [ -d "cmd/api_server" ]; then
         echo -e "${GREEN}Building api-server service...${NC}"
-        go build -o bin/api-server ./cmd/api_server
+        go build -ldflags="$ldflags" -o bin/api-server ./cmd/api_server
 
         if [ ! -f "bin/api-server" ]; then
             echo -e "${RED}Build failed - api-server binary not found${NC}"
@@ -160,7 +185,7 @@ build_go() {
     # Build flexible-recorder service if directory exists
     if [ -d "cmd/flexible_recorder" ]; then
         echo -e "${GREEN}Building flexible-recorder service...${NC}"
-        go build -o bin/flexible-recorder ./cmd/flexible_recorder
+        go build -ldflags="$ldflags" -o bin/flexible-recorder ./cmd/flexible_recorder
         if [ ! -f "bin/flexible-recorder" ]; then
             echo -e "${RED}Build failed - flexible-recorder binary not found${NC}"
             exit 1
@@ -171,7 +196,7 @@ build_go() {
     # Build uploader service if directory exists
     if [ -d "cmd/uploader" ]; then
         echo -e "${GREEN}Building uploader service...${NC}"
-        go build -o bin/uploader ./cmd/uploader
+        go build -ldflags="$ldflags" -o bin/uploader ./cmd/uploader
 
         if [ ! -f "bin/uploader" ]; then
             echo -e "${RED}Build failed - uploader binary not found${NC}"
@@ -183,7 +208,7 @@ build_go() {
     # Build webhook_notifier service if directory exists
     if [ -d "cmd/webhook_notifier" ]; then
         echo -e "${GREEN}Building webhook-notifier service...${NC}"
-        go build -o bin/webhook-notifier ./cmd/webhook_notifier
+        go build -ldflags="$ldflags" -o bin/webhook-notifier ./cmd/webhook_notifier
 
         if [ ! -f "bin/webhook-notifier" ]; then
             echo -e "${RED}Build failed - webhook-notifier binary not found${NC}"
@@ -750,62 +775,68 @@ stop_local_services() {
 # Function to bump version
 bump_version() {
     local new_version=$1
-    local current_version
+    local version_file="pkg/version/version.go"
 
-    # Read current version from VERSION file
-    if [ -f "VERSION" ]; then
-        current_version=$(cat VERSION | tr -d '\n\r' | sed 's/^v//')
-    else
-        echo -e "${RED}Error: VERSION file not found${NC}"
+    if [ ! -f "$version_file" ]; then
+        echo -e "${RED}Error: version file $version_file not found${NC}"
+        exit 1
+    fi
+
+    local current_version
+    current_version=$(awk -F'"' '/^[[:space:]]*Version[[:space:]]*=/{print $2; exit}' "$version_file")
+    current_version=${current_version#v}
+
+    if [ -z "$current_version" ]; then
+        echo -e "${RED}Error: unable to determine current version from $version_file${NC}"
         exit 1
     fi
 
     echo -e "${GREEN}Current version: v$current_version${NC}"
 
     if [ -z "$new_version" ]; then
-        # Auto-increment patch version (third number)
         IFS='.' read -r major minor patch <<< "$current_version"
-
-        # Validate version format
-        if ! [[ "$major" =~ ^[0-9]+$ ]] || ! [[ "$minor" =~ ^[0-9]+$ ]] || ! [[ "$patch" =~ ^[0-9]+$ ]]; then
-            echo -e "${RED}Error: Invalid version format in VERSION file: $current_version${NC}"
-            echo -e "${YELLOW}Expected format: x.y.z (e.g., 1.0.0)${NC}"
+        if ! [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ && "$patch" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}Error: invalid version format: $current_version${NC}"
+            echo -e "${YELLOW}Expected format: x.y.z (e.g., 1.2.3)${NC}"
             exit 1
         fi
-
-        # Increment patch version
         patch=$((patch + 1))
         new_version="$major.$minor.$patch"
         echo -e "${GREEN}Auto-incrementing to: v$new_version${NC}"
     else
-        # Remove 'v' prefix if provided
-        new_version=$(echo "$new_version" | sed 's/^v//')
-
-        # Validate provided version format
+        new_version=${new_version#v}
         if ! [[ "$new_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo -e "${RED}Error: Invalid version format: $new_version${NC}"
-            echo -e "${YELLOW}Expected format: x.y.z (e.g., 1.2.0)${NC}"
+            echo -e "${RED}Error: invalid version format: $new_version${NC}"
+            echo -e "${YELLOW}Expected format: x.y.z (e.g., 1.2.3)${NC}"
             exit 1
         fi
-
         echo -e "${GREEN}Setting version to: v$new_version${NC}"
     fi
 
-    # Update VERSION file
-    echo "v$new_version" > VERSION
-    echo -e "${GREEN}Updated VERSION file${NC}"
+    local version_literal="v$new_version"
 
-    # Commit version changes
-    git add VERSION
-    git commit -m "Chore: Bump version to v$new_version"
+    local tmpfile
+    tmpfile=$(mktemp)
+    if ! awk -v ver="$version_literal" '
+        /^[[:space:]]*Version[[:space:]]*=/ {
+            sub(/"[^"]*"/, "\"" ver "\"")
+        }
+        { print }
+    ' "$version_file" > "$tmpfile"; then
+        echo -e "${RED}Error: failed to update Version in $version_file${NC}"
+        rm -f "$tmpfile"
+        exit 1
+    fi
+    mv "$tmpfile" "$version_file"
+    gofmt -w "$version_file"
+
+    git add "$version_file"
+    git commit -m "Chore: bump version to $version_literal"
     echo -e "${GREEN}Committed version bump${NC}"
 
-    # Create git tag
-    local tag_name="v$new_version"
-
-    # Check if tag already exists
+    local tag_name="$version_literal"
     if git rev-parse "$tag_name" >/dev/null 2>&1; then
-        echo -e "${YELLOW}Warning: Tag $tag_name already exists${NC}"
+        echo -e "${YELLOW}Warning: tag $tag_name already exists${NC}"
         read -p "Do you want to delete and recreate the tag? (y/N): " confirm
         if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
             git tag -d "$tag_name"
@@ -816,8 +847,7 @@ bump_version() {
         fi
     fi
 
-    # Create new tag
-    git tag -a "$tag_name" -m "Release version $tag_name"
+    git tag -a "$tag_name" -m "Release $tag_name"
     echo -e "${GREEN}Created git tag: $tag_name${NC}"
     echo -e "${YELLOW}To push the tag to remote, run: git push origin $tag_name${NC}"
 }
@@ -1067,7 +1097,7 @@ case "$1" in
         ;;
 
     *)
-        echo "Usage: $0 {all|build|cpp|go|deps|clean|launch_web_recorder|bump_version} [AGORA_SDK_URL|WEB_RECORDER_VERSION|VERSION]"
+        echo "Usage: $0 {all|build|cpp|go|deps|clean|launch_web_recorder|bump_version} [AGORA_SDK_URL|WEB_RECORDER_VERSION|SEMVER]"
         echo "  all   - Install dependencies and build all services/components"
         echo "  cpp   - Build only C++ components"
         echo "  go    - Build only Go server"
@@ -1082,9 +1112,9 @@ case "$1" in
         echo ""
         echo "  launch_web_recorder [version] - Launch Web Recorder Engine container for testing"
         echo ""
-        echo "  bump_version [version] - Bump version and create git tag"
-        echo "    Without version: auto-increment patch version (x.y.z -> x.y.z+1)"
-        echo "    With version: set specific version (e.g., 1.2.0)"
+        echo "  bump_version [version] - Update pkg/version/version.go and create git tag"
+        echo "    Without argument: auto-increment patch (x.y.z -> x.y.(z+1))"
+        echo "    With argument: set explicit semantic version (e.g., 1.2.0)"
         echo ""
         echo "  images - Build all production service images (requires ./build.sh local first)"
         echo "  images-debug - Build all debug service images (with source code and symbols)"

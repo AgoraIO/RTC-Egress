@@ -312,7 +312,7 @@ func startHealthCheckServer() {
 
 func main() {
 	logger.Init("egress")
-	logger.Info("egress service starting", logger.String("version", version.GetVersion()))
+	logger.Info("egress service starting", logger.String("version", version.FullVersion()))
 
 	// Load configuration
 	if err := loadConfig(); err != nil {

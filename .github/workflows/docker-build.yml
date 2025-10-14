@@ -17,6 +17,19 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Compute build version
+      run: |
+        BASE_VERSION=$(python3 -c "import pathlib,re;text=pathlib.Path('pkg/version/version.go').read_text();m=re.search(r'Version\\s*=\\s*\"v([^\"\\n]+)\"', text);print(m.group(1) if m else '0.0.0')")
+        if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          RAW_VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION_OVERRIDE=v${RAW_VERSION}" >> "$GITHUB_ENV"
+        else
+          DATE=$(date -u +%Y%m%d)
+          SHORT_SHA=${GITHUB_SHA::7}
+          SEMVER_VERSION="${BASE_VERSION}-${DATE}+${SHORT_SHA}"
+          echo "VERSION_OVERRIDE=v${SEMVER_VERSION}" >> "$GITHUB_ENV"
+        fi
+
     - name: Build binaries in Docker
       run: |
         # Build using the builder stage from Dockerfile.prod
@@ -78,21 +91,38 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Compute image tags
+      run: |
+        IMAGE_NAME="${{ matrix.image_name }}"
+        REPO=$(echo "${{ env.REGISTRY }}/${{ github.repository }}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')
+        if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          echo "EXTRA_IMAGE_TAG=" >> "$GITHUB_ENV"
+          echo "BRANCH_IMAGE_TAG=" >> "$GITHUB_ENV"
+        else
+          BASE_VERSION=$(python3 -c "import pathlib,re;text=pathlib.Path('pkg/version/version.go').read_text();m=re.search(r'Version\\s*=\\s*\"v([^\"\\n]+)\"', text);print(m.group(1) if m else '0.0.0')")
+          DATE=$(date -u +%Y%m%d)
+          SHORT_SHA=${GITHUB_SHA::7}
+          SEMVER_VERSION="${BASE_VERSION}-${DATE}+${SHORT_SHA}"
+          SAFE_VERSION=${SEMVER_VERSION//+/-}
+          SAFE_BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
+          echo "EXTRA_IMAGE_TAG=${REPO}:${SAFE_VERSION}" >> "$GITHUB_ENV"
+          echo "BRANCH_IMAGE_TAG=${REPO}:${SAFE_BRANCH}" >> "$GITHUB_ENV"
+        fi
+
     - name: Extract metadata
       id: meta
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@v5.5.1
       with:
         images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image_name }}
         tags: |
           # Branch-based tags
           type=ref,event=branch
           type=ref,event=pr
-          # Release tags with date and short SHA (when pushing git tags like v1.2.3)
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{version}}
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}.{{minor}}
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}
-          # Date-based tags for development builds
-          type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},enable={{is_default_branch}}
+          # Release tags (when pushing git tags like v1.2.3)
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          # Commit-based tag for branch builds
+          type=sha,format=short
           # Always tag latest for main branch
           type=raw,value=latest,enable={{is_default_branch}}
           # Stable tag for latest release
@@ -105,7 +135,10 @@ jobs:
         file: cmd/${{ matrix.service }}/Dockerfile
         platforms: linux/amd64
         push: ${{ github.event_name != 'pull_request' }}
-        tags: ${{ steps.meta.outputs.tags }}
+        tags: |
+          ${{ steps.meta.outputs.tags }}
+          ${{ env.EXTRA_IMAGE_TAG != '' && env.EXTRA_IMAGE_TAG || '' }}
+          ${{ env.BRANCH_IMAGE_TAG != '' && env.BRANCH_IMAGE_TAG || '' }}
         labels: ${{ steps.meta.outputs.labels }}
         provenance: false
         sbom: false
@@ -131,21 +164,37 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Compute image tags
+      run: |
+        REPO=$(echo "${{ env.REGISTRY }}/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+        if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          echo "EXTRA_IMAGE_TAG=" >> "$GITHUB_ENV"
+          echo "BRANCH_IMAGE_TAG=" >> "$GITHUB_ENV"
+        else
+          BASE_VERSION=$(python3 -c "import pathlib,re;text=pathlib.Path('pkg/version/version.go').read_text();m=re.search(r'Version\\s*=\\s*\"v([^\"\\n]+)\"', text);print(m.group(1) if m else '0.0.0')")
+          DATE=$(date -u +%Y%m%d)
+          SHORT_SHA=${GITHUB_SHA::7}
+          SEMVER_VERSION="${BASE_VERSION}-${DATE}+${SHORT_SHA}"
+          SAFE_VERSION=${SEMVER_VERSION//+/-}
+          SAFE_BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
+          echo "EXTRA_IMAGE_TAG=${REPO}:${SAFE_VERSION}" >> "$GITHUB_ENV"
+          echo "BRANCH_IMAGE_TAG=${REPO}:${SAFE_BRANCH}" >> "$GITHUB_ENV"
+        fi
+
     - name: Extract metadata
       id: meta
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@v5.5.1
       with:
         images: ${{ env.REGISTRY }}/${{ github.repository }}
         tags: |
           # Branch-based tags
           type=ref,event=branch
           type=ref,event=pr
-          # Release tags with date and short SHA (when pushing git tags like v1.2.3)
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{version}}
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}.{{minor}}
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}
-          # Date-based tags for development builds
-          type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},enable={{is_default_branch}}
+          # Release tags (when pushing git tags like v1.2.3)
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          # Commit-based tag for branch builds
+          type=sha,format=short
           # Always tag latest for main branch
           type=raw,value=latest,enable={{is_default_branch}}
           # Stable tag for latest release
@@ -158,7 +207,10 @@ jobs:
         file: Dockerfile.prod
         platforms: linux/amd64
         push: ${{ github.event_name != 'pull_request' }}
-        tags: ${{ steps.meta.outputs.tags }}
+        tags: |
+          ${{ steps.meta.outputs.tags }}
+          ${{ env.EXTRA_IMAGE_TAG != '' && env.EXTRA_IMAGE_TAG || '' }}
+          ${{ env.BRANCH_IMAGE_TAG != '' && env.BRANCH_IMAGE_TAG || '' }}
         labels: ${{ steps.meta.outputs.labels }}
         provenance: false
         sbom: false

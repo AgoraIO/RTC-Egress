@@ -19,6 +19,19 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Compute build version
+      run: |
+        BASE_VERSION=$(python3 -c "import pathlib,re;text=pathlib.Path('pkg/version/version.go').read_text();m=re.search(r'Version\\s*=\\s*\"v([^\"\\n]+)\"', text);print(m.group(1) if m else '0.0.0')")
+        if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          RAW_VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION_OVERRIDE=v${RAW_VERSION}" >> "$GITHUB_ENV"
+        else
+          DATE=$(date -u +%Y%m%d)
+          SHORT_SHA=${GITHUB_SHA::7}
+          SEMVER_VERSION="${BASE_VERSION}-${DATE}+${SHORT_SHA}"
+          echo "VERSION_OVERRIDE=v${SEMVER_VERSION}" >> "$GITHUB_ENV"
+        fi
+
     - name: Build binaries in Docker
       run: |
         # Build using the builder stage from Dockerfile.debug
@@ -94,19 +107,37 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Compute image tags
+      if: steps.should_build.outputs.build == 'true'
+      run: |
+        IMAGE_NAME="${{ matrix.image_name }}"
+        REPO=$(echo "${{ env.REGISTRY }}/${{ github.repository }}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')
+        if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          echo "EXTRA_IMAGE_TAG=" >> "$GITHUB_ENV"
+          echo "BRANCH_IMAGE_TAG=" >> "$GITHUB_ENV"
+        else
+          BASE_VERSION=$(python3 -c "import pathlib,re;text=pathlib.Path('pkg/version/version.go').read_text();m=re.search(r'Version\\s*=\\s*\"v([^\"\\n]+)\"', text);print(m.group(1) if m else '0.0.0')")
+          DATE=$(date -u +%Y%m%d)
+          SHORT_SHA=${GITHUB_SHA::7}
+          SEMVER_VERSION="${BASE_VERSION}-${DATE}+${SHORT_SHA}"
+          SAFE_VERSION=${SEMVER_VERSION//+/-}
+          SAFE_BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
+          echo "EXTRA_IMAGE_TAG=${REPO}:${SAFE_VERSION}-debug" >> "$GITHUB_ENV"
+          echo "BRANCH_IMAGE_TAG=${REPO}:${SAFE_BRANCH}-debug" >> "$GITHUB_ENV"
+        fi
+
     - name: Extract metadata
       if: steps.should_build.outputs.build == 'true'
       id: meta
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@v5.5.1
       with:
         images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image_name }}
         tags: |
           type=ref,event=branch,suffix=-debug
           type=ref,event=pr,suffix=-debug
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{version}},suffix=-debug
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}.{{minor}},suffix=-debug
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}},suffix=-debug
-          type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},suffix=-debug,enable={{is_default_branch}}
+          type=semver,pattern={{version}},suffix=-debug
+          type=semver,pattern={{major}}.{{minor}},suffix=-debug
+          type=sha,format=short,suffix=-debug
           type=raw,value=debug,enable={{is_default_branch}}
 
     - name: Build and push service debug Docker image
@@ -117,7 +148,10 @@ jobs:
         file: cmd/${{ matrix.service }}/Dockerfile.debug
         platforms: linux/amd64
         push: true
-        tags: ${{ steps.meta.outputs.tags }}
+        tags: |
+          ${{ steps.meta.outputs.tags }}
+          ${{ env.EXTRA_IMAGE_TAG != '' && env.EXTRA_IMAGE_TAG || '' }}
+          ${{ env.BRANCH_IMAGE_TAG != '' && env.BRANCH_IMAGE_TAG || '' }}
         labels: ${{ steps.meta.outputs.labels }}
         provenance: false
         sbom: false
@@ -155,19 +189,36 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Compute image tags
+      if: steps.should_build.outputs.build == 'true'
+      run: |
+        REPO=$(echo "${{ env.REGISTRY }}/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+        if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          echo "EXTRA_IMAGE_TAG=" >> "$GITHUB_ENV"
+          echo "BRANCH_IMAGE_TAG=" >> "$GITHUB_ENV"
+        else
+          BASE_VERSION=$(python3 -c "import pathlib,re;text=pathlib.Path('pkg/version/version.go').read_text();m=re.search(r'Version\\s*=\\s*\"v([^\"\\n]+)\"', text);print(m.group(1) if m else '0.0.0')")
+          DATE=$(date -u +%Y%m%d)
+          SHORT_SHA=${GITHUB_SHA::7}
+          SEMVER_VERSION="${BASE_VERSION}-${DATE}+${SHORT_SHA}"
+          SAFE_VERSION=${SEMVER_VERSION//+/-}
+          SAFE_BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
+          echo "EXTRA_IMAGE_TAG=${REPO}:${SAFE_VERSION}-debug" >> "$GITHUB_ENV"
+          echo "BRANCH_IMAGE_TAG=${REPO}:${SAFE_BRANCH}-debug" >> "$GITHUB_ENV"
+        fi
+
     - name: Extract metadata
       if: steps.should_build.outputs.build == 'true'
       id: meta
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@v5.5.1
       with:
         images: ${{ env.REGISTRY }}/${{ github.repository }}
         tags: |
           type=ref,event=branch,suffix=-debug
           type=ref,event=pr,suffix=-debug
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{version}},suffix=-debug
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}}.{{minor}},suffix=-debug
-          type=semver,pattern={{date 'YYYYMMDD'}}{{sha}}_{{major}},suffix=-debug
-          type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}},suffix=-debug,enable={{is_default_branch}}
+          type=semver,pattern={{version}},suffix=-debug
+          type=semver,pattern={{major}}.{{minor}},suffix=-debug
+          type=sha,format=short,suffix=-debug
           type=raw,value=debug,enable={{is_default_branch}}
 
     - name: Build and push monolithic debug Docker image
@@ -178,7 +229,10 @@ jobs:
         file: Dockerfile.debug
         platforms: linux/amd64
         push: true
-        tags: ${{ steps.meta.outputs.tags }}
+        tags: |
+          ${{ steps.meta.outputs.tags }}
+          ${{ env.EXTRA_IMAGE_TAG != '' && env.EXTRA_IMAGE_TAG || '' }}
+          ${{ env.BRANCH_IMAGE_TAG != '' && env.BRANCH_IMAGE_TAG || '' }}
         labels: ${{ steps.meta.outputs.labels }}
         provenance: false
         sbom: false

@@ -275,7 +275,7 @@ func startHealthCheckServer() {
 
 func main() {
 	logger.Init("flexible-recorder")
-	logger.Info("flexible-recorder starting", logger.String("version", version.GetVersion()))
+	logger.Info("flexible-recorder starting", logger.String("version", version.FullVersion()))
 
 	// Load configuration
 	if err := loadConfig(); err != nil {

@@ -518,7 +518,7 @@ func scanAndUploadExistingFiles() {
 
 func main() {
 	logger.Init("uploader")
-	logger.Info("uploader service starting", logger.String("version", version.GetVersion()))
+	logger.Info("uploader service starting", logger.String("version", version.FullVersion()))
 
 	// Load configuration
 	if err := loadConfig(); err != nil {

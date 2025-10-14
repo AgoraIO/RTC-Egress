@@ -1,21 +1,30 @@
 package version
 
-import (
-	"os"
-	"strings"
+import "fmt"
+
+// Version metadata. Values are intended to be overridden at build time using
+// -ldflags "-X github.com/AgoraIO/RTC-Egress/pkg/version.Version=v1.2.3".
+var (
+	Version   = "v1.2.38"
+	GitCommit = "unknown"
+	BuildTime = "unknown"
 )
 
-// Version represents the current application version
-var Version = "v1.1.0"
-
-// GetVersion returns the version string
-// It first checks for a VERSION file, then falls back to the hardcoded version
+// GetVersion returns the semantic version string.
 func GetVersion() string {
-	// Try to read from VERSION file first
-	if data, err := os.ReadFile("VERSION"); err == nil {
-		return strings.TrimSpace(string(data))
-	}
-
-	// Fallback to hardcoded version
 	return Version
+}
+
+// FullVersion returns a detailed version string including build metadata.
+func FullVersion() string {
+	switch {
+	case GitCommit == "unknown" && BuildTime == "unknown":
+		return Version
+	case GitCommit == "unknown":
+		return fmt.Sprintf("%s (%s)", Version, BuildTime)
+	case BuildTime == "unknown":
+		return fmt.Sprintf("%s (%s)", Version, GitCommit)
+	default:
+		return fmt.Sprintf("%s (%s, %s)", Version, GitCommit, BuildTime)
+	}
 }

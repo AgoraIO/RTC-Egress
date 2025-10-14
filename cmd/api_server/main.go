@@ -424,7 +424,7 @@ func loadConfig() error {
 
 func main() {
 	logger.Init("api-server")
-	logger.Info("api-server starting", logger.String("version", version.GetVersion()))
+	logger.Info("api-server starting", logger.String("version", version.FullVersion()))
 
 	// Load configuration
 	if err := loadConfig(); err != nil {
