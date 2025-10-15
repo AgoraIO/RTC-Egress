@@ -110,6 +110,10 @@ func loadConfig() error {
 	}
 	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
+	if config.Redis.TaskTTL <= 60 {
+		return fmt.Errorf("redis.task_ttl must be greater than 60 seconds; got %d", config.Redis.TaskTTL)
+	}
+
 	// Validate mandatory fields (no app_id needed for flexible recorder, the page to be recorded will handle RTC credentials)
 	if strings.TrimSpace(config.Redis.Addr) == "" {
 		return fmt.Errorf("redis.addr is required for flexible recorder")

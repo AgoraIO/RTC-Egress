@@ -416,6 +416,10 @@ func loadConfig() error {
 	}
 	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
+	if config.TaskRouting.TaskTTL <= 60 {
+		return fmt.Errorf("task_routing.task_ttl must be greater than 60 seconds; got %d", config.TaskRouting.TaskTTL)
+	}
+
 	if strings.TrimSpace(config.Redis.Addr) == "" {
 		return fmt.Errorf("redis.addr is required for api server")
 	}

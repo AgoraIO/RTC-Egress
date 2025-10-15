@@ -140,6 +140,10 @@ func loadConfig() error {
 	}
 	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
+	if config.Redis.TaskTTL <= 60 {
+		return fmt.Errorf("redis.task_ttl must be greater than 60 seconds; got %d", config.Redis.TaskTTL)
+	}
+
 	// Validate mandatory AGORA_APP_ID (managed mode - AGORA_ACCESS_TOKEN comes from requests)
 	if strings.TrimSpace(config.Agora.AppID) == "" {
 		return fmt.Errorf("agora.app_id is required (set via environment variable AGORA_APP_ID or in egress_config.yaml)")
