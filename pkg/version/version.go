@@ -8,7 +8,7 @@ import (
 // Version metadata. Values are intended to be overridden at build time using
 // -ldflags "-X github.com/AgoraIO/RTC-Egress/pkg/version.Version=v1.2.3".
 var (
-	Version   = "v1.2.39"
+	Version   = "v1.2.40"
 	GitCommit = "unknown"
 	BuildTime = "unknown"
 )
