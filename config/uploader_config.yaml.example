@@ -3,9 +3,7 @@
 
 server:
   health_port: 8184   # Health check port (different from other services)
-
-pod:
-  region: "us-west-1" # Pod region identifier
+  region: "us-west-1" # Server region identifier
 
 # Redis Configuration (optional - for health monitoring only)
 redis:
@@ -75,6 +73,6 @@ concurrency:
 #       readOnly: true             # Read-only access to recording outputs
 
 # Environment variable overrides:
-# REDIS_ADDR, REDIS_PASSWORD, POD_REGION
+# REDIS_ADDR, REDIS_PASSWORD, SERVER_REGION
 # S3_BUCKET, S3_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT
 # WATCHER_POLL_INTERVAL, WATCHER_MAX_RETRIES, WATCHER_DELETE_AFTER

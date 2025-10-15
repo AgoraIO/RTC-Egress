@@ -24,11 +24,9 @@ import (
 // Config matches uploader_config.yaml.example structure
 type Config struct {
 	Server struct {
-		HealthPort int `mapstructure:"health_port"`
+		HealthPort int    `mapstructure:"health_port"`
+		Region     string `mapstructure:"region"`
 	} `mapstructure:"server"`
-	Pod struct {
-		Region string `mapstructure:"region"`
-	} `mapstructure:"pod"`
 	Redis struct {
 		Addr     string `mapstructure:"addr"`
 		Password string `mapstructure:"password"`
@@ -111,7 +109,7 @@ func loadConfig() error {
 
 	// Set environment variable bindings
 	// Set environment variable bindings
-	viper.BindEnv("pod.region", "POD_REGION")
+	viper.BindEnv("server.region", "SERVER_REGION")
 	viper.BindEnv("s3.bucket", "S3_BUCKET")
 	viper.BindEnv("s3.region", "S3_REGION")
 	viper.BindEnv("s3.access_key", "S3_ACCESS_KEY")

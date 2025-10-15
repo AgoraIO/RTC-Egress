@@ -37,13 +37,11 @@ type Config struct {
 		DB       int    `mapstructure:"db"`
 	} `mapstructure:"redis"`
 	Server struct {
-		Port       int `mapstructure:"port"`
-		HealthPort int `mapstructure:"health_port"`
+		Port       int    `mapstructure:"port"`
+		HealthPort int    `mapstructure:"health_port"`
+		Region     string `mapstructure:"region"`
+		TaskTTL    int    `mapstructure:"task_ttl"`
 	} `mapstructure:"server"`
-	TaskRouting struct {
-		DefaultRegion string `mapstructure:"default_region"`
-		TaskTTL       int    `mapstructure:"task_ttl"`
-	} `mapstructure:"task_routing"`
 }
 
 type Task struct {
@@ -70,8 +68,8 @@ func NewAPIServer() *APIServer {
 		config.Redis.Addr,
 		config.Redis.Password,
 		config.Redis.DB,
-		config.TaskRouting.TaskTTL,
-		config.TaskRouting.DefaultRegion,
+		config.Server.TaskTTL,
+		config.Server.Region,
 	)
 
 	return &APIServer{
@@ -366,14 +364,6 @@ func (s *APIServer) healthCheck(c *gin.Context) {
 	})
 }
 
-func getRegion() string {
-	region := os.Getenv("POD_REGION")
-	if region == "" {
-		return "us-west-1"
-	}
-	return region
-}
-
 func generateRandomString(length int) string {
 	// Simple random string generation
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -406,6 +396,8 @@ func loadConfig() error {
 	viper.BindEnv("redis.db", "REDIS_DB")
 	viper.BindEnv("server.port", "API_PORT")
 	viper.BindEnv("server.health_port", "HEALTH_PORT")
+	viper.BindEnv("server.region", "SERVER_REGION")
+	viper.BindEnv("server.task_ttl", "TASK_TTL")
 
 	if err := viper.ReadInConfig(); err != nil {
 		logger.Warn("Config file not found, using environment variables and defaults", logger.ErrorField(err))
@@ -416,8 +408,8 @@ func loadConfig() error {
 	}
 	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
-	if config.TaskRouting.TaskTTL <= 60 {
-		return fmt.Errorf("task_routing.task_ttl must be greater than 60 seconds; got %d", config.TaskRouting.TaskTTL)
+	if config.Server.TaskTTL <= 60 {
+		return fmt.Errorf("server.task_ttl must be greater than 60 seconds; got %d", config.Server.TaskTTL)
 	}
 
 	if strings.TrimSpace(config.Redis.Addr) == "" {

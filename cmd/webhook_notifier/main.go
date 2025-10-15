@@ -31,11 +31,9 @@ type Config struct {
 		DB       int    `mapstructure:"db"`
 	} `mapstructure:"redis"`
 	Server struct {
-		HealthPort int `mapstructure:"health_port"`
+		HealthPort int    `mapstructure:"health_port"`
+		Region     string `mapstructure:"region"`
 	} `mapstructure:"server"`
-	Pod struct {
-		Region string `mapstructure:"region"`
-	} `mapstructure:"pod"`
 	Webhook struct {
 		URL               string   `mapstructure:"url"`
 		Timeout           int      `mapstructure:"timeout"` // seconds
@@ -76,7 +74,7 @@ func loadConfig() error {
 	viper.BindEnv("redis.addr", "REDIS_ADDR")
 	viper.BindEnv("redis.password", "REDIS_PASSWORD")
 	viper.BindEnv("redis.db", "REDIS_DB")
-	viper.BindEnv("pod.region", "POD_REGION")
+	viper.BindEnv("server.region", "SERVER_REGION")
 	viper.BindEnv("webhook.url", "WEBHOOK_URL")
 	viper.BindEnv("webhook.auth_token", "WEBHOOK_AUTH_TOKEN")
 
@@ -137,7 +135,7 @@ func loadConfig() error {
 		logger.String("redis_addr", config.Redis.Addr),
 		logger.Int("redis_db", config.Redis.DB),
 		logger.String("webhook_url", config.Webhook.URL),
-		logger.String("pod_region", config.Pod.Region),
+		logger.String("server_region", config.Server.Region),
 		logger.String("notify_states", fmt.Sprint(config.Webhook.NotifyStates)),
 		logger.Int("max_retries", config.Webhook.MaxRetries))
 

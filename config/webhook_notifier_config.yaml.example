@@ -9,9 +9,7 @@ redis:
 
 server:
   health_port: 8185   # Health check port (different from other services)
-
-pod:
-  region: "us-west-1" # Pod region identifier
+  region: "us-west-1" # Server region identifier
 
 # Webhook notification configuration
 webhook:
@@ -34,4 +32,4 @@ webhook:
   delivered_ttl: 172800          # 48 hours
 
 # Environment variable overrides:
-# REDIS_ADDR, REDIS_PASSWORD, POD_REGION, WEBHOOK_URL, WEBHOOK_AUTH_TOKEN
+# REDIS_ADDR, REDIS_PASSWORD, SERVER_REGION, WEBHOOK_URL, WEBHOOK_AUTH_TOKEN

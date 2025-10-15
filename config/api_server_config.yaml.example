@@ -9,15 +9,12 @@ redis:
 server:
   port: 8091          # Main API port
   health_port: 8191   # Health check port
-
-# Task routing configuration
-task_routing:
-  default_region: ""         # empty for global
-  task_ttl: 172800           # Task TTL in seconds (48 hours)
+  region: ""         # empty for global
+  task_ttl: 172800    # Task TTL in seconds (48 hours)
 
 # Layout-based queue routing:
 # - freestyle → egress:web:record:*, egress:web:snapshot:*  
 # - flat/spotlight/customized → egress:record:*, egress:snapshot:*
 
 # Environment variable overrides:
-# REDIS_ADDR, REDIS_PASSWORD, API_PORT, HEALTH_PORT, POD_REGION
+# REDIS_ADDR, REDIS_PASSWORD, API_PORT, HEALTH_PORT, SERVER_REGION

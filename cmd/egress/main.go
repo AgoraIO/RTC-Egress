@@ -22,19 +22,17 @@ import (
 )
 
 type Config struct {
-	Pod struct {
-		Region     string `mapstructure:"region"`
-		NumWorkers int    `mapstructure:"workers"`
-	} `mapstructure:"pod"`
 	Server struct {
-		HealthPort int `mapstructure:"health_port"`
-	} `mapstructure:"server"`
-	Redis struct {
-		Addr           string   `mapstructure:"addr"`
-		Password       string   `mapstructure:"password"`
-		DB             int      `mapstructure:"db"`
+		HealthPort     int      `mapstructure:"health_port"`
+		Region         string   `mapstructure:"region"`
+		Workers        int      `mapstructure:"workers"`
 		TaskTTL        int      `mapstructure:"task_ttl"`
 		WorkerPatterns []string `mapstructure:"worker_patterns"`
+	} `mapstructure:"server"`
+	Redis struct {
+		Addr     string `mapstructure:"addr"`
+		Password string `mapstructure:"password"`
+		DB       int    `mapstructure:"db"`
 	} `mapstructure:"redis"`
 	Agora struct {
 		AppID       string `mapstructure:"app_id"`
@@ -124,8 +122,9 @@ func loadConfig() error {
 	viper.BindEnv("redis.addr", "REDIS_ADDR")
 	viper.BindEnv("redis.password", "REDIS_PASSWORD")
 	viper.BindEnv("redis.db", "REDIS_DB")
-	viper.BindEnv("pod.region", "POD_REGION")
-	viper.BindEnv("pod.workers", "POD_WORKERS")
+	viper.BindEnv("server.region", "SERVER_REGION")
+	viper.BindEnv("server.workers", "SERVER_WORKERS")
+	viper.BindEnv("server.task_ttl", "TASK_TTL")
 
 	// Read config file
 	if err := viper.ReadInConfig(); err != nil {
@@ -140,8 +139,8 @@ func loadConfig() error {
 	}
 	config.Redis.Addr = utils.ResolveRedisAddr(config.Redis.Addr)
 
-	if config.Redis.TaskTTL <= 60 {
-		return fmt.Errorf("redis.task_ttl must be greater than 60 seconds; got %d", config.Redis.TaskTTL)
+	if config.Server.TaskTTL <= 60 {
+		return fmt.Errorf("server.task_ttl must be greater than 60 seconds; got %d", config.Server.TaskTTL)
 	}
 
 	// Validate mandatory AGORA_APP_ID (managed mode - AGORA_ACCESS_TOKEN comes from requests)
@@ -176,8 +175,8 @@ func loadConfig() error {
 	}
 
 	// Set default worker count if not specified
-	if config.Pod.NumWorkers <= 0 {
-		config.Pod.NumWorkers = 4 // Default to 4 workers
+	if config.Server.Workers <= 0 {
+		config.Server.Workers = 4 // Default to 4 workers
 	}
 
 	// Create directories only if not in container AND they don't exist
@@ -223,8 +222,8 @@ func initRedisQueue() error {
 		config.Redis.Addr,
 		config.Redis.Password,
 		config.Redis.DB,
-		config.Redis.TaskTTL,
-		config.Pod.Region,
+		config.Server.TaskTTL,
+		config.Server.Region,
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -234,10 +233,10 @@ func initRedisQueue() error {
 		return fmt.Errorf("failed to connect to Redis: %v", err)
 	}
 
-	if config.Pod.Region != "" {
-		logger.Info("Pod region configured", logger.String("pod_region", config.Pod.Region), logger.Int("pod_workers", config.Pod.NumWorkers))
+	if config.Server.Region != "" {
+		logger.Info("Server region configured", logger.String("server_region", config.Server.Region), logger.Int("server_workers", config.Server.Workers))
 	} else {
-		logger.Warn("Pod region not configured, will handle all regional queues", logger.Int("pod_workers", config.Pod.NumWorkers))
+		logger.Warn("Server region not configured, will handle all regional queues", logger.Int("server_workers", config.Server.Workers))
 	}
 
 	logger.Info("Connected to Redis", logger.String("redis_addr", config.Redis.Addr))
@@ -247,7 +246,7 @@ func initRedisQueue() error {
 
 func startWorkerManager() {
 	go func() {
-		egress.ManagerMainWithRedisAndHealth(redisQueue, healthManager, config.Pod.NumWorkers, config.Redis.WorkerPatterns)
+		egress.ManagerMainWithRedisAndHealth(redisQueue, healthManager, config.Server.Workers, config.Server.WorkerPatterns)
 	}()
 }
 
@@ -268,10 +267,10 @@ func initHealthManager() error {
 	podID := utils.GenerateRandomID(12)
 	appVersion := version.GetVersion()
 
-	healthManager = health.NewHealthManager(redisQueue.Client(), podID, config.Pod.Region, appVersion, int(egress.ModeNative))
+	healthManager = health.NewHealthManager(redisQueue.Client(), podID, config.Server.Region, appVersion, int(egress.ModeNative))
 
 	// Register this pod
-	if err := healthManager.RegisterPod(config.Pod.NumWorkers); err != nil {
+	if err := healthManager.RegisterPod(config.Server.Workers); err != nil {
 		return fmt.Errorf("failed to register pod: %v", err)
 	}
 
@@ -280,7 +279,7 @@ func initHealthManager() error {
 
 	logger.Info("HealthManager initialized",
 		logger.String("pod_id", podID),
-		logger.String("pod_region", config.Pod.Region))
+		logger.String("server_region", config.Server.Region))
 	return nil
 }
 

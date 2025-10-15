@@ -3,20 +3,18 @@
 
 server:
   health_port: 8193   # Health check port (different from egress)
-
-pod:
-  region: "us-west-1" # Pod region for task queue routing
+  region: "us-west-1" # Server region for task queue routing
   workers: 1          # Number of coordination processes (web recorder engine does the work)
+  task_ttl: 172800    # Task TTL in seconds (48 hours)
+  worker_patterns:
+    - "egress:web:*"         # Global web recording tasks
+    - "egress:*:web:*"       # Regional web recording tasks
 
 # Redis Configuration
 redis:
   addr: "localhost:6379" # Redis server address
   password: ""               # Redis password (leave empty if no password)
   db: 0                      # Redis database number
-  task_ttl: 172800           # Task TTL in seconds (48 hours)
-  worker_patterns:           # Web worker subscription patterns
-    - "egress:web:*"         # Global web recording tasks  
-    - "egress:*:web:*"       # Regional web recording tasks
 
 # Web Recorder configuration
 web_recorder:
@@ -39,6 +37,6 @@ web_recorder:
   max_retries: 3                     # Max retry attempts
 
 # Environment variable overrides:
-# REDIS_ADDR, REDIS_PASSWORD, POD_REGION, POD_WORKERS
+# REDIS_ADDR, REDIS_PASSWORD, SERVER_REGION, SERVER_WORKERS
 # WEB_RECORDER_BASE_URL
 # 

@@ -138,7 +138,7 @@ services:
       - AGORA_APP_ID=${AGORA_APP_ID:-}
       - WEB_RECORDER_BASE_URL=http://web_recorder:8001
       - WEB_RECORDER_AUTH_TOKEN=${WEB_RECORDER_AUTH_TOKEN:-}
-      - POD_REGION=${POD_REGION:-us-west-1}
+      - SERVER_REGION=${SERVER_REGION:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     restart: unless-stopped
     healthcheck:
